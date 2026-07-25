@@ -8,7 +8,7 @@ This document provides a technical deep-dive into the hardware architecture, mem
 
 ```mermaid
 flowchart TD
-    subgraph CPU Core ["OKI MSM66207 Register File"]
+    subgraph CPUCore ["OKI MSM66207 Register File"]
         A["Accumulator (A)<br/>16-bit / 8-bit (DD Flag)"]
         DP["Data Pointer (DP)<br/>16-bit"]
         X1["Index Register 1 (X1)<br/>16-bit"]
@@ -19,7 +19,7 @@ flowchart TD
         PSW["Processor Status Word (PSW)<br/>[ZF | CF | HC | DD | IE]"]
     end
 
-    subgraph Memory Space ["Memory Bus Mapping"]
+    subgraph MemorySpace ["Memory Bus Mapping"]
         CodeSpace["32KB Code Space (EPROM)<br/>0x0000 - 0x7FFF"]
         DataSpace["4KB Data Space (RAM / SFRs)<br/>0x0000 - 0x0FFF"]
     end
@@ -31,8 +31,8 @@ flowchart TD
         Ports["Digital IO Ports: P0, P1, P2, P3"]
     end
 
-    CPU Core <--> Memory Space
-    Memory Space <--> SFRs
+    CPUCore <--> MemorySpace
+    MemorySpace <--> SFRs
 ```
 
 ### CPU Specifications
