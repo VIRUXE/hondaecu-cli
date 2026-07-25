@@ -164,14 +164,11 @@ impl Bus {
         } else if addr == SFR_PWMR1 || addr == SFR_PWMR1 + 1 {
             let pwm1 = self.read_data_u16(SFR_PWMR1);
             self.iacv_duty_cycle_pct = ((pwm1 as f32) / 65535.0) * 100.0;
-        } else if addr == SFR_P2 || addr == SFR_P3 || addr == 0x005E || addr == 0x004A || addr == 0x0060 {
-            // Check VTEC Solenoid engagement bit (Bit 1 of P3, Bit 2 of P2, Bit 3 of 0x005E, Bit 0 of 0x004A, or Bit 2 of 0x0060)
+        } else if addr == SFR_P2 || addr == SFR_P3 {
+            // Pure Hardware Port Pin Sensing: VTEC Solenoid Driver Transistor (Bit 2 of P2 or Bit 1 of P3)
             let p2 = self.ram[SFR_P2 as usize];
             let p3 = self.ram[SFR_P3 as usize];
-            let ram_5e = self.ram[0x005E];
-            let ram_4a = self.ram[0x004A];
-            let ram_60 = self.ram[0x0060];
-            self.vtec_solenoid_active = (p2 & (1 << 2)) != 0 || (p3 & (1 << 1)) != 0 || (ram_5e & (1 << 3)) != 0 || (ram_4a & (1 << 0)) != 0 || (ram_60 & (1 << 2)) != 0;
+            self.vtec_solenoid_active = (p2 & (1 << 2)) != 0 || (p3 & (1 << 1)) != 0;
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }
