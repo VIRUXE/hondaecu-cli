@@ -2,3 +2,5 @@
 *.tar.gz
 *.zip
 RELEASE_NOTES.md
+*.csv
+
