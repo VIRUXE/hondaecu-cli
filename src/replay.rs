@@ -186,9 +186,204 @@ impl ReplayEngine {
         let mut frames = Vec::new();
 
         match preset {
-            // 1. Overrun Deceleration Fuel Cut-Off (DFCO) Scenario
+            // =========================================================================
+            // FAULT & ERROR INJECTION SCENARIOS (Testing DTCs & Safety Failsafes)
+            // =========================================================================
+
+            // Error Scenario 1: MAP Sensor Hose Disconnect / Ground Short Under Load (DTC 3 / DTC 5)
+            "error-map-failure" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_failed = i >= 15;
+                    let map = if is_failed { 0.0 } else { 45.0 + (i as f64 * 1.5) };
+                    let note = if is_failed {
+                        "ERROR: MAP SENSOR DISCONNECT (0.0 kPa -> DTC 3 & DTC 5 Triggered!)"
+                    } else {
+                        "Normal Acceleration Under Load"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 3500.0,
+                        map_kpa: map,
+                        tps_pct: 45.0,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.45,
+                        vbatt_volts: 14.1,
+                        speed_kmh: 60.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 2: ECT Engine Coolant Sensor Open Circuit / Severe Overheat (DTC 6)
+            "error-ect-overheat" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_failed = i >= 15;
+                    let ect = if is_failed { 135.0 } else { 85.0 }; // Extreme temperature / disconnected thermistor
+                    let note = if is_failed {
+                        "ERROR: ECT SENSOR OPEN CIRCUIT / OVERHEAT (135°C -> DTC 6 & Thermal Safety Retard Active!)"
+                    } else {
+                        "Normal Engine Temperature"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 3000.0,
+                        map_kpa: 40.0,
+                        tps_pct: 20.0,
+                        ect_celsius: ect,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.45,
+                        vbatt_volts: 14.2,
+                        speed_kmh: 50.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 3: TPS Sensor Short Circuit under High MAP (DTC 7)
+            "error-tps-short" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_shorted = i >= 15;
+                    let tps = if is_shorted { 0.0 } else { 80.0 }; // TPS drops to 0% while MAP is 95 kPa
+                    let note = if is_shorted {
+                        "ERROR: TPS GROUND SHORT (0% TPS vs 95 kPa MAP -> DTC 7 Triggered!)"
+                    } else {
+                        "High Load Throttle"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 4200.0,
+                        map_kpa: 95.0,
+                        tps_pct: tps,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.85,
+                        vbatt_volts: 14.0,
+                        speed_kmh: 90.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 4: Distributor CKP Sensor Signal Dropout (DTC 4 / DTC 8)
+            "error-ckp-distributor-loss" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_loss = i >= 20;
+                    let note = if is_loss {
+                        "ERROR: DISTRIBUTOR CKP PULSE DROPOUT (RPM Signal Lost -> DTC 4 & Emergency Fuel Cut!)"
+                    } else {
+                        "Cruising at 4500 RPM"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: if is_loss { 0.0 } else { 4500.0 },
+                        map_kpa: 50.0,
+                        tps_pct: 30.0,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.45,
+                        vbatt_volts: 14.1,
+                        speed_kmh: 80.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 5: Low Oil Pressure VTEC Spool Valve Fault (DTC 22)
+            "error-vtec-oil-pressure-loss" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_vtec_rpm = i >= 15;
+                    let rpm = if is_vtec_rpm { 5500.0 } else { 4000.0 };
+                    let note = if is_vtec_rpm {
+                        "ERROR: VTEC COMMANDED BUT OIL PRESSURE SWITCH OPEN (0 psi -> DTC 22 Triggered!)"
+                    } else {
+                        "Low Cam Acceleration"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm,
+                        map_kpa: 95.0,
+                        tps_pct: 100.0,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.85,
+                        vbatt_volts: 14.0,
+                        speed_kmh: 100.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 6: Alternator Failure & Severe Battery Voltage Dip (DTC 20)
+            "error-alt-low-voltage" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_dip = i >= 15;
+                    let vbatt = if is_dip { 8.5 } else { 14.2 };
+                    let note = if is_dip {
+                        "ERROR: ALTERNATOR BROWNOUT (8.5V Vbatt -> DTC 20 & Max Dead-Time Pulse Width Spike!)"
+                    } else {
+                        "Normal Alternator Output (14.2V)"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 1200.0,
+                        map_kpa: 35.0,
+                        tps_pct: 0.0,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: 0.45,
+                        vbatt_volts: vbatt,
+                        speed_kmh: 0.0,
+                        note,
+                    });
+                }
+            }
+
+            // Error Scenario 7: Stuck Lean Primary O2 Sensor (DTC 1 & DTC 43)
+            "error-o2-lean-stuck" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_stuck = i >= 10;
+                    let o2 = if is_stuck { 0.02 } else { 0.45 }; // 0.02V stuck lean
+                    let note = if is_stuck {
+                        "ERROR: O2 SENSOR STUCK LEAN (0.02V -> Closed-Loop Trim Maxed out -> DTC 1 & DTC 43 Triggered!)"
+                    } else {
+                        "Normal Closed Loop Operation"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 2800.0,
+                        map_kpa: 40.0,
+                        tps_pct: 20.0,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: o2,
+                        vbatt_volts: 14.1,
+                        speed_kmh: 50.0,
+                        note,
+                    });
+                }
+            }
+
+            // =========================================================================
+            // NORMAL OPERATING SCENARIOS
+            // =========================================================================
+
+            // Overrun Deceleration Fuel Cut-Off (DFCO) Scenario
             "overrun-decel" => {
-                // High RPM WOT (6500 RPM) -> Throttle Snap Closed (0% TPS) -> Engine Braking Decel down to 800 RPM
                 for i in 0..=80 {
                     let ms = i * 50;
                     let pct = i as f64 / 80.0;
@@ -210,7 +405,7 @@ impl ReplayEngine {
                         tps_pct: tps,
                         ect_celsius: 88.0,
                         iat_celsius: 30.0,
-                        o2_volts: if rpm > 1100.0 && tps == 0.0 { 0.02 } else { 0.45 }, // Lean/Zero O2 during fuel cut
+                        o2_volts: if rpm > 1100.0 && tps == 0.0 { 0.02 } else { 0.45 },
                         vbatt_volts: 14.2,
                         speed_kmh: (rpm / 6500.0) * 120.0,
                         note,
@@ -218,7 +413,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 2. Downhill Engine Braking with Intermittent Heel-Toe Blips
+            // Downhill Engine Braking
             "overrun-downhill" => {
                 for i in 0..=100 {
                     let ms = i * 50;
@@ -244,7 +439,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 3. Accel Stomp / Rapid TPS Tip-In Transient Enrichment
+            // Accel Stomp
             "accel-stomp" => {
                 for i in 0..=50 {
                     let ms = i * 50;
@@ -277,7 +472,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 4. Drag Strip 1/4 Mile Pass (Launch Control 2-Step -> Gear Shifts)
+            // Drag Pass
             "drag-pass" => {
                 for i in 0..=120 {
                     let ms = i * 50;
@@ -314,13 +509,13 @@ impl ReplayEngine {
                 }
             }
 
-            // 5. Electrical Load & AC Compressor Idle Load Compensation
+            // Electrical Load Idle
             "electrical-load-idle" => {
                 for i in 0..=60 {
                     let ms = i * 100;
                     let ac_on = (i / 15) % 2 == 1;
-                    let vbatt = if ac_on { 12.1 } else { 14.2 }; // Voltage dip when AC/cooling fan kicks in
-                    let map = if ac_on { 42.0 } else { 30.0 };   // Engine load increases
+                    let vbatt = if ac_on { 12.1 } else { 14.2 };
+                    let map = if ac_on { 42.0 } else { 30.0 };
                     let note = if ac_on { "AC Compressor ON (IACV Duty Spike & Idle Compensation)" } else { "Idle Normal (AC OFF)" };
 
                     frames.push(LogFrame {
@@ -338,7 +533,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 6. Heat Soak Hot Restart (98°C ECT, 60°C IAT)
+            // Heat Soak Start
             "heat-soak-start" => {
                 for i in 0..=40 {
                     let ms = i * 100;
@@ -362,7 +557,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 7. Dyno Pull (Default)
+            // Dyno Pull
             "dyno-pull" => {
                 for i in 0..=100 {
                     let ms = i * 50;
@@ -386,7 +581,7 @@ impl ReplayEngine {
                 }
             }
 
-            // 8. Cold Start
+            // Cold Start
             "cold-start" => {
                 for i in 0..=100 {
                     let ms = i * 100;

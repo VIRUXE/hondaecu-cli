@@ -1,10 +1,26 @@
-# Honda OBD1 ECU Real-Life Engine Runtime Scenarios & Playback Guide
+# Honda OBD1 ECU Real-Life Engine Runtime Scenarios & Fault Injection Playback Guide
 
 `hondaecu-cli` features a real-time ECU log playback and scripted trace engine (`hondaecu-cli replay`). This subsystem feeds dynamic sensor conditions into the virtual OKI MSM66207 CPU and hardware peripherals frame-by-frame, observing how the ROM binary calculates fuel pulse widths ($T_{inj}$), ignition advance ($\theta_{spark}$), idle air control duty cycle (IACV), VTEC solenoid activation, and Diagnostic Trouble Codes (DTCs).
 
 ---
 
 ## 📌 Available Scenario Presets
+
+### ⚠️ Fault & Error Injection Presets (Testing DTC Diagnostics & Failsafes)
+
+| Preset Name | Simulated Sensor Fault / Anomaly | Diagnostic DTC Triggered | ROM Emergency Failsafe & Limp Mode |
+|---|---|---|---|
+| **`error-map-failure`** | MAP sensor vacuum line pops off under load (0.0 kPa) | **DTC 3** (MAP High/Low) & **DTC 5** (MAP Range) | Enters Speed-Density Alpha-N fallback using TPS sensor matrix. |
+| **`error-ect-overheat`** | ECT sensor open circuit / thermistor unplugged (135°C+) | **DTC 6** (ECT Temp Sensor) | Initiates **Thermal Safety Ignition Retard** (-10° BTDC) & rich coolant protection. |
+| **`error-tps-short`** | TPS grounds out (0% TPS) while engine MAP is at 95 kPa | **DTC 7** (TPS Throttle Sensor Bounds) | Defaults TPS to fail-safe 50% value to prevent severe lean stumble. |
+| **`error-ckp-distributor-loss`** | Crankshaft CKP distributor pulse drops out at 4500 RPM | **DTC 4** (CKP Position Sensor) | Emergency fuel cut-off & ignition spark disable to protect engine. |
+| **`error-vtec-oil-pressure-loss`** | VTEC commanded at 5500 RPM but oil pressure switch stays open (0 psi) | **DTC 22** (VTEC Pressure Switch) | Disengages VTEC solenoid output; limits engine revs to low-cam profile. |
+| **`error-alt-low-voltage`** | Alternator brownout / dying battery voltage (Vbatt drops to 8.5V) | **DTC 20** (ELD / Electrical Load) | Injector dead-time compensation ($T_{dead}$) spikes to maximum pulse width. |
+| **`error-o2-lean-stuck`** | Primary O2 sensor stuck at 0.02V lean despite +25% fuel trim | **DTC 1** (O2 Sensor) & **DTC 43** (Fuel System) | Disables closed-loop fuel correction; locks ECU into open-loop safety tables. |
+
+---
+
+### 🏎️ Normal Driving & Performance Presets
 
 | Preset Name | Description & Real-World Condition | Primary ECU Physics Tested |
 |---|---|---|
@@ -20,66 +36,52 @@
 
 ---
 
-## 🚀 Detailed Scenario Breakdown & ECU Operation
+## 🛠️ Detailed Fault & Error Breakdown
 
-### 1. Overrun Deceleration Fuel Cut-Off (`overrun-decel`)
-
-#### Real-World Physics
-When the driver lets off the gas pedal at high RPM (e.g., shifting down or engine braking into a turn), throttle position drops to 0% and intake manifold vacuum spikes (MAP drops to 18–22 kPa).
-
-#### ECU ROM Operation
-1. **Fuel Cut Active**: When `TPS == 0%` and `RPM > 1100 RPM`, the ECU cuts fuel injection completely ($T_{inj} = 0\,\mu\text{s}$). This improves fuel economy and engine braking efficiency.
-2. **Re-injection Catch**: As engine speed decelerates to ~1100 RPM, the ECU re-initiates fuel injection to prevent the engine from stalling as it settles back into idle (800 RPM).
+### 1. MAP Sensor Disconnect (`error-map-failure`)
+- **Fault Injection**: At $t = 750\,\text{ms}$, MAP sensor signal drops to $0.0\,\text{kPa}$ while engine is under $45\%$ TPS load.
+- **ROM Diagnostic Action**: Evaluated by ADC ISR. Detects voltage $<0.2\,\text{V}$ ($<102$ ADC counts).
+- **DTC Triggered**: **DTC 3** (MAP High/Low) & **DTC 5** (MAP Circuit Range).
+- **Failsafe**: Switches fuel calculation from Speed-Density (MAP vs RPM) to Alpha-N (TPS vs RPM).
 
 ```bash
-cargo run --release -- replay P28-230.bin overrun-decel
+cargo run --release -- replay P28-230.bin error-map-failure
 ```
 
 ---
 
-### 2. Accel Tip-In Enrichment (`accel-stomp`)
-
-#### Real-World Physics
-Opening the throttle plate rapidly causes a sudden drop in manifold vacuum and a rush of air into the intake plenum. Because liquid fuel clings to the intake manifold walls (wall wetting effect), the air moves faster than the fuel film.
-
-#### ECU ROM Operation
-The ECU detects the rapid rate of change of throttle position ($\Delta\text{TPS}$) and manifold pressure ($\Delta\text{MAP}$). It immediately adds an extra burst of fuel width ($T_{accel}$) on top of the base fuel lookup to prevent a lean stumble or hesitation.
+### 2. Coolant Sensor Open / Overheat (`error-ect-overheat`)
+- **Fault Injection**: At $t = 750\,\text{ms}$, ECT thermistor voltage drops $<0.2\,\text{V}$ (reading $>135^\circ\text{C}$).
+- **ROM Diagnostic Action**: Evaluated by ADC ISR.
+- **DTC Triggered**: **DTC 6** (Engine Coolant Temperature Circuit).
+- **Failsafe**: Initiates safety ignition retard (retards spark $-10^\circ$ BTDC) and enriches fuel to prevent engine melt.
 
 ```bash
-cargo run --release -- replay P28-230.bin accel-stomp
+cargo run --release -- replay P28-230.bin error-ect-overheat
 ```
 
 ---
 
-### 3. Drag Strip 1/4 Mile Pass (`drag-pass`)
-
-#### Real-World Physics
-Simulates a full quarter-mile drag race from a stationary launch to the trap finish line.
-
-#### ECU ROM Operation
-- **0.0s – 1.0s**: Vehicle stationary (`VSS = 0`), throttle 100%. 2-step launch limiter holds engine at 4500 RPM.
-- **1.0s – 3.0s**: 1st gear full acceleration.
-- **3.0s – 3.2s**: Quick clutch lift for 1st → 2nd gear shift. MAP drops, fuel cuts briefly.
-- **3.2s – 5.5s**: 2nd gear pull. RPM passes 4800 RPM; ECU energizes VTEC solenoid output.
-- **8.5s+**: Finish line trap. Throttle snaps closed at 8100 RPM; ECU enters high-RPM overrun fuel cut.
+### 3. VTEC Low Oil Pressure Fault (`error-vtec-oil-pressure-loss`)
+- **Fault Injection**: Engine revs to $5,500\,\text{RPM}$ under WOT. ECU energizes VTEC spool valve solenoid output, but VTEC oil pressure switch contacts fail to close ($0\,\text{psi}$ pressure).
+- **ROM Diagnostic Action**: Evaluated after 200 ms hysteresis timer.
+- **DTC Triggered**: **DTC 22** (VTEC Oil Pressure Switch Fault).
+- **Failsafe**: De-energizes VTEC spool valve; locks rev limiter to low-cam profile.
 
 ```bash
-cargo run --release -- replay P28-230.bin drag-pass drag_output.csv
+cargo run --release -- replay P28-230.bin error-vtec-oil-pressure-loss
 ```
 
 ---
 
-### 4. Electrical Load & AC Compensation (`electrical-load-idle`)
-
-#### Real-World Physics
-When the AC compressor clutch engages or headlights turn on, the mechanical load on the engine increases and battery voltage drops (14.2V → 12.1V).
-
-#### ECU ROM Operation
-1. **IACV Duty Cycle Spike**: To maintain a steady 800 RPM idle, the ECU increases the Idle Air Control Valve (IACV) PWM duty cycle from ~30% to ~55-70%.
-2. **Battery Dead-Time Trim**: Lower battery voltage slows down injector pintle opening times. The ECU adds dead-time compensation ($T_{dead}$) to prevent the engine from running lean.
+### 4. Primary O2 Stuck Lean (`error-o2-lean-stuck`)
+- **Fault Injection**: O2 sensor reads $0.02\,\text{V}$ lean continuously. Closed-loop fuel trim ramps up to maximum (+25%).
+- **ROM Diagnostic Action**: Evaluated after closed-loop integration timer expires.
+- **DTC Triggered**: **DTC 1** (Primary O2 Sensor) & **DTC 43** (Fuel System Lean Limit Exceeded).
+- **Failsafe**: Disables closed-loop feedback; locks ECU into safe open-loop base tables.
 
 ```bash
-cargo run --release -- replay P28-230.bin electrical-load-idle
+cargo run --release -- replay P28-230.bin error-o2-lean-stuck
 ```
 
 ---
