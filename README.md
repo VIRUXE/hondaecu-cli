@@ -1,6 +1,6 @@
 # Honda OBD1 ECU (OKI MSM66207) Emulator & ROM Testing Suite in Rust
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org/)
 [![Tests](https://img.shields.io/badge/tests-85%2F85%20passed-brightgreen.svg)]()
 [![Performance](https://img.shields.io/badge/speed-9%2B%20MIPS-blueviolet.svg)]()
@@ -173,4 +173,4 @@ hondaecu-cli/
 
 ## 📜 License
 
-Distributed under the MIT License. See [`LICENSE`](LICENSE) for details.
+This is free and unencumbered software released into the public domain under [The Unlicense](LICENSE).

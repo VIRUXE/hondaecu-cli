@@ -2,5 +2,12 @@
 name = "hondaecu-cli"
 version = "0.1.0"
 edition = "2024"
+authors = ["VIRUXE"]
+description = "A high-performance OKI MSM66207 virtual CPU emulator and ROM testing suite in Rust for Honda OBD1 ECUs"
+license = "Unlicense"
+repository = "https://github.com/VIRUXE/hondaecu-cli"
+readme = "README.md"
+keywords = ["honda", "ecu", "p28", "oki66207", "emulator"]
+categories = ["emulators", "command-line-utilities"]
 
 [dependencies]
