@@ -4,6 +4,7 @@
 use crate::bus::Bus;
 use crate::engine::EngineState;
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtcCode {
     Dtc00_InternalEcuError = 0,

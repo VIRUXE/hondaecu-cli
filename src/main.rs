@@ -8,6 +8,7 @@ mod engine;
 mod interpreter;
 mod interrupts;
 mod dtc;
+mod full_decoder;
 mod suite;
 mod interactive;
 
