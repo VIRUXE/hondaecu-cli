@@ -61,9 +61,14 @@ pub struct Bus {
     pub injector_pulse_width_us: u32,
     pub iacv_duty_cycle_pct: f32,
 
-    // VTEC Status
-    pub vtec_solenoid_active: bool,
-    pub vtec_pressure_switch: bool,
+    // Physical Motherboard Output Driver Pins (Ports P2 & P3)
+    pub fuel_pump_active: bool,        // P2.0: Fuel Pump Relay Driver
+    pub mil_check_engine_light: bool,  // P2.1: Check Engine Light (MIL) Lamp Driver
+    pub vtec_solenoid_active: bool,    // P2.2 / P3.1: VTEC Spool Valve Solenoid Driver
+    pub vtec_pressure_switch: bool,    // P2.3: VTEC Oil Pressure Switch Contact Input
+    pub ac_clutch_active: bool,        // P2.4: A/C Compressor Clutch Relay Driver
+    pub radiator_fan_active: bool,     // P2.5: Radiator Cooling Fan Relay Driver
+    pub purge_solenoid_active: bool,   // P2.6: EVAP Purge Control Solenoid Driver
 
     // Serial Datalogging UART Buffers
     pub serial_rx_queue: Vec<u8>,
@@ -78,8 +83,13 @@ impl Bus {
             adc_inputs: [512; 8], // Default to ~2.5V (mid scale 10-bit)
             injector_pulse_width_us: 0,
             iacv_duty_cycle_pct: 0.0,
+            fuel_pump_active: false,
+            mil_check_engine_light: false,
             vtec_solenoid_active: false,
             vtec_pressure_switch: true, // Normal oil pressure closed
+            ac_clutch_active: false,
+            radiator_fan_active: false,
+            purge_solenoid_active: false,
             serial_rx_queue: Vec::new(),
             serial_tx_queue: Vec::new(),
         };
@@ -165,10 +175,15 @@ impl Bus {
             let pwm1 = self.read_data_u16(SFR_PWMR1);
             self.iacv_duty_cycle_pct = ((pwm1 as f32) / 65535.0) * 100.0;
         } else if addr == SFR_P2 || addr == SFR_P3 {
-            // Pure Hardware Port Pin Sensing: VTEC Solenoid Driver Transistor (Bit 2 of P2 or Bit 1 of P3)
+            // Pure Hardware Port Pin Sensing: Transistor Output Drivers on Ports P2 & P3
             let p2 = self.ram[SFR_P2 as usize];
             let p3 = self.ram[SFR_P3 as usize];
+            self.fuel_pump_active = (p2 & (1 << 0)) != 0;
+            self.mil_check_engine_light = (p2 & (1 << 1)) != 0;
             self.vtec_solenoid_active = (p2 & (1 << 2)) != 0 || (p3 & (1 << 1)) != 0;
+            self.ac_clutch_active = (p2 & (1 << 4)) != 0;
+            self.radiator_fan_active = (p2 & (1 << 5)) != 0;
+            self.purge_solenoid_active = (p2 & (1 << 6)) != 0;
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }

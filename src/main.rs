@@ -12,6 +12,7 @@ mod full_decoder;
 mod suite;
 mod interactive;
 mod replay;
+mod datalog_server;
 
 use std::env;
 use std::process;
@@ -23,23 +24,25 @@ use crate::interrupts::InterruptController;
 use crate::suite::EcuTestSuite;
 use crate::interactive::InteractiveShell;
 use crate::replay::ReplayEngine;
+use crate::datalog_server::DatalogServer;
 
 fn print_usage() {
     println!("Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI");
     println!("Usage:");
     println!("  hondaecu-cli test <rom.bin>                               Run automated ECU ROM test suite");
+    println!("  hondaecu-cli datalog <rom.bin> [port]                     Start live serial datalogging TCP server (Port 38400)");
     println!("  hondaecu-cli replay <rom.bin> <log.csv|preset> [out.csv]  Replay CSV datalog / engine scenario through ECU");
     println!("  hondaecu-cli interactive <rom.bin>                        Launch interactive simulation REPL console");
     println!("  hondaecu-cli run <rom.bin> [cycles] [rpm]                 Simulate ECU execution for N cycles");
     println!("  hondaecu-cli disasm <rom.bin> [addr] [count]              Disassemble ROM instructions from target address");
     println!();
-    println!("Presets for 'replay': dyno-pull, cold-start, overheat");
+    println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, error-map-failure, error-ect-overheat, cold-start");
     println!();
     println!("Examples:");
-    println!("  hondaecu-cli replay P28-230.bin dyno-pull");
-    println!("  hondaecu-cli replay P28-230.bin my_datalog.csv output_results.csv");
-    println!("  hondaecu-cli test P28-230.bin");
-    println!("  hondaecu-cli interactive P28-230.bin");
+    println!("  ./hondaecu-cli datalog P28-230.bin 38400");
+    println!("  ./hondaecu-cli replay P28-230.bin dyno-pull");
+    println!("  ./hondaecu-cli test P28-230.bin");
+    println!("  ./hondaecu-cli interactive P28-230.bin");
 }
 
 fn main() {
@@ -50,6 +53,16 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "datalog" | "server" => {
+            let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
+            let port: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(38400);
+
+            if let Err(e) = DatalogServer::start_server(rom_path, port) {
+                eprintln!("Error starting datalog server: {}", e);
+                process::exit(1);
+            }
+        }
+
         "replay" | "play" | "log" => {
             let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
             let log_source = args.get(3).map(|s| s.as_str()).unwrap_or("dyno-pull");

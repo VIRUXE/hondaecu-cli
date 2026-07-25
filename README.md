@@ -119,7 +119,17 @@ timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,sp
 
 Available presets: `dyno-pull`, `overrun-decel`, `accel-stomp`, `drag-pass`, `error-map-failure`, `error-ect-overheat`, `error-tps-short`, `error-vtec-oil-pressure-loss`, `cold-start`, `electrical-load-idle`, `heat-soak-start`. See [`docs/SCENARIOS.md`](docs/SCENARIOS.md) for full scenario descriptions.
 
-### 3. High-Speed ECU Simulation Run
+### 3. Live Serial Datalogging Protocol Server
+Start the live TCP serial datalogging server on port `38400` so tuning software (**Honda Tuning Suite**, **Neptune**, or **Crome**) can connect directly to the running emulator:
+```bash
+# Linux / macOS
+./hondaecu-cli datalog P28-230.bin 38400
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe datalog P28-230.bin 38400
+```
+
+### 4. High-Speed ECU Simulation Run
 Simulate ECU execution for 100,000 cycles at a simulated 3000 RPM:
 ```bash
 ./hondaecu-cli run P28-230.bin 100000 3000
