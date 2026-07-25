@@ -80,7 +80,27 @@ cargo build --release
 cargo run --release -- test P28-230.bin
 ```
 
-### 2. High-Speed ECU Simulation Run
+### 2. ECU Datalog CSV Replay & Scripted Trace Playback
+Replay an actual CSV driving log or scripted engine preset through the ECU and export calculated pulse width & VTEC status:
+```bash
+# Replay built-in dyno pull preset (2000 -> 8200 RPM WOT)
+cargo run --release -- replay P28-230.bin dyno-pull output_results.csv
+
+# Replay custom CSV datalog file
+cargo run --release -- replay P28-230.bin my_ecu_log.csv output_results.csv
+```
+
+CSV Format (`my_ecu_log.csv`):
+```csv
+timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,speed_kmh
+0,800,30,0,85,25,0.45,14.2,0
+100,2200,45,15,85,25,0.45,14.2,20
+200,4800,95,100,85,25,0.85,14.1,80
+```
+
+Presets available: `dyno-pull`, `cold-start`, `overheat`
+
+### 3. High-Speed ECU Simulation Run
 Simulate ECU execution for 100,000 cycles at a simulated 3000 RPM:
 ```bash
 cargo run --release -- run P28-230.bin 100000 3000
