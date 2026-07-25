@@ -61,7 +61,11 @@
 - **Failsafe**: Initiates safety ignition retard (retards spark $-10^\circ$ BTDC) and enriches fuel to prevent engine melt.
 
 ```bash
-cargo run --release -- replay P28-230.bin error-ect-overheat
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin error-ect-overheat
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin error-ect-overheat
 ```
 
 ---
@@ -73,7 +77,11 @@ cargo run --release -- replay P28-230.bin error-ect-overheat
 - **Failsafe**: De-energizes VTEC spool valve; locks rev limiter to low-cam profile.
 
 ```bash
-cargo run --release -- replay P28-230.bin error-vtec-oil-pressure-loss
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin error-vtec-oil-pressure-loss
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin error-vtec-oil-pressure-loss
 ```
 
 ---
@@ -85,7 +93,11 @@ cargo run --release -- replay P28-230.bin error-vtec-oil-pressure-loss
 - **Failsafe**: Disables closed-loop feedback; locks ECU into safe open-loop base tables.
 
 ```bash
-cargo run --release -- replay P28-230.bin error-o2-lean-stuck
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin error-o2-lean-stuck
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin error-o2-lean-stuck
 ```
 
 ---
@@ -105,5 +117,9 @@ timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,sp
 
 ### Command
 ```bash
-cargo run --release -- replay P28-230.bin my_custom_trace.csv results.csv
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin my_custom_trace.csv results.csv
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin my_custom_trace.csv results.csv
 ```

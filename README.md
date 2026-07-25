@@ -89,11 +89,11 @@ cargo build --release
 
 ### 1. Run Complete Automated ROM Test Suite
 ```bash
-# Standalone Binary
+# Linux / macOS
 ./hondaecu-cli test P28-230.bin
 
-# Or via Cargo
-cargo run --release -- test P28-230.bin
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe test P28-230.bin
 ```
 
 ### 2. ECU Datalog CSV Replay & Scripted Trace Playback
