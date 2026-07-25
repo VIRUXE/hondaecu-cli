@@ -19,6 +19,7 @@ pub struct LogFrame {
     pub o2_volts: f64,
     pub vbatt_volts: f64,
     pub speed_kmh: f64,
+    pub note: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,7 @@ pub struct ReplayResultFrame {
     pub injector_pw_us: u32,
     pub iacv_duty_pct: f32,
     pub vtec_active: bool,
+    pub note: &'static str,
 }
 
 pub struct ReplayEngine;
@@ -61,9 +63,9 @@ impl ReplayEngine {
         println!("  Log Source    : {}", log_source);
         println!("  Total Frames  : {}", frames.len());
         println!("============================================================");
-        println!("{:>6}ms | {:>6} RPM | {:>5} kPa | {:>4}% TPS | {:>5}°C | {:>8} us | {:>6}% IACV | VTEC",
+        println!("{:>6}ms | {:>6} RPM | {:>5} kPa | {:>4}% TPS | {:>5}°C | {:>8} us | {:>6}% IACV | VTEC       | Phase / Note",
                  "Time", "RPM", "MAP", "TPS", "ECT", "Inj PW", "Duty");
-        println!("-------------------------------------------------------------------------------");
+        println!("---------------------------------------------------------------------------------------------------------");
 
         let mut last_ms: u64 = 0;
 
@@ -111,27 +113,28 @@ impl ReplayEngine {
                 injector_pw_us: bus.injector_pulse_width_us,
                 iacv_duty_pct: bus.iacv_duty_cycle_pct,
                 vtec_active: bus.vtec_solenoid_active,
+                note: frame.note,
             };
 
             let vtec_str = if res.vtec_active { "[VTEC ON]" } else { "        " };
-            println!("{:6}ms | {:6.0} RPM | {:5.1} kPa | {:4.0}% TPS | {:5.1}°C | {:8} us | {:6.1}% | {}",
+            println!("{:6}ms | {:6.0} RPM | {:5.1} kPa | {:4.0}% TPS | {:5.1}°C | {:8} us | {:6.1}% | {} | {}",
                      res.timestamp_ms, res.rpm, res.map_kpa, res.tps_pct, res.ect_celsius,
-                     res.injector_pw_us, res.iacv_duty_pct, vtec_str);
+                     res.injector_pw_us, res.iacv_duty_pct, vtec_str, res.note);
 
             results.push(res);
         }
 
-        println!("-------------------------------------------------------------------------------");
+        println!("---------------------------------------------------------------------------------------------------------");
         println!("Log Replay Completed! Played {} frames successfully.", results.len());
 
         // Save output CSV if requested
         if let Some(out_path) = out_csv_path {
             let mut file = File::create(out_path)?;
-            writeln!(file, "timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,injector_pw_us,iacv_duty_pct,vtec_active")?;
+            writeln!(file, "timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,injector_pw_us,iacv_duty_pct,vtec_active,note")?;
             for r in &results {
-                writeln!(file, "{},{:.1},{:.1},{:.1},{:.1},{},{:.1},{}",
+                writeln!(file, "{},{:.1},{:.1},{:.1},{:.1},{},{:.1},{},\"{}\"",
                          r.timestamp_ms, r.rpm, r.map_kpa, r.tps_pct, r.ect_celsius,
-                         r.injector_pw_us, r.iacv_duty_pct, r.vtec_active as u8)?;
+                         r.injector_pw_us, r.iacv_duty_pct, r.vtec_active as u8, r.note)?;
             }
             println!("Exported replay results to '{}'", out_path);
         }
@@ -171,6 +174,7 @@ impl ReplayEngine {
                     o2_volts: o2,
                     vbatt_volts: vbatt,
                     speed_kmh: speed,
+                    note: "CSV Datalog Frame",
                 });
             }
         }
@@ -182,8 +186,184 @@ impl ReplayEngine {
         let mut frames = Vec::new();
 
         match preset {
+            // 1. Overrun Deceleration Fuel Cut-Off (DFCO) Scenario
+            "overrun-decel" => {
+                // High RPM WOT (6500 RPM) -> Throttle Snap Closed (0% TPS) -> Engine Braking Decel down to 800 RPM
+                for i in 0..=80 {
+                    let ms = i * 50;
+                    let pct = i as f64 / 80.0;
+                    let rpm = 6500.0 - pct * 5700.0; // Decelerates 6500 -> 800 RPM
+                    let tps = if i < 5 { 100.0 } else { 0.0 }; // Throttle snaps shut
+                    let map = if i < 5 { 95.0 } else { 18.0 + (1.0 - pct) * 5.0 }; // High engine vacuum on overrun (18 kPa)
+                    let note = if i < 5 {
+                        "WOT High RPM"
+                    } else if rpm > 1100.0 {
+                        "Overrun DFCO (Fuel Cut Active)"
+                    } else {
+                        "DFCO Re-engagement / Anti-Stall Catch"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm,
+                        map_kpa: map,
+                        tps_pct: tps,
+                        ect_celsius: 88.0,
+                        iat_celsius: 30.0,
+                        o2_volts: if rpm > 1100.0 && tps == 0.0 { 0.02 } else { 0.45 }, // Lean/Zero O2 during fuel cut
+                        vbatt_volts: 14.2,
+                        speed_kmh: (rpm / 6500.0) * 120.0,
+                        note,
+                    });
+                }
+            }
+
+            // 2. Downhill Engine Braking with Intermittent Heel-Toe Blips
+            "overrun-downhill" => {
+                for i in 0..=100 {
+                    let ms = i * 50;
+                    let cycle_phase = (i % 25) as f64 / 25.0;
+                    let is_blip = cycle_phase > 0.7 && cycle_phase < 0.9;
+                    let rpm = 4500.0 - (i as f64 * 25.0) + (if is_blip { 800.0 } else { 0.0 });
+                    let tps = if is_blip { 25.0 } else { 0.0 };
+                    let map = if is_blip { 55.0 } else { 20.0 };
+                    let note = if is_blip { "Throttle Blip / Heel-Toe" } else { "Downhill Engine Braking (Overrun Cut)" };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: rpm.max(800.0),
+                        map_kpa: map,
+                        tps_pct: tps,
+                        ect_celsius: 85.0,
+                        iat_celsius: 25.0,
+                        o2_volts: if is_blip { 0.50 } else { 0.05 },
+                        vbatt_volts: 14.1,
+                        speed_kmh: 90.0,
+                        note,
+                    });
+                }
+            }
+
+            // 3. Accel Stomp / Rapid TPS Tip-In Transient Enrichment
+            "accel-stomp" => {
+                for i in 0..=50 {
+                    let ms = i * 50;
+                    let is_stomp = i >= 10 && i <= 30;
+                    let tps = if is_stomp { 100.0 } else { 15.0 };
+                    let map = if is_stomp { 98.0 } else { 38.0 };
+                    let rpm = 2500.0 + (if is_stomp { (i - 10) as f64 * 150.0 } else { 0.0 });
+                    let note = if i < 10 {
+                        "Steady Cruise (15% TPS)"
+                    } else if i == 10 {
+                        "RAPID TPS TIP-IN STOMP (Transient Enrichment)"
+                    } else if i <= 30 {
+                        "WOT Acceleration"
+                    } else {
+                        "Lift Back to Cruise"
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm,
+                        map_kpa: map,
+                        tps_pct: tps,
+                        ect_celsius: 85.0,
+                        iat_celsius: 28.0,
+                        o2_volts: if is_stomp { 0.90 } else { 0.45 },
+                        vbatt_volts: 14.0,
+                        speed_kmh: 50.0 + (i as f64),
+                        note,
+                    });
+                }
+            }
+
+            // 4. Drag Strip 1/4 Mile Pass (Launch Control 2-Step -> Gear Shifts)
+            "drag-pass" => {
+                for i in 0..=120 {
+                    let ms = i * 50;
+                    let sec = ms as f64 / 1000.0;
+
+                    let (rpm, map, tps, speed, note) = if sec < 1.0 {
+                        (4500.0, 95.0, 100.0, 0.0, "2-Step Launch Control (Stationary)")
+                    } else if sec < 3.0 {
+                        (4500.0 + (sec - 1.0) * 1750.0, 98.0, 100.0, (sec - 1.0) * 35.0, "1st Gear Full Acceleration")
+                    } else if sec < 3.2 {
+                        (5200.0, 30.0, 0.0, 70.0, "1st -> 2nd Gear Shift (Lift)")
+                    } else if sec < 5.5 {
+                        (5200.0 + (sec - 3.2) * 1300.0, 99.0, 100.0, 70.0 + (sec - 3.2) * 25.0, "2nd Gear Full Acceleration [VTEC]")
+                    } else if sec < 5.7 {
+                        (5500.0, 30.0, 0.0, 125.0, "2nd -> 3rd Gear Shift (Lift)")
+                    } else if sec < 8.5 {
+                        (5500.0 + (sec - 5.7) * 950.0, 100.0, 100.0, 125.0 + (sec - 5.7) * 20.0, "3rd Gear Power Band [VTEC]")
+                    } else {
+                        (8100.0 - (sec - 8.5) * 2000.0, 20.0, 0.0, 180.0, "Trap Finish Line High RPM Overrun (DFCO)")
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm,
+                        map_kpa: map,
+                        tps_pct: tps,
+                        ect_celsius: 86.0,
+                        iat_celsius: 26.0,
+                        o2_volts: if tps > 50.0 { 0.88 } else { 0.10 },
+                        vbatt_volts: 14.1,
+                        speed_kmh: speed,
+                        note,
+                    });
+                }
+            }
+
+            // 5. Electrical Load & AC Compressor Idle Load Compensation
+            "electrical-load-idle" => {
+                for i in 0..=60 {
+                    let ms = i * 100;
+                    let ac_on = (i / 15) % 2 == 1;
+                    let vbatt = if ac_on { 12.1 } else { 14.2 }; // Voltage dip when AC/cooling fan kicks in
+                    let map = if ac_on { 42.0 } else { 30.0 };   // Engine load increases
+                    let note = if ac_on { "AC Compressor ON (IACV Duty Spike & Idle Compensation)" } else { "Idle Normal (AC OFF)" };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 800.0,
+                        map_kpa: map,
+                        tps_pct: 0.0,
+                        ect_celsius: 92.0,
+                        iat_celsius: 35.0,
+                        o2_volts: 0.45,
+                        vbatt_volts: vbatt,
+                        speed_kmh: 0.0,
+                        note,
+                    });
+                }
+            }
+
+            // 6. Heat Soak Hot Restart (98°C ECT, 60°C IAT)
+            "heat-soak-start" => {
+                for i in 0..=40 {
+                    let ms = i * 100;
+                    let pct = i as f64 / 40.0;
+                    let ect = 98.0 - pct * 8.0;
+                    let iat = 60.0 - pct * 25.0;
+                    let note = if i < 5 { "Hot Heat-Soak Cranking" } else { "Hot Idle Anti-Percolation Enrichment" };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm: 850.0,
+                        map_kpa: 34.0,
+                        tps_pct: 0.0,
+                        ect_celsius: ect,
+                        iat_celsius: iat,
+                        o2_volts: 0.48,
+                        vbatt_volts: 13.5,
+                        speed_kmh: 0.0,
+                        note,
+                    });
+                }
+            }
+
+            // 7. Dyno Pull (Default)
             "dyno-pull" => {
-                // Dyno Pull from 2000 RPM to 8200 RPM over 5 seconds (50ms frames = 100 frames)
                 for i in 0..=100 {
                     let ms = i * 50;
                     let pct = i as f64 / 100.0;
@@ -198,15 +378,16 @@ impl ReplayEngine {
                         tps_pct: tps,
                         ect_celsius: 85.0,
                         iat_celsius: 25.0,
-                        o2_volts: 0.85, // WOT rich AFR
+                        o2_volts: 0.85,
                         vbatt_volts: 14.1,
                         speed_kmh: pct * 180.0,
+                        note: if rpm >= 4800.0 { "WOT VTEC High Cam Pull" } else { "WOT Low Cam Pull" },
                     });
                 }
             }
 
+            // 8. Cold Start
             "cold-start" => {
-                // Cold start from -10°C to 85°C over 10 seconds
                 for i in 0..=100 {
                     let ms = i * 100;
                     let pct = i as f64 / 100.0;
@@ -223,33 +404,13 @@ impl ReplayEngine {
                         o2_volts: 0.45,
                         vbatt_volts: 13.8,
                         speed_kmh: 0.0,
+                        note: "Cold Start Warmup Curve",
                     });
                 }
             }
 
-            "overheat" => {
-                // Thermal overheat test from 85°C to 118°C
-                for i in 0..=50 {
-                    let ms = i * 100;
-                    let pct = i as f64 / 50.0;
-                    let ect = 85.0 + pct * 33.0;
-
-                    frames.push(LogFrame {
-                        timestamp_ms: ms,
-                        rpm: 4000.0,
-                        map_kpa: 60.0,
-                        tps_pct: 30.0,
-                        ect_celsius: ect,
-                        iat_celsius: 35.0,
-                        o2_volts: 0.45,
-                        vbatt_volts: 14.0,
-                        speed_kmh: 80.0,
-                    });
-                }
-            }
-
+            // Fallback
             _ => {
-                // Generic idle scenario fallback
                 for i in 0..=20 {
                     frames.push(LogFrame {
                         timestamp_ms: i * 100,
@@ -261,6 +422,7 @@ impl ReplayEngine {
                         o2_volts: 0.45,
                         vbatt_volts: 14.2,
                         speed_kmh: 0.0,
+                        note: "Idle Steady State",
                     });
                 }
             }
