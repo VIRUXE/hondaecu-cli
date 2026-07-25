@@ -45,7 +45,11 @@
 - **Failsafe**: Switches fuel calculation from Speed-Density (MAP vs RPM) to Alpha-N (TPS vs RPM).
 
 ```bash
-cargo run --release -- replay P28-230.bin error-map-failure
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin error-map-failure
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin error-map-failure
 ```
 
 ---

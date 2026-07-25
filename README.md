@@ -68,10 +68,13 @@ flowchart TD
 
 ## ⚡ Quickstart & Installation
 
-### Prerequisites
-- [Rust Toolchain](https://www.rust-lang.org/) (`cargo` 1.70+)
+### Option 1: Download Standalone Binaries (No Rust Required!)
+Download the pre-compiled binary for your operating system from [**GitHub Releases**](https://github.com/VIRUXE/hondaecu-cli/releases):
 
-### Building from Source
+- **Windows (`.exe`)**: Download `hondaecu-cli-windows-x86_64.zip`, extract, and open Command Prompt or PowerShell.
+- **Linux (`x86_64`)**: Download `hondaecu-cli-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` and extract `hondaecu-cli`.
+
+### Option 2: Building from Source (Rust Developers)
 ```bash
 git clone https://github.com/VIRUXE/hondaecu-cli.git
 cd hondaecu-cli
@@ -82,8 +85,14 @@ cargo build --release
 
 ## 📖 Usage Examples
 
+> **Note**: For Windows, replace `./hondaecu-cli` with `.\hondaecu-cli.exe`.
+
 ### 1. Run Complete Automated ROM Test Suite
 ```bash
+# Standalone Binary
+./hondaecu-cli test P28-230.bin
+
+# Or via Cargo
 cargo run --release -- test P28-230.bin
 ```
 
@@ -91,10 +100,13 @@ cargo run --release -- test P28-230.bin
 Replay an actual CSV driving log or scripted engine preset through the ECU and export calculated pulse width & VTEC status:
 ```bash
 # Replay built-in dyno pull preset (2000 -> 8200 RPM WOT)
-cargo run --release -- replay P28-230.bin dyno-pull output_results.csv
+./hondaecu-cli replay P28-230.bin dyno-pull output_results.csv
+
+# Replay fault injection scenario (MAP sensor disconnect -> DTC 3)
+./hondaecu-cli replay P28-230.bin error-map-failure
 
 # Replay custom CSV datalog file
-cargo run --release -- replay P28-230.bin my_ecu_log.csv output_results.csv
+./hondaecu-cli replay P28-230.bin my_ecu_log.csv output_results.csv
 ```
 
 CSV Format (`my_ecu_log.csv`):
@@ -105,18 +117,18 @@ timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,sp
 200,4800,95,100,85,25,0.85,14.1,80
 ```
 
-Presets available: `dyno-pull`, `cold-start`, `overheat`
+Available presets: `dyno-pull`, `overrun-decel`, `accel-stomp`, `drag-pass`, `error-map-failure`, `error-ect-overheat`, `error-tps-short`, `error-vtec-oil-pressure-loss`, `cold-start`, `electrical-load-idle`, `heat-soak-start`. See [`docs/SCENARIOS.md`](docs/SCENARIOS.md) for full scenario descriptions.
 
 ### 3. High-Speed ECU Simulation Run
 Simulate ECU execution for 100,000 cycles at a simulated 3000 RPM:
 ```bash
-cargo run --release -- run P28-230.bin 100000 3000
+./hondaecu-cli run P28-230.bin 100000 3000
 ```
 
-### 3. Interactive Debugging REPL
+### 4. Interactive Debugging REPL
 Launch the interactive shell to single-step, inspect registers, and manipulate virtual engine parameters in real time:
 ```bash
-cargo run --release -- interactive P28-230.bin
+./hondaecu-cli interactive P28-230.bin
 ```
 
 Interactive commands:
@@ -130,10 +142,10 @@ ecu [0x21EA]> status
 ecu [0x21EA]> dump 0x0060 16
 ```
 
-### 4. Machine Code Disassembler
+### 5. Machine Code Disassembler
 Disassemble instructions starting at a given hexadecimal memory offset:
 ```bash
-cargo run --release -- disasm P28-230.bin 0x21E2 20
+./hondaecu-cli disasm P28-230.bin 0x21E2 20
 ```
 
 ---
