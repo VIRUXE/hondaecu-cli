@@ -161,7 +161,8 @@ impl EcuTestSuite {
         engine.rpm = 7500.0;
 
         let mut interrupts_handled = 0;
-        for cycle in 0..50_000 {
+        for _ in 0..50_000 {
+            let before = cpu.cycles;
             Interpreter::step(&mut cpu, &mut bus);
 
             // The ROM's power-on SFR init clears the interrupt-enable register
@@ -171,8 +172,8 @@ impl EcuTestSuite {
             cpu.set_mie(true);
             bus.write_data_u16(0x1A, 0xFFFF);
 
-            let timer_irq = bus.tick_timers(2);
-            let dist_irq = engine.check_distributor_pulses(cycle, 12_000_000);
+            let timer_irq = bus.tick_timers((cpu.cycles - before) as u32);
+            let dist_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
 
             if InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, timer_irq | dist_irq) {
                 interrupts_handled += 1;

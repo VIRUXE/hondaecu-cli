@@ -123,12 +123,13 @@ impl DatalogServer {
         engine.tps_pct = ((cycle_rpm - 2000.0) / 5500.0 * 100.0).clamp(0.0, 100.0);
         engine.sync_sensors_to_bus(bus);
 
-        // Run CPU execution for 50ms frame
+        // Run CPU execution for a 50ms frame at the machine-cycle rate.
         let start_cycle = cpu.cycles;
-        while cpu.cycles - start_cycle < 600_000 {
+        while cpu.cycles - start_cycle < 50 * (crate::bus::CPU_HZ / 1000) {
+            let before = cpu.cycles;
             Interpreter::step(cpu, bus);
-            let t_irq = bus.tick_timers(2);
-            let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+            let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+            let d_irq = engine.check_distributor_pulses(bus, cpu.cycles, crate::bus::CPU_HZ);
             InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);
             if cpu.halted {
                 break;

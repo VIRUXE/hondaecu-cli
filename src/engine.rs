@@ -84,15 +84,25 @@ impl EngineState {
             && oil_pressure_switch
     }
 
-    /// Check if distributor CKP (INT0) or TDC/CYP (INT1) pulse should fire based on elapsed CPU cycles
-    pub fn check_distributor_pulses(&mut self, total_cycles: u64, cpu_freq_hz: u64) -> u16 {
+    /// Check if distributor CKP (INT0) or TDC (INT1) pulse should fire based on
+    /// elapsed CPU cycles, and raise the CYP cylinder-1 marker on the bus's
+    /// transition-detector status once per camshaft revolution.
+    pub fn check_distributor_pulses(
+        &mut self,
+        bus: &mut Bus,
+        total_cycles: u64,
+        cpu_freq_hz: u64,
+    ) -> u16 {
         if self.rpm <= 0.0 {
             return 0;
         }
 
         // Honda OBD1 distributors provide 24 CKP edges per cam revolution,
         // i.e. 12 per crank revolution. TDC provides four edges per cam
-        // revolution, so one TDC edge follows every six CKP edges.
+        // revolution, so one TDC edge follows every six CKP edges. CYP provides
+        // one edge per cam revolution (every 24 CKP) identifying cylinder #1;
+        // it is not an interrupt but a transition-detector input the ROM polls,
+        // so it is delivered by setting SFR_TRNS bit 0 rather than an IRQ.
         let cycles_per_rev = (cpu_freq_hz as f64 * 60.0) / self.rpm;
         let cycles_per_ckp = cycles_per_rev / 12.0;
 
@@ -106,6 +116,12 @@ impl EngineState {
             if self.ckp_pulse_count % 6 == 0 {
                 self.tdc_pulse_count += 1;
                 irq |= 1 << IRQ_INT1;
+            }
+            // CYP marks cylinder #1 once per camshaft revolution, phased to the
+            // cylinder-1 TDC edge (every 24th CKP, which is also a TDC). The
+            // transition detector latches it; the TDC ISR reads and clears it.
+            if self.ckp_pulse_count % 24 == 0 {
+                bus.signal_cyp();
             }
 
             return irq;

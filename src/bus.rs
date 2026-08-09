@@ -6,6 +6,21 @@ use std::io;
 pub const ROM_SIZE: usize = 32768; // 32KB ROM space (0x0000..0x7FFF)
 pub const RAM_SIZE: usize = 4096;  // 4KB Data RAM & SFR space (0x0000..0x0FFF)
 
+/// Machine-cycle rate of the OKI core, in Hz. `cpu.cycles` counts machine
+/// cycles (from `decoder::int_cycles`, which are the manual's INT cycle counts),
+/// so this is the rate at which `cpu.cycles` advances in real time and the one
+/// clock every other time base must share: the distributor/crank generator, the
+/// replay frame budget, and the injector pulse-width conversion.
+///
+/// The datasheet gives "minimum instruction cycle : 400ns @ 10MHz", and the
+/// fastest instruction (NOP) is two machine cycles (Table 3-37), so one machine
+/// cycle is 200ns and the machine-cycle rate is 5MHz = CLK / 2. The emulator
+/// previously timed the crank at 12MHz while counting machine cycles, which made
+/// the ROM read RPM 2.4x low and never enter normal running injection.
+pub const CPU_HZ: u64 = 5_000_000;
+/// Machine cycles per microsecond (`CPU_HZ / 1_000_000`).
+pub const CYCLES_PER_US: u64 = CPU_HZ / 1_000_000;
+
 // SFR Offsets
 pub const SFR_ASSP: u16 = 0x00;
 pub const SFR_ALRB: u16 = 0x02;
@@ -19,6 +34,19 @@ pub const SFR_EXION: u16= 0x1C;
 // entries at code addresses 0x0008..0x0027 (datasheet "Vector Table Area").
 pub const IRQ_INT0: u16 = 0;
 pub const IRQ_SERIAL_RX: u16 = 1;
+// Per the MSM66207 user's manual Table 17-1, IRQ bit 3 is the serial
+// transmission-ready / baud-rate-generator overflow interrupt (RQSTGEN). The
+// P28 ROM does not use the UART during running, so it repurposes that spare
+// baud-rate-generator timer as an injection scheduler: bit 3's vector (0x03DC)
+// is a handler that advances the cylinder-sequence counter. The emulator does
+// not yet model the baud-rate-generator timer, so this interrupt never fires.
+pub const IRQ_STGEN: u16 = 3;
+// Table 17-1 IRQ bit map. The four 16-bit timers each raise TWO interrupts: an
+// overflow (even bit) and an "event" (odd bit: capture-register match or
+// real-timer compare). The emulator currently only generates the event/compare
+// interrupts plus TM2 overflow; the TM0/TM1/TM3 overflow interrupts (bits
+// 4/6/10) are not yet produced.
+pub const IRQ_TM0_OVF: u16 = 4;
 pub const IRQ_TM0: u16 = 5;
 pub const IRQ_TM1: u16 = 7;
 pub const IRQ_TM2_OVF: u16 = 8;
@@ -81,6 +109,18 @@ pub const SFR_TCON0: u16 = 0x40;
 pub const SFR_TCON1: u16 = 0x41;
 pub const SFR_TCON2: u16 = 0x42;
 pub const SFR_TCON3: u16 = 0x43;
+
+/// Transition-detector status register. The four transition detectors latch an
+/// edge on their P4.4..P4.7 (TRNS0..3) inputs into a status bit here; the ROM
+/// polls and read-clears it (there is no transition-detector interrupt -- see
+/// Table 17-1). On the P28 board the distributor's CYP (cylinder-position)
+/// signal drives TRNS0/P4.4, so bit 0 is the once-per-camshaft-revolution
+/// cylinder-#1 marker: the TDC ISR does `RB 046h.0` at 0x03B8 and, when it was
+/// set, resets its crank-angle counter (0x2A) to the cylinder-1 reference
+/// instead of advancing it. Without this flag the ROM completes its key-on
+/// prime pulse but never identifies cylinder 1, so per-cylinder injection never
+/// sequences.
+pub const SFR_TRNS: u16 = 0x46;
 
 pub const SFR_ADSCAN: u16 = 0x58;
 pub const SFR_ADSEL: u16  = 0x59;
@@ -199,7 +239,7 @@ impl Bus {
     // Data Space Read (RAM & SFRs)
     pub fn read_data_u8(&mut self, addr: u16) -> u8 {
         let idx = (addr as usize) & (RAM_SIZE - 1);
-        
+
         // Handle special SFR reads
         if addr >= SFR_ADCR0 && addr < SFR_ADCR0 + 16 {
             let val = self.adc_result(((addr - SFR_ADCR0) / 2) as usize);
@@ -322,8 +362,11 @@ impl Bus {
                         (false, true) => {
                             if let Some(start) = self.injector_started_at[bit].take() {
                                 let clocks = self.elapsed_cycles.saturating_sub(start);
-                                self.injector_pulse_width_us =
-                                    ((clocks + 6) / 12).min(u32::MAX as u64) as u32;
+                                self.injector_pulse_width_us = ((clocks
+                                    + CYCLES_PER_US / 2)
+                                    / CYCLES_PER_US)
+                                    .min(u32::MAX as u64)
+                                    as u32;
                             }
                         }
                         _ => {}
@@ -367,6 +410,15 @@ impl Bus {
             self.ram[addr as usize] = (val & 0xFF) as u8;
             self.ram[(addr + 1) as usize] = (val >> 8) as u8;
         }
+    }
+
+    /// Latch a CYP (cylinder-#1) transition on TRNS0, exactly as the transition
+    /// detector does when the distributor's CYP signal edges on P4.4. The ROM
+    /// read-clears SFR_TRNS bit 0 in its TDC ISR; this is a hardware-set status
+    /// bit, so it is OR-ed straight into the latch rather than going through a
+    /// CPU write.
+    pub fn signal_cyp(&mut self) {
+        self.ram[SFR_TRNS as usize] |= 0x01;
     }
 
     pub fn push_serial_rx_byte(&mut self, byte: u8) -> u16 {
@@ -441,10 +493,21 @@ impl Bus {
             // timer 1, 00b for the rest -- so those two bits are the clock
             // select, and the field has to make timer 1 run exactly 4x faster.
             // Only encodings 00b and 01b are attested by this ROM.
+            //
+            // The absolute divisor (8 machine cycles for the base rate) is set
+            // by the launch ROM's absolute self-check at 0x342E..0x3470: it
+            // reads a free-running timer twice across a fixed six-instruction
+            // window that decoder::int_cycles scores at the manual-exact 36
+            // machine cycles, and faults unless the timer advanced 1..33 counts.
+            // At the fast (01b) rate that pins the base clock to 36/34 < c <= 36
+            // cycles per tick, i.e. two machine cycles; the base 00b rate is
+            // four times slower again. (The earlier divisors of 1 and 4 were
+            // fitted to the previous flat "two clocks per instruction" model,
+            // which undercounted this window roughly threefold.)
             let div = match (tcon >> 5) & 0x03 {
-                0b00 => 4,
-                0b01 => 1,
-                other => 4 >> other.min(2), // unattested; keep monotonic
+                0b00 => 8,
+                0b01 => 2,
+                other => 8 >> other.min(3), // unattested; keep monotonic
             };
             self.timer_accum[i] += cycles;
             let steps = self.timer_accum[i] / div;
@@ -476,8 +539,13 @@ impl Bus {
                     self.trigger_adc_conversion();
                 }
             }
-            if overflow && *tm_sfr == SFR_TM2 {
-                irq_flags |= 1 << IRQ_TM2_OVF;
+            // Every timer raises a counter-overflow interrupt on the even bit
+            // just below its event bit (Table 17-1): TM0->4, TM1->6, TM2->8,
+            // TM3->10. Previously only TM2's overflow was produced, so the
+            // injection scheduler -- which the P28 ROM drives partly off timer
+            // overflows -- was starved of TM0/TM1/TM3 overflow events.
+            if overflow {
+                irq_flags |= 1 << (*irq_bit - 1);
             }
         }
 
@@ -513,10 +581,14 @@ mod tests {
     fn injector_width_is_measured_from_active_low_p2_transitions() {
         let mut bus = Bus::new();
         bus.write_data_u8(SFR_P2, 0xFF);
-        bus.write_data_u8(SFR_P2, 0xFE);
-        bus.tick_timers(120);
-        bus.write_data_u8(SFR_P2, 0xFF);
+        bus.write_data_u8(SFR_P2, 0xFE); // injector 0 driven low (active)
+        bus.tick_timers(120); // 120 machine cycles held low
+        bus.write_data_u8(SFR_P2, 0xFF); // released
 
-        assert_eq!(bus.injector_pulse_width_us, 10);
+        // At the 5 MHz machine-cycle rate, 120 cycles is 120 / CYCLES_PER_US us.
+        assert_eq!(
+            bus.injector_pulse_width_us,
+            ((120 + CYCLES_PER_US / 2) / CYCLES_PER_US) as u32
+        );
     }
 }

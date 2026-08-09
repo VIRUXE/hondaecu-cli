@@ -130,12 +130,13 @@ fn main() {
             let start = std::time::Instant::now();
             let mut interrupts_handled = 0;
 
-            for cycle in 0..cycles {
+            for _ in 0..cycles {
                 engine.sync_sensors_to_bus(&mut bus);
+                let before = cpu.cycles;
                 Interpreter::step(&mut cpu, &mut bus);
 
-                let timer_irq = bus.tick_timers(2);
-                let dist_irq = engine.check_distributor_pulses(cycle, 12_000_000);
+                let timer_irq = bus.tick_timers((cpu.cycles - before) as u32);
+                let dist_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
 
                 if InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, timer_irq | dist_irq) {
                     interrupts_handled += 1;

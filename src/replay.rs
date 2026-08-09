@@ -100,10 +100,11 @@ impl ReplayEngine {
             engine.sync_sensors_to_bus(&mut bus);
 
             // Calculate cycles for dt_ms (12 MHz CPU = 12,000 cycles per ms)
-            let frame_cycles = dt_ms * 12_000;
+            let frame_cycles = dt_ms * (crate::bus::CPU_HZ / 1000);
             let start_cycle = cpu.cycles;
 
             while cpu.cycles - start_cycle < frame_cycles {
+                let before = cpu.cycles;
                 let instruction = Interpreter::step(&mut cpu, &mut bus);
                 if cpu.halted {
                     return Err(io::Error::new(
@@ -115,8 +116,8 @@ impl ReplayEngine {
                     ));
                 }
 
-                let t_irq = bus.tick_timers(2);
-                let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+                let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+                let d_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
                 InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
             }
 
@@ -177,6 +178,7 @@ impl ReplayEngine {
                 return Ok(());
             }
 
+            let before = cpu.cycles;
             let instruction = Interpreter::step(cpu, bus);
             if cpu.halted {
                 return Err(io::Error::new(
@@ -187,7 +189,7 @@ impl ReplayEngine {
                     ),
                 ));
             }
-            let irq = bus.tick_timers(2);
+            let irq = bus.tick_timers((cpu.cycles - before) as u32);
             InterruptController::handle_pending_interrupts(cpu, bus, irq);
         }
 
@@ -853,6 +855,7 @@ mod tests {
                 cpu.pc
             );
 
+            let before = cpu.cycles;
             let instruction = Interpreter::step(&mut cpu, &mut bus);
             assert!(
                 !cpu.halted,
@@ -860,8 +863,8 @@ mod tests {
                 instruction.pc,
                 instruction.mnemonic
             );
-            let irq = bus.tick_timers(2)
-                | engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+            let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+            let irq = t_irq | engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
             dispatched +=
                 InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq) as u64;
 

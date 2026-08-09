@@ -70,10 +70,11 @@ impl InteractiveShell {
                 "step" | "s" => {
                     let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                     for _ in 0..count {
+                        let before = cpu.cycles;
                         let ins = Interpreter::step(&mut cpu, &mut bus);
                         println!("  {:#06X}: {:18} ; {}", ins.pc, ins.mnemonic, Self::hex_bytes(&ins.bytes));
-                        let t_irq = bus.tick_timers(2);
-                        let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+                        let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+                        let d_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
                         InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
                     }
                 }
@@ -83,9 +84,10 @@ impl InteractiveShell {
                     println!("Running for {} cycles...", count);
                     let start_cycles = cpu.cycles;
                     while cpu.cycles - start_cycles < count as u64 {
+                        let before = cpu.cycles;
                         Interpreter::step(&mut cpu, &mut bus);
-                        let t_irq = bus.tick_timers(2);
-                        let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+                        let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+                        let d_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
                         InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
                         if cpu.halted {
                             println!("CPU Halted.");
