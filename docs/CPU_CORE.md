@@ -351,12 +351,27 @@ transitions.
      interrupt-depth attribution), a spin/hang (a `0x2459` max-count delay loop
      was only a side effect of feeding rpm=0), and resets/boot re-runs (0 hits
      on the reset vector / self-test entry at steady rpm; not halted).
-   - A 424k-instruction main loop is ~2 Hz even on real 5 MHz silicon —
-     impossible for a working ECU — so either the emulator inflates per-pass work
-     or the ROM recomputes its maps every pass because a done/skip flag is never
-     set. Resolving this needs the MSM66207 timer / ADC / full-SFR pages missing
-     from the incomplete users manual, to validate the timer and
-     checksum-scheduling semantics before any change.
+   - **Datasheet validation (the peripheral models are essentially correct, so
+     they are *not* the cause).** Against `MSM66201/66P201/66207/66P207` (SFR
+     map) and the searchable family user manuals: the timer/ADC SFR addresses
+     match exactly; the timer clock-select field lives in the **high** control
+     bits (CK2/1/0 = bits 7/6/5), so the emulator's bits-5–6 prescaler is the
+     right region for this chip generation (the ML66517's bits-0–2 layout is a
+     newer generation and does *not* apply). Two real but non-causal gaps: the
+     family's **auto-reload** timer mode (overflow → TM←TMR + IRQ) is not
+     modeled — but it governs periodic timer interrupts, not the main-loop
+     computation; and A/D conversion is 64 *cycles* here vs the datasheet's
+     64 µs — which makes the ROM *faster*, not slower. The exact TM0–3 mode-select
+     bits are on pages 132–146, which are the pages **missing** from the only
+     66207 user manual.
+   - **Reframed conclusion.** The emulator is **not** grossly inflating work: the
+     fuel/ignition interpolation runs at a healthy ~0.5–2 kHz (≈1900
+     axis-searches/s, ~5 iterations each). The earlier "424k instructions/pass"
+     measured a slow *outer* loop; the inner computation rate is normal. So
+     injection firing ~1×/s is a **gating/logic condition in the ROM's injection
+     state machine** (the arm at `0x4B35`/`0x4BCC` and its page-relative state
+     bytes 0xBF/0xB6/…), not a performance or peripheral bug. That gate — read
+     with LRB-page-aware effective addresses — is the next thing to trace.
 
 > **Addressing caveat that invalidated a whole prior localization:** the `off
 > N8` operand is LRB-page-relative — `off_page(n) = ((LRB>>5)<<8) | n` in
