@@ -65,6 +65,23 @@ impl EngineState {
         // Channel 6: Vehicle Speed Sensor / Aux
         let vss_counts = (self.speed_kmh / 250.0 * 1023.0).clamp(0.0, 1023.0) as u16;
         bus.adc_inputs[6] = vss_counts;
+
+        // VTEC spool valve. On the real board this output is driven by the ASIC
+        // (schematic pin A25, active-low low-side driver), not a directly
+        // modeled OKI GPIO, so it cannot be pin-sensed from the emulated ports.
+        // Derive engagement from the documented P28 crossover conditions and
+        // the oil-pressure switch input instead.
+        bus.vtec_solenoid_active = self.vtec_engaged(bus.vtec_pressure_switch);
+    }
+
+    /// VTEC spool-valve engagement per the documented P28 low-to-high cam
+    /// crossover conditions (docs/P28_ARCHITECTURE.md): all must hold at once.
+    pub fn vtec_engaged(&self, oil_pressure_switch: bool) -> bool {
+        self.rpm >= 4800.0
+            && self.tps_pct >= 20.0
+            && self.ect_celsius >= 60.0
+            && self.speed_kmh >= 5.0
+            && oil_pressure_switch
     }
 
     /// Check if distributor CKP (INT0) or TDC/CYP (INT1) pulse should fire based on elapsed CPU cycles

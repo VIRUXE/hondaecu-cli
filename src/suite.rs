@@ -224,13 +224,13 @@ impl EcuTestSuite {
         engine.rpm = 5500.0;
         engine.tps_pct = 50.0;
         engine.ect_celsius = 85.0;
+        engine.speed_kmh = 60.0;
+        bus.vtec_pressure_switch = true; // Oil pressure confirmed (switch closed)
         engine.sync_sensors_to_bus(&mut bus);
-        bus.vtec_pressure_switch = true;
-        bus.write_data_u8(0x28, 0x02);
 
         let passed = bus.vtec_solenoid_active;
         let details = format!(
-            "VTEC Conditions (5500 RPM, 50% TPS, 85°C ECT) -> Solenoid Active: {}, Oil Switch OK",
+            "VTEC Conditions (5500 RPM, 50% TPS, 85°C ECT, 60 km/h, oil OK) -> Solenoid Active: {}",
             bus.vtec_solenoid_active
         );
 

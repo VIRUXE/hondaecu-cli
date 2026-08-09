@@ -112,7 +112,7 @@ pub struct Bus {
     // Physical Motherboard Output Driver Pins (Ports P2 & P3)
     pub fuel_pump_active: bool,        // P2.0: Fuel Pump Relay Driver
     pub mil_check_engine_light: bool,  // P2.1: Check Engine Light (MIL) Lamp Driver
-    pub vtec_solenoid_active: bool,    // P2.2 / P3.1: VTEC Spool Valve Solenoid Driver
+    pub vtec_solenoid_active: bool,    // VTEC solenoid (ASIC-driven A25, active-low): set from engine conditions, see EngineState::vtec_engaged
     pub vtec_pressure_switch: bool,    // P2.3: VTEC Oil Pressure Switch Contact Input
     pub ac_clutch_active: bool,        // P2.4: A/C Compressor Clutch Relay Driver
     pub radiator_fan_active: bool,     // P2.5: Radiator Cooling Fan Relay Driver
@@ -335,15 +335,6 @@ impl Bus {
             self.ac_clutch_active = (p2 & (1 << 4)) != 0;
             self.radiator_fan_active = (p2 & (1 << 5)) != 0;
             self.purge_solenoid_active = (p2 & (1 << 6)) != 0;
-
-            // On the P28, P2.0..P2.3 are the injector drivers, so the VTEC
-            // spool-valve solenoid is driven from P3.1 (active high). Reflect a
-            // write to that pin on the physical solenoid-state field the test
-            // harness and datalogger read back.
-            if addr == SFR_P3 {
-                let p3 = self.ram[SFR_P3 as usize];
-                self.vtec_solenoid_active = (p3 & (1 << 1)) != 0;
-            }
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }
