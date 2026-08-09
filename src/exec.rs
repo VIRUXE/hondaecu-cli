@@ -42,6 +42,11 @@ pub struct Exec<'a> {
     pub cpu: &'a mut Cpu,
     pub bus: &'a mut Bus,
     d: Decoded,
+    /// Set when a *conditional* branch (Jcc / JBS / JBR / JRNZ) actually
+    /// transfers control. The manual charges four extra INT cycles for a taken
+    /// conditional branch over the not-taken cost stored in `Decoded::cycles`;
+    /// `step` reads this to add them.
+    branch_taken: bool,
 }
 
 impl<'a> Exec<'a> {
@@ -583,6 +588,7 @@ impl<'a> Exec<'a> {
                 if take {
                     let off = self.d.fields.rel8 as i16;
                     self.cpu.pc = self.cpu.pc.wrapping_add(off as u16);
+                    self.branch_taken = true;
                 }
             }
             "JBS" | "JBR" => {
@@ -591,6 +597,7 @@ impl<'a> Exec<'a> {
                 if take {
                     let off = self.d.fields.rel8 as i16;
                     self.cpu.pc = self.cpu.pc.wrapping_add(off as u16);
+                    self.branch_taken = true;
                 }
             }
             "JRNZ" => {
@@ -600,6 +607,7 @@ impl<'a> Exec<'a> {
                 if v != 0 {
                     let off = self.d.fields.rel8 as i16;
                     self.cpu.pc = self.cpu.pc.wrapping_add(off as u16);
+                    self.branch_taken = true;
                 }
             }
             "BRK" => {
@@ -673,7 +681,10 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> Result<Decoded, ExecError> {
     // PC advances past the instruction before execution, so rel8 targets and
     // pushed return addresses are relative to the *next* instruction.
     cpu.pc = pc.wrapping_add(d.len as u16);
-    cpu.cycles += d.len as u64;
+    // `cycles` now tracks real INT machine cycles (decoder::int_cycles), not
+    // instruction bytes, so peripheral time and injector pulse widths measured
+    // off it come out in true microseconds at the 12 MHz core clock.
+    cpu.cycles += d.cycles as u64;
     cpu.instructions += 1;
 
     let parsed = match &table()[d.index] {
@@ -687,12 +698,24 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> Result<Decoded, ExecError> {
     };
 
     let dd_after = d.dd_after;
-    let mut ex = Exec { cpu, bus, d: d.clone() };
+    let mut ex = Exec {
+        cpu,
+        bus,
+        d: d.clone(),
+        branch_taken: false,
+    };
     ex.run(parsed)?;
+    // Read the flag before touching `cpu` again so the reborrow held by `ex`
+    // ends cleanly.
+    let branch_taken = ex.branch_taken;
 
     // L/LB-class instructions leave the word/byte mode set for what follows.
     if let Some(v) = dd_after {
         cpu.dd = v;
+    }
+    // A taken conditional branch costs four cycles more than the fall-through.
+    if branch_taken {
+        cpu.cycles += 4;
     }
     Ok(d)
 }
@@ -853,10 +876,11 @@ mod tests {
                 reached_peripheral_ok = true;
                 break;
             }
+            let before = cpu.cycles;
             if let Err(e) = step(&mut cpu, &mut bus) {
                 panic!("{e} after {} instructions", cpu.instructions);
             }
-            bus.tick_timers(2);
+            bus.tick_timers((cpu.cycles - before) as u32);
         }
 
         assert!(
@@ -932,6 +956,7 @@ mod tests {
             }
             let pc = cpu.pc;
             let is_brk = bus.read_code_u8(pc) == 0xFF;
+            let before = cpu.cycles;
             if let Err(e) = step(&mut cpu, &mut bus) {
                 eprintln!("STOP: {e} after {} instructions", cpu.instructions);
                 break;
@@ -943,7 +968,7 @@ mod tests {
                     bus.read_data_u8(0xEB)
                 );
             }
-            bus.tick_timers(2);
+            bus.tick_timers((cpu.cycles - before) as u32);
         }
         let mut top: Vec<_> = hits.iter().map(|(k, v)| (*v, *k)).collect();
         top.sort_unstable_by(|a, b| b.cmp(a));

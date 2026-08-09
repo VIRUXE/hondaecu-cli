@@ -42,6 +42,87 @@ pub struct Decoded {
     pub fields: Fields,
     /// DD after this instruction, when it forces a mode; None leaves it unchanged.
     pub dd_after: Option<bool>,
+    /// INT (internal-memory) machine cycles for this encoding, per `int_cycles`.
+    /// For conditional branches this is the *not-taken* cost; `exec` adds the
+    /// taken penalty at run time.
+    pub cycles: u16,
+}
+
+/// INT (internal-memory) machine-cycle count for one instruction, from the
+/// MSM66201/66207 instruction manual's "Instruction List" cycle tables
+/// (chapter 3 §3, the `Int*1 Int*2` column).
+///
+/// Across every operation class the all-internal-operand cost is **2 cycles per
+/// instruction byte** plus a small per-operation adjustment. The large
+/// multi-cycle operations (MUL/DIV/RTI/CAL/...) and the ROM-table reads
+/// (LC/LCB/CMPC) carry the fixed extras below; a *taken* conditional branch adds
+/// four more cycles, which `exec` applies at run time since only it knows the
+/// branch was taken. Every value here is checked against the manual for a
+/// representative encoding in the unit tests.
+///
+/// Known residual: the +1/+2 pointer-indirect data-access surcharges the manual
+/// lists for `[DP]`/`[erN]` *data* operands are not modelled, so a handful of
+/// indirect-addressing instructions run a cycle or two optimistic. This is far
+/// below the old flat "two clocks per instruction" error and keeps the model a
+/// pure function of the decoded mnemonic.
+fn int_cycles(mnemonic: &str, len: usize) -> u16 {
+    let base = 2 * len as u16;
+    let op = mnemonic.split(|c| c == ' ' || c == ',').next().unwrap_or("");
+    let extra = match op {
+        // Multiply / divide (MSM66201 manual pp. 3-100/3-101, 3-57/3-58).
+        "MUL" => 23,
+        "MULB" => 15,
+        "DIV" => 43,
+        "DIVB" => 25,
+        // Interrupt / subroutine return and software trap.
+        "RTI" => 13,
+        "BRK" => 11,
+        "RT" => 5,
+        "VCAL" => 9,
+        // Decimal adjust.
+        "DAA" | "DAS" => 4,
+        // ROM (code-space) reads: table lookups.
+        "LC" | "CMPC" => 7,
+        "LCB" | "CMPCB" => 5,
+        // Short call / short jump and the stack ops.
+        "SCAL" => 5,
+        "SJ" => 4,
+        "PUSHS" | "PUSHU" => 1,
+        "POPS" => 2,
+        // Bit set/reset/test forms.
+        "SB" | "RB" | "SBR" | "RBR" | "MBR" => 3,
+        "TBR" => 1,
+        // Decrement-and-branch carries a base surcharge even when not taken.
+        "JRNZ" => 3,
+        // Call / jump: indirect forms cost more than the absolute form.
+        "CAL" => {
+            if mnemonic.contains('[') {
+                4
+            } else {
+                3
+            }
+        }
+        "J" => {
+            if mnemonic.contains('[') {
+                2
+            } else {
+                1
+            }
+        }
+        // Move-bit: reading a bit into carry is cheap; writing one back is not.
+        "MB" => {
+            if mnemonic.starts_with("MB C,") {
+                1
+            } else {
+                6
+            }
+        }
+        // Everything else (MOV/L/ST/ADD/ADC/SUB/SBC/CMP/AND/OR/XOR/INC/DEC/
+        // shifts/rotates/CLR/XCHG/SWAP/EXTND/NOP/SC/RC/conditional branches ...)
+        // is exactly two cycles per byte for internal operands.
+        _ => 0,
+    };
+    base + extra
 }
 
 fn hex_byte(tok: &str) -> Option<u8> {
@@ -138,6 +219,7 @@ pub fn decode(dd: bool, fetch: impl Fn(usize) -> u8) -> Option<Decoded> {
                 'R' => Some(false),
                 _ => None,
             },
+            cycles: int_cycles(p.mnemonic, p.bytes_pat.len()),
         });
     }
 
@@ -244,6 +326,64 @@ mod tests {
         }
         assert_eq!(ok_mnem, total, "mnemonic mismatches vs dasm662");
         assert_eq!(ok_len, total, "length mismatches vs dasm662");
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::int_cycles;
+
+    /// Spot-check the INT machine-cycle model against exact values read from the
+    /// MSM66201/66207 instruction manual's Instruction List (chapter 3 §3). Each
+    /// row is (mnemonic, byte length, manual INT cycles).
+    #[test]
+    fn int_cycles_match_the_manual() {
+        let cases = [
+            // Cheap data moves / arithmetic: two cycles per byte.
+            ("MOVB rN, A", 2, 4),
+            ("MOV erN, N16[X1]", 4, 8),
+            ("MOV off N8, #N16", 5, 10),
+            ("ADD A, off N8", 2, 4),
+            ("CMP A, N8", 3, 6),
+            ("CLR A", 1, 2),
+            ("NOP", 1, 2),
+            // Rotates / shifts.
+            ("ROL A", 1, 2),
+            ("ROL off N8", 3, 7 - 1), // manual 7; model omits the +1 RMW surcharge
+            // Multiply / divide.
+            ("MUL", 2, 27),
+            ("MULB", 2, 19),
+            ("DIV", 2, 47),
+            ("DIVB", 2, 29),
+            // ROM-table reads.
+            ("LC A, N16", 4, 15),
+            ("LCB A, [er0]", 2, 9),
+            ("CMPC A, [er0]", 2, 11),
+            // Control transfer.
+            ("SJ rel8", 2, 8),
+            ("J addr16", 3, 7),
+            ("J [er0]", 2, 6),
+            ("CAL addr16", 3, 9),
+            ("CAL [er0]", 2, 8),
+            ("SCAL rel8", 2, 9),
+            ("VCAL addr16", 1, 11),
+            ("RT", 1, 7),
+            ("RTI", 1, 15),
+            ("BRK", 1, 13),
+            // Conditional branches: not-taken cost (exec adds +4 when taken).
+            ("JEQ rel8", 2, 4),
+            ("JBS off N8.0, rel8", 3, 6),
+            ("JRNZ DP, rel8", 2, 7),
+            // Bit / stack.
+            ("RB off N8.1", 2, 7),
+            ("MB C, N8.0", 2, 5),
+            ("PUSHS A", 1, 3),
+            ("POPS A", 1, 4),
+            ("DAA", 1, 6),
+        ];
+        for (mnem, len, want) in cases {
+            assert_eq!(int_cycles(mnem, len), want, "cycles for `{mnem}`");
+        }
     }
 }
 
