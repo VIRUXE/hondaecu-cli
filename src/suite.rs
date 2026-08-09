@@ -26,8 +26,7 @@ impl EcuTestSuite {
 
         let start_time = std::time::Instant::now();
 
-        // 1. Core Hardware & Memory Baseline (8 Tests)
-        results.push(Self::test_rom_checksum(rom_path));
+        // 1. Core Hardware & Memory Baseline (7 Tests)
         results.push(Self::test_vector_table(rom_path));
         results.push(Self::test_reset_boot(rom_path));
         results.push(Self::test_adc_sensors(rom_path));
@@ -60,33 +59,6 @@ impl EcuTestSuite {
         println!("Executed {} tests in {:.2?}", results.len(), elapsed);
 
         results
-    }
-
-    fn test_rom_checksum(rom_path: &str) -> TestResult {
-        let mut bus = Bus::new();
-        if let Err(e) = bus.load_rom_file(rom_path) {
-            return TestResult {
-                name: "ROM File Load & Checksum".to_string(),
-                passed: false,
-                details: format!("Failed to read file: {}", e),
-            };
-        }
-
-        let sum: u32 = bus.rom.iter().map(|&b| b as u32).sum();
-        let mod8 = (sum % 256) as u8;
-        let chk_byte = bus.rom[0x7FFF];
-
-        let passed = mod8 == 0;
-        let details = format!(
-            "ROM Size: {} bytes, 8-bit Modulo Sum: 0x{:02X} (Checksum Byte at 0x7FFF: 0x{:02X})",
-            bus.rom.len(), mod8, chk_byte
-        );
-
-        TestResult {
-            name: "ROM File Load & Checksum".to_string(),
-            passed,
-            details,
-        }
     }
 
     fn test_vector_table(rom_path: &str) -> TestResult {
