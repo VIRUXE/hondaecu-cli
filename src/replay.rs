@@ -224,6 +224,114 @@ impl ReplayEngine {
         fingerprint == 0x1AA8_776D_484A_5AD5
     }
 
+    /// Python-drivable execution-trace primitive for emulator/ROM exploration.
+    /// Boots the ROM to runtime, holds `rpm` with warm running sensors, warms
+    /// up 0.5 s, then runs `secs` of engine-time emitting whitespace-delimited
+    /// lines to stdout for the requested `mode`:
+    ///   ramwatch <a,a,..> : `RAMW pc addr old new` on each change (hex)
+    ///   pcwatch  <p,p,..> : `PCW pc A LRB DP X1 cf` each time PC hits
+    ///   pccount  <p,p,..> : `PCCNT pc count` at end
+    ///   pchist   [n]      : `PCHIST pc count` top-n at end
+    ///   snap     <lo> <hi>: `SNAP lo <hexbytes>` at end
+    ///   exec     <lo> <hi>: `EXEC pc mnemonic` for executed PCs in [lo,hi]
+    /// All addresses are absolute bus.ram indices (remember `off N8` variables
+    /// live at ((LRB>>5)<<8)|N8, not N8).
+    pub fn trace(rom_path: &str, mode: &str, rpm: f64, secs: f64, rest: &[String]) -> io::Result<()> {
+        let hz = crate::bus::CPU_HZ;
+        let hx = |s: &str| u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
+        let list = |s: Option<&String>| -> Vec<u16> {
+            s.map(|s| s.split(',').filter_map(|x| hx(x)).collect()).unwrap_or_default()
+        };
+
+        let mut bus = Bus::new();
+        bus.load_rom_file(rom_path)?;
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0x0000);
+        Self::boot_to_runtime(&mut cpu, &mut bus)?;
+
+        let mut engine = EngineState::new();
+        engine.rpm = rpm;
+        engine.map_kpa = 90.0;
+        engine.tps_pct = 65.0;
+        engine.ect_celsius = 88.0;
+        engine.iat_celsius = 30.0;
+        engine.vbatt_volts = 14.2;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let step = |cpu: &mut Cpu, bus: &mut Bus, engine: &mut EngineState| -> crate::interpreter::DisasmInstruction {
+            let before = cpu.cycles;
+            let ins = Interpreter::step(cpu, bus);
+            let t = bus.tick_timers((cpu.cycles - before) as u32);
+            let d = engine.check_distributor_pulses(bus, cpu.cycles, hz);
+            InterruptController::handle_pending_interrupts(cpu, bus, t | d);
+            ins
+        };
+
+        let warm = cpu.cycles + hz / 2;
+        while cpu.cycles < warm && !cpu.halted {
+            step(&mut cpu, &mut bus, &mut engine);
+        }
+
+        let watch_ram: Vec<usize> = if mode == "ramwatch" {
+            list(rest.first()).iter().map(|&a| a as usize).filter(|&a| a < bus.ram.len()).collect()
+        } else {
+            vec![]
+        };
+        let mut prev_ram: Vec<u8> = watch_ram.iter().map(|&a| bus.ram[a]).collect();
+        let watch_pc = list(rest.first());
+        let lo = rest.first().and_then(|s| hx(s)).unwrap_or(0);
+        let hi = rest.get(1).and_then(|s| hx(s)).unwrap_or(0);
+        let mut pc_counts: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
+        let mut hist: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
+        let mut exec_lines = 0u64;
+
+        let end = cpu.cycles + (secs * hz as f64) as u64;
+        while cpu.cycles < end && !cpu.halted {
+            let pc = cpu.pc;
+            match mode {
+                "pchist" => { *hist.entry(pc).or_default() += 1; }
+                "pccount" if watch_pc.contains(&pc) => { *pc_counts.entry(pc).or_default() += 1; }
+                "pcwatch" if watch_pc.contains(&pc) => {
+                    println!("PCW {:04X} A={:04X} LRB={:04X} DP={:04X} X1={:04X} cf={}",
+                        pc, cpu.a, cpu.lrb, cpu.dp, cpu.x1, cpu.cf as u8);
+                }
+                _ => {}
+            }
+            let ins = step(&mut cpu, &mut bus, &mut engine);
+            if mode == "exec" && pc >= lo && pc <= hi && exec_lines < 400 {
+                println!("EXEC {:04X} {}", pc, ins.mnemonic);
+                exec_lines += 1;
+            }
+            if mode == "ramwatch" {
+                for (i, &a) in watch_ram.iter().enumerate() {
+                    let now = bus.ram[a];
+                    if now != prev_ram[i] {
+                        println!("RAMW {:04X} {:04X} {:02X} {:02X}", pc, a, prev_ram[i], now);
+                        prev_ram[i] = now;
+                    }
+                }
+            }
+        }
+
+        match mode {
+            "pccount" => for pc in &watch_pc {
+                println!("PCCNT {:04X} {}", pc, pc_counts.get(pc).copied().unwrap_or(0));
+            },
+            "pchist" => {
+                let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(25);
+                let mut v: Vec<_> = hist.into_iter().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1));
+                for (pc, c) in v.into_iter().take(n) { println!("PCHIST {pc:04X} {c}"); }
+            }
+            "snap" => {
+                let bytes: String = (lo..=hi).map(|a| format!("{:02X}", bus.ram[a as usize])).collect();
+                println!("SNAP {lo:04X} {bytes}");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn parse_csv_file(path: &str) -> io::Result<Vec<LogFrame>> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);

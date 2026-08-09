@@ -38,6 +38,8 @@ fn print_usage() {
     println!("  hondaecu-cli interactive <rom.bin>                        Launch interactive simulation REPL console");
     println!("  hondaecu-cli run <rom.bin> [cycles] [rpm]                 Simulate ECU execution for N cycles");
     println!("  hondaecu-cli disasm <rom.bin> [addr] [count]              Disassemble ROM instructions from target address");
+    println!("  hondaecu-cli trace <rom.bin> <mode> <rpm> <secs> [args]   Emit runtime trace for Python analysis");
+    println!("      modes: ramwatch <a,..> | pcwatch <p,..> | pccount <p,..> | pchist [n] | snap <lo> <hi> | exec <lo> <hi>");
     println!();
     println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, launch-control-2step, error-map-failure, error-ect-overheat, cold-start");
     println!();
@@ -175,6 +177,21 @@ fn main() {
                 let ins = Interpreter::step(&mut cpu, &mut bus);
                 let hex = ins.bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
                 println!("  {:#06X}: {:18} ; {}", ins.pc, ins.mnemonic, hex);
+            }
+        }
+
+        "trace" => {
+            // trace <rom> <mode> <rpm> <secs> [args...]
+            // modes: ramwatch <a,..> | pcwatch <p,..> | pccount <p,..> |
+            //        pchist [n] | snap <lo> <hi> | exec <lo> <hi>
+            let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
+            let mode = args.get(3).map(|s| s.as_str()).unwrap_or("pchist");
+            let rpm: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5500.0);
+            let secs: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let rest: Vec<String> = args.iter().skip(6).cloned().collect();
+            if let Err(e) = ReplayEngine::trace(rom_path, mode, rpm, secs, &rest) {
+                eprintln!("trace error: {}", e);
+                process::exit(1);
             }
         }
 
