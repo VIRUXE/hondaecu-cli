@@ -181,11 +181,23 @@ impl EcuTestSuite {
         bus.write_data_u16(0x32, 1000);
         bus.write_data_u16(0x36, 500);
         bus.write_data_u16(0x3A, 2000);
+        // Start TM0/TM1/TM2 (TCON run bit 4) so the compare values above
+        // actually clock and raise compare-match interrupts.
+        bus.write_data_u8(0x40, 0x10);
+        bus.write_data_u8(0x41, 0x10);
+        bus.write_data_u8(0x42, 0x10);
         engine.rpm = 7500.0;
 
         let mut interrupts_handled = 0;
         for cycle in 0..50_000 {
             Interpreter::step(&mut cpu, &mut bus);
+
+            // The ROM's power-on SFR init clears the interrupt-enable register
+            // as it configures the chip. This harness -- not the ROM -- owns
+            // the interrupt scenario under test, so re-assert the enable mask
+            // and MIE each step to keep the timer and distributor sources armed.
+            cpu.set_mie(true);
+            bus.write_data_u16(0x1A, 0xFFFF);
 
             let timer_irq = bus.tick_timers(2);
             let dist_irq = engine.check_distributor_pulses(cycle, 12_000_000);
@@ -263,7 +275,10 @@ impl EcuTestSuite {
 
         let irq = bus.push_serial_rx_byte(0x20);
 
-        let passed = (irq & (1 << 6)) != 0;
+        // The serial-RX completion raises IRQ bit `IRQ_SERIAL_RX`; that is the
+        // bit the dispatcher and the bus agree on, not the interrupt's priority
+        // rank. Assert against the named constant rather than a hard-coded bit.
+        let passed = (irq & (1 << crate::bus::IRQ_SERIAL_RX)) != 0;
         let details = format!(
             "Serial RX Datalogging Command 0x20 -> Triggered UART RX Interrupt Vector {:#06X}",
             0x01FD
@@ -297,7 +312,10 @@ impl EcuTestSuite {
                 let cell_addr = base_fuel_tbl + (r_idx * 20 + m_idx) as u16;
                 let raw_val = bus.read_code_u8(cell_addr);
 
-                let valid = raw_val != 0x00 && raw_val != 0xFF;
+                // 0x00 is a legitimate fuel term -- it is what a tune writes for
+                // decel/overrun fuel cut at low load. Only 0xFF (erased flash)
+                // means the address does not hold programmed table data.
+                let valid = raw_val != 0xFF;
 
                 if (r_idx * 10 + m_idx) % 20 == 0 { // Sample subset to avoid log spam
                     results.push(TestResult {

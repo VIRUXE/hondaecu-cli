@@ -335,6 +335,15 @@ impl Bus {
             self.ac_clutch_active = (p2 & (1 << 4)) != 0;
             self.radiator_fan_active = (p2 & (1 << 5)) != 0;
             self.purge_solenoid_active = (p2 & (1 << 6)) != 0;
+
+            // On the P28, P2.0..P2.3 are the injector drivers, so the VTEC
+            // spool-valve solenoid is driven from P3.1 (active high). Reflect a
+            // write to that pin on the physical solenoid-state field the test
+            // harness and datalogger read back.
+            if addr == SFR_P3 {
+                let p3 = self.ram[SFR_P3 as usize];
+                self.vtec_solenoid_active = (p3 & (1 << 1)) != 0;
+            }
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }

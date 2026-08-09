@@ -84,6 +84,15 @@ pub const ALL_HONDA_OBD1_DTCS: &[DtcInfo] = &[
 pub struct DtcEvaluator;
 
 impl DtcEvaluator {
+    /// Recover the 10-bit A/D count (0..1023) from an ADCR register. The
+    /// converter result is stored left-justified in the 16-bit register
+    /// (bits 15..6, see `Bus::adc_result`), whereas these DTC plausibility
+    /// windows are expressed in raw count units, so shift the justification off
+    /// before comparing.
+    fn adc_count(bus: &mut Bus, addr: u16) -> u16 {
+        bus.read_data_u16(addr) >> 6
+    }
+
     /// Test a specific DTC fault condition against the ECU bus and engine
     pub fn test_dtc_code(info: &DtcInfo, bus: &mut Bus, engine: &mut EngineState) -> (bool, String) {
         match info.code {
@@ -98,7 +107,7 @@ impl DtcEvaluator {
                 engine.o2_volts = 0.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let adcr = bus.read_data_u16(0x68); // O2 ADCR4
+                let adcr = Self::adc_count(bus, 0x68); // O2 ADCR4
                 (adcr < 50, format!("O2 Sensor Voltage 0.0V -> ADCR4: {} (DTC {} Triggered)", adcr, info.number))
             }
 
@@ -106,7 +115,7 @@ impl DtcEvaluator {
                 engine.map_kpa = 0.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let adcr = bus.read_data_u16(0x60); // MAP ADCR0
+                let adcr = Self::adc_count(bus, 0x60); // MAP ADCR0
                 (adcr < 100, format!("MAP Pressure 0 kPa -> ADCR0: {} (DTC {} Triggered)", adcr, info.number))
             }
 
@@ -120,7 +129,7 @@ impl DtcEvaluator {
                 engine.ect_celsius = -40.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let adcr = bus.read_data_u16(0x64); // ECT ADCR2
+                let adcr = Self::adc_count(bus, 0x64); // ECT ADCR2
                 (adcr > 900, format!("ECT Sensor Open Circuit -> ADCR2: {} (DTC 6 Triggered)", adcr))
             }
 
@@ -128,7 +137,7 @@ impl DtcEvaluator {
                 engine.tps_pct = 0.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let adcr = bus.read_data_u16(0x62); // TPS ADCR1
+                let adcr = Self::adc_count(bus, 0x62); // TPS ADCR1
                 (adcr < 120, format!("TPS Sensor Grounded -> ADCR1: {} (DTC 7 Triggered)", adcr))
             }
 
@@ -136,7 +145,7 @@ impl DtcEvaluator {
                 engine.iat_celsius = -40.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let adcr = bus.read_data_u16(0x66); // IAT ADCR3
+                let adcr = Self::adc_count(bus, 0x66); // IAT ADCR3
                 (adcr > 900, format!("IAT Sensor Open Circuit -> ADCR3: {} (DTC 10 Triggered)", adcr))
             }
 
@@ -150,7 +159,7 @@ impl DtcEvaluator {
                 engine.speed_kmh = 0.0;
                 engine.sync_sensors_to_bus(bus);
                 bus.trigger_adc_conversion();
-                let vss_adc = bus.read_data_u16(0x6C); // VSS ADCR6
+                let vss_adc = Self::adc_count(bus, 0x6C); // VSS ADCR6
                 (vss_adc < 10, format!("RPM 3000 with VSS 0 km/h -> ADCR6: {} (DTC 17 Triggered)", vss_adc))
             }
 
