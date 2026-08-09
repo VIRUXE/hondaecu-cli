@@ -247,6 +247,43 @@ impl ReplayEngine {
         bus.load_rom_file(rom_path)?;
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
+
+        // Boot-phase tracing: run reset -> runtime_ready with no engine (as
+        // boot_to_runtime does) while watching PCs (bootpc) or RAM (bootram) --
+        // for inspecting the power-on / init decisions.
+        if mode == "bootpc" || mode == "bootram" {
+            let wpc = list(rest.first());
+            let wram: Vec<usize> = list(rest.first()).iter().map(|&a| a as usize)
+                .filter(|&a| a < bus.ram.len()).collect();
+            let mut pram: Vec<u8> = wram.iter().map(|&a| bus.ram[a]).collect();
+            let ready = Self::runtime_ready_pc(&bus.rom);
+            for _ in 0..8_000_000u64 {
+                if Some(cpu.pc) == ready || cpu.halted { break; }
+                let pc = cpu.pc;
+                if mode == "bootpc" && wpc.contains(&pc) {
+                    let pb = (0x0080 + cpu.scb() * 8) as usize;
+                    let dp = bus.ram[pb + 4] as u16 | ((bus.ram[pb + 5] as u16) << 8);
+                    let x1 = bus.ram[pb] as u16 | ((bus.ram[pb + 1] as u16) << 8);
+                    println!("PCW {:04X} A={:04X} LRB={:04X} DP={:04X} X1={:04X} cf={}",
+                        pc, cpu.a, cpu.lrb, dp, x1, cpu.cf as u8);
+                }
+                let before = cpu.cycles;
+                Interpreter::step(&mut cpu, &mut bus);
+                if mode == "bootram" {
+                    for (i, &a) in wram.iter().enumerate() {
+                        let now = bus.ram[a];
+                        if now != pram[i] {
+                            println!("RAMW {:04X} {:04X} {:02X} {:02X}", pc, a, pram[i], now);
+                            pram[i] = now;
+                        }
+                    }
+                }
+                let irq = bus.tick_timers((cpu.cycles - before) as u32);
+                InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
+            }
+            return Ok(());
+        }
+
         Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
         let mut engine = EngineState::new();
@@ -284,16 +321,30 @@ impl ReplayEngine {
         let mut pc_counts: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
         let mut hist: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
         let mut exec_lines = 0u64;
+        // FORCE=addr:val env hook: pin a RAM byte each step (gate-hypothesis tests).
+        let force: Option<(usize, u8)> = std::env::var("FORCE").ok().and_then(|s| {
+            let (a, v) = s.split_once(':')?;
+            Some((
+                usize::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?,
+                u8::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()?,
+            ))
+        });
+        let mut opens = [0u64; 4];
+        let mut prev_p2 = bus.ram[crate::bus::SFR_P2 as usize];
 
         let end = cpu.cycles + (secs * hz as f64) as u64;
         while cpu.cycles < end && !cpu.halted {
+            if let Some((a, v)) = force { if a < bus.ram.len() { bus.ram[a] = v; } }
             let pc = cpu.pc;
             match mode {
                 "pchist" => { *hist.entry(pc).or_default() += 1; }
                 "pccount" if watch_pc.contains(&pc) => { *pc_counts.entry(pc).or_default() += 1; }
                 "pcwatch" if watch_pc.contains(&pc) => {
+                    let pb = (0x0080 + cpu.scb() * 8) as usize;
+                    let dp = bus.ram[pb + 4] as u16 | ((bus.ram[pb + 5] as u16) << 8);
+                    let x1 = bus.ram[pb] as u16 | ((bus.ram[pb + 1] as u16) << 8);
                     println!("PCW {:04X} A={:04X} LRB={:04X} DP={:04X} X1={:04X} cf={}",
-                        pc, cpu.a, cpu.lrb, cpu.dp, cpu.x1, cpu.cf as u8);
+                        pc, cpu.a, cpu.lrb, dp, x1, cpu.cf as u8);
                 }
                 _ => {}
             }
@@ -311,9 +362,21 @@ impl ReplayEngine {
                     }
                 }
             }
+            if mode == "injcount" {
+                let p2 = bus.ram[crate::bus::SFR_P2 as usize];
+                for bit in 0..4 {
+                    let m = 1u8 << bit;
+                    if prev_p2 & m != 0 && p2 & m == 0 { opens[bit] += 1; }
+                }
+                prev_p2 = p2;
+            }
         }
 
         match mode {
+            "injcount" => {
+                let tot: u64 = opens.iter().sum();
+                println!("INJ {} {} {} {} total {}", opens[0], opens[1], opens[2], opens[3], tot);
+            }
             "pccount" => for pc in &watch_pc {
                 println!("PCCNT {:04X} {}", pc, pc_counts.get(pc).copied().unwrap_or(0));
             },
