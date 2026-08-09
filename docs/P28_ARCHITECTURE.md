@@ -10,13 +10,13 @@ This document provides a technical deep-dive into the hardware architecture, mem
 flowchart TD
     subgraph CPUCore ["OKI MSM66207 Register File"]
         A["Accumulator (A)<br/>16-bit / 8-bit (DD Flag)"]
-        DP["Data Pointer (DP)<br/>16-bit"]
-        X1["Index Register 1 (X1)<br/>16-bit"]
-        X2["Index Register 2 (X2)<br/>16-bit"]
-        USP["User Stack Pointer (USP)"]
+        DP["Data Pointer (DP)<br/>in RAM, not a CPU register"]
+        X1["Index Register 1 (X1)<br/>in RAM"]
+        X2["Index Register 2 (X2)<br/>in RAM"]
+        USP["User Stack Pointer (USP)<br/>in RAM"]
         SSP["System Stack Pointer (SSP)"]
-        LRB["Local Register Bank (LRB)"]
-        PSW["Processor Status Word (PSW)<br/>[ZF | CF | HC | DD | IE]"]
+        LRB["Local Register Bank (LRB)<br/>13-bit: page + register base"]
+        PSW["Processor Status Word (PSW)<br/>[SCB 0-2 | ... | DD 12]"]
     end
 
     subgraph MemorySpace ["Memory Bus Mapping"]
@@ -28,7 +28,7 @@ flowchart TD
         Timers["Hardware Timers: TM0, TM1, TM2, TM3"]
         ADC["10-bit ADC: ADCR0 .. ADCR7"]
         PWM["PWM Drivers: PWMR0 (Fuel), PWMR1 (IACV)"]
-        Ports["Digital IO Ports: P0, P1, P2, P3"]
+        Ports["Digital IO Ports: P0, P1, P2, P3, P4"]
     end
 
     CPUCore <--> MemorySpace
@@ -39,12 +39,21 @@ flowchart TD
 - **Architecture**: OKI MSM66207 16-bit Microcontroller
 - **Clock Speed**: 12.000 MHz Crystal Oscillator (~12 MIPS instruction throughput)
 - **Data Bus**: 16-bit internal architecture
-- **PSW Status Flags**:
-  - `ZF` (Bit 0): Zero Flag
-  - `CF` (Bit 1): Carry Flag (**Borrow Polarity**: `CF = 1` on borrow / less-than)
-  - `HC` (Bit 2): Half-Carry Flag (BCD arithmetic)
-  - `DD` (Bit 3): **Data Direction / Word-Byte Mode Flag** (`DD = 1`: 16-bit word operations; `DD = 0`: 8-bit byte operations)
-  - `IE` (Bit 7): Global Interrupt Enable Flag
+- **PSW Status Word** (per the OKI MSM66201 Instruction Manual):
+  - `SCB` (Bits 0–2): **System Control Base** — selects which pointing-register
+    set `PR0..PR7` is live. `X1`, `X2`, `DP` and `USP` are *not* CPU registers:
+    they live in RAM at `0x0080 + SCB*8`.
+  - Bits 3, 6, 7: unimplemented, **read as 1**.
+  - `DD` (Bit **12**): Word/Byte mode (`DD = 1`: 16-bit; `DD = 0`: 8-bit).
+    Also gates instruction *decoding* — `0x18` is `ADC A, er0` under DD=1 but
+    `ADCB A, r0` under DD=0.
+  - `ZF`, `CF` (borrow polarity: `CF = 1` on borrow / less-than) and `HC` are the
+    only other defined flags. Their exact bit positions are not stated in the
+    manual. There is no interrupt-enable bit in PSW on this core.
+
+> ⚠️ Earlier revisions of this document listed PSW as `[ZF|CF|HC|DD|IE]` in bits
+> 0–7 and treated `X1/X2/DP/USP` as CPU registers. Both were wrong. See
+> [`docs/CPU_CORE.md`](CPU_CORE.md) for the corrected model and its evidence.
 
 ---
 
@@ -53,7 +62,8 @@ flowchart TD
 | Address Range | Memory Type | Function / Content |
 |---|---|---|
 | `0x0000` – `0x007F` | **SFR Space** | Special Function Registers (Timers, ADC, PWM, I/O Ports) |
-| `0x0080` – `0x0FFF` | **Data RAM** | 4KB Internal Data RAM (Transient engine variables, learned trims) |
+| `0x0080` – `0x00BF` | **Pointing Registers** | 8 sets `PR0..PR7`, each `X1, X2, DP, USP`; the live set is chosen by PSW `SCB` |
+| `0x00C0` – `0x0FFF` | **Data RAM** | Internal Data RAM (Transient engine variables, learned trims) |
 | `0x0000` – `0x7FFF` | **Code ROM** | 32KB External EPROM (Machine code instructions, Fuel & Ignition 3D Lookup Tables) |
 
 ---

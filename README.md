@@ -12,6 +12,7 @@ A high-performance command-line emulator and ROM testing suite for **Honda OBD1 
 ## 📚 Documentation Index
 
 - 📖 [**Real-World Scenario Playback Guide (`docs/SCENARIOS.md`)**](docs/SCENARIOS.md): Complete guide to preset runtime engine scenarios (Overrun DFCO, Drag Strip Pass, Accel Tip-In Stomp, VTEC Hysteresis, Electrical Idle Load, Heat Soak Start, Cold Start) and writing custom CSV datalog traces.
+- 🧠 [**OKI MSM66207 CPU Core — Findings & Implementation Notes (`docs/CPU_CORE.md`)**](docs/CPU_CORE.md): How instructions are decoded and executed, the register/memory model (memory-mapped SFRs, pointing registers, LRB paging, real PSW layout), Port 4 / PWM peripheral behaviour, how the core is verified against `dasm662` and the ROM's own power-on self-test, plus current gaps and primary sources.
 - 📐 [**Honda P28 ECU Hardware Architecture (`docs/P28_ARCHITECTURE.md`)**](docs/P28_ARCHITECTURE.md): Deep technical specification of OKI MSM66207 memory mapping, Special Function Registers (SFRs), Interrupt Vector Table, Fuel & Ignition math formulas, VTEC logic, and DTC diagnostic pipeline.
 
 ---

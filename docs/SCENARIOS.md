@@ -28,6 +28,7 @@
 | **`overrun-downhill`** | Extended downhill coasting with intermittent heel-toe throttle blips | Intermittent DFCO cut-off, transient blip enrichment, and engine braking vacuum transitions. |
 | **`accel-stomp`** | Steady cruise (2500 RPM, 15% TPS) followed by instant 100% TPS WOT stomp | **Transient Acceleration Tip-In Enrichment** ($\frac{d\text{TPS}}{dt}$ & $\Delta\text{MAP}$ derivative enrichment multipliers). |
 | **`drag-pass`** | 1/4 Mile Drag Strip Pass (2-Step launch → 1st → 2nd → 3rd → 4th → trap overrun) | **Launch Control 2-Step Limiter**, high-load fuel delivery, VTEC high-cam crossover, gear-shift lifts, and high-RPM trap DFCO. |
+| **`launch-control-2step`** | Dedicated 2-Step stimulus: idle → WOT stab → stationary RPM bounce → clutch drop/launch → 1st gear pull → off-throttle abort | Compare ECU outputs across stationary, rolling and abort phases on a ROM that contains launch control. |
 | **`vtec-hysteresis`** | RPM oscillating around 4800 RPM threshold with VTEC oil pressure fault injection | VTEC Spool Valve engagement criteria (RPM $\ge$ 4800, TPS $\ge$ 20%, ECT $\ge$ 60°C) and DTC 22 pressure switch hysteresis. |
 | **`electrical-load-idle`** | Engine idling at 800 RPM while AC compressor and headlights cycle ON/OFF | **Idle Air Control Valve (IACV) Load Compensation** & alternator voltage dip dead-time compensation ($T_{dead}$). |
 | **`heat-soak-start`** | Hot engine restart after sitting (ECT = 98°C, IAT = 60°C) | Hot-start anti-percolation fuel enrichment and IAT air density trim corrections. |
@@ -99,6 +100,39 @@
 # Windows (PowerShell / CMD)
 .\hondaecu-cli.exe replay P28-230.bin error-o2-lean-stuck
 ```
+
+---
+
+### 5. Dedicated 2-Step Launch-Control Stimulus (`launch-control-2step`)
+
+This is an input trace, not a closed-loop chassis simulation. It feeds RPM,
+speed and sensor values to a ROM so its output response can be inspected. The
+RPM rise above 4200 is scripted and therefore does **not**, by itself, prove
+that a limiter released. Use a ROM that actually contains a 2-step patch; the
+OEM P28-230 image is a stock calibration and is not a positive 2-step fixture.
+The CLI detects that exact stock image and fails fast with an unsupported-ROM
+error instead of reporting a false pass.
+
+- **$t = 0$–$1.0\text{s}$**: Idle at 900 RPM, 0% TPS, 0 km/h — brake/clutch held, baseline before the stab.
+- **$t = 1.0$–$1.3\text{s}$**: Driver stabs to 100% TPS while stationary; RPM ramps 900 → 4200 approaching the 2-step ceiling.
+- **$t = 1.3$–$5.0\text{s}$**: **2-Step Rev Limiter Bounce** — RPM sawtooths ±250 around 4200 (period 0.4s) at 100% TPS / 0 km/h, simulating the fuel/spark-cut oscillation of a held limiter.
+- **$t = 5.0$–$5.2\text{s}$**: Clutch drop / launch — speed rises 0 → 15 km/h while RPM holds near 4200.
+- **$t = 5.2$–$8.0\text{s}$**: 1st gear pull stimulus — RPM climbs 4200 → 8200 as speed rises 15 → 90 km/h.
+- **$t = 8.0$–$8.3\text{s}$**: Off-throttle abort stimulus — TPS snaps to 0% at high RPM / high speed.
+- **$t = 8.3$–$9.5\text{s}$**: Coast down to a stop, TPS held at 0%.
+
+```bash
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin launch-control-2step launch_2step_results.csv
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin launch-control-2step launch_2step_results.csv
+```
+
+The CSV includes `speed_kmh` and injector duration measured from active-low
+P2.0–P2.3 transitions. A meaningful assertion must compare those ECU outputs
+between the stationary, rolling and abort phases; it must not assert against
+the scripted RPM input.
 
 ---
 

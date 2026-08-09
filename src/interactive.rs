@@ -99,9 +99,9 @@ impl InteractiveShell {
                     println!("CPU Register File:");
                     println!("  PC : {:#06X}   A  : {:#06X} (AL:{:#04X}, AH:{:#04X})", cpu.pc, cpu.a, cpu.al(), cpu.ah());
                     println!("  DP : {:#06X}   X1 : {:#06X}   X2 : {:#06X}", cpu.dp, cpu.x1, cpu.x2);
-                    println!("  SSP: {:#06X}   USP: {:#06X}   LRB: {:#04X}", cpu.ssp, cpu.usp, cpu.lrb);
-                    println!("  PSW: {:#06X} [ ZF:{} CF:{} HC:{} DD:{} IE:{} ]",
-                             cpu.psw_u16(), cpu.zf as u8, cpu.cf as u8, cpu.hc as u8, cpu.dd as u8, cpu.ie as u8);
+                    println!("  SSP: {:#06X}   USP: {:#06X}   LRB: {:#06X}", cpu.ssp, cpu.usp, cpu.lrb);
+                    println!("  PSW: {:#06X} [ ZF:{} CF:{} HC:{} DD:{} MIE:{} ]",
+                             cpu.psw_u16(), cpu.zf as u8, cpu.cf as u8, cpu.hc as u8, cpu.dd as u8, cpu.mie() as u8);
                     println!("  Cycles: {}, Instructions: {}", cpu.cycles, cpu.instructions);
                 }
 

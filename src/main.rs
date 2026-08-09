@@ -9,6 +9,9 @@ mod interpreter;
 mod interrupts;
 mod dtc;
 mod full_decoder;
+mod decoder;
+mod operand;
+mod exec;
 mod suite;
 mod interactive;
 mod replay;
@@ -36,7 +39,7 @@ fn print_usage() {
     println!("  hondaecu-cli run <rom.bin> [cycles] [rpm]                 Simulate ECU execution for N cycles");
     println!("  hondaecu-cli disasm <rom.bin> [addr] [count]              Disassemble ROM instructions from target address");
     println!();
-    println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, error-map-failure, error-ect-overheat, cold-start");
+    println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, launch-control-2step, error-map-failure, error-ect-overheat, cold-start");
     println!();
     println!("Examples:");
     println!("  ./hondaecu-cli datalog P28-230.bin 38400");

@@ -176,7 +176,7 @@ impl EcuTestSuite {
         let mut engine = EngineState::new();
 
         cpu.pc = bus.read_code_u16(0x0000);
-        cpu.ie = true;
+        cpu.set_mie(true);
         bus.write_data_u16(0x1A, 0xFFFF);
         bus.write_data_u16(0x32, 1000);
         bus.write_data_u16(0x36, 500);
@@ -186,7 +186,6 @@ impl EcuTestSuite {
         let mut interrupts_handled = 0;
         for cycle in 0..50_000 {
             Interpreter::step(&mut cpu, &mut bus);
-            cpu.ie = true;
 
             let timer_irq = bus.tick_timers(2);
             let dist_irq = engine.check_distributor_pulses(cycle, 12_000_000);

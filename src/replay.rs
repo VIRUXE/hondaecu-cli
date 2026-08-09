@@ -29,6 +29,7 @@ pub struct ReplayResultFrame {
     pub map_kpa: f64,
     pub tps_pct: f64,
     pub ect_celsius: f64,
+    pub speed_kmh: f64,
     pub injector_pw_us: u32,
     pub iacv_duty_pct: f32,
     pub vtec_active: bool,
@@ -48,11 +49,16 @@ impl ReplayEngine {
 
         let mut bus = Bus::new();
         bus.load_rom_file(rom_path)?;
+        if log_source == "launch-control-2step" && Self::is_stock_p28_230(&bus.rom) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "launch-control-2step requires a launch-enabled ROM; the OEM P28-230 ROM does not contain launch control",
+            ));
+        }
 
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
-        cpu.ie = true;
-        bus.write_data_u16(0x1A, 0xFFFF); // Enable IE
+        Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
         let mut engine = EngineState::new();
         let mut results = Vec::new();
@@ -63,9 +69,14 @@ impl ReplayEngine {
         println!("  Log Source    : {}", log_source);
         println!("  Total Frames  : {}", frames.len());
         println!("============================================================");
-        println!("{:>6}ms | {:>6} RPM | {:>5} kPa | {:>4}% TPS | {:>5}°C | {:>8} us | {:>6}% IACV | VTEC       | Phase / Note",
-                 "Time", "RPM", "MAP", "TPS", "ECT", "Inj PW", "Duty");
-        println!("---------------------------------------------------------------------------------------------------------");
+        if log_source == "launch-control-2step" {
+            println!(
+                "  NOTE: launch-control-2step is an open-loop stimulus; use a launch-enabled ROM."
+            );
+        }
+        println!("{:>6}ms | {:>6} RPM | {:>5} kPa | {:>4}% TPS | {:>5}°C | {:>5} km/h | {:>8} us | {:>6}% IACV | VTEC       | Phase / Note",
+                 "Time", "RPM", "MAP", "TPS", "ECT", "Speed", "Inj PW", "Duty");
+        println!("---------------------------------------------------------------------------------------------------------------------");
 
         let mut last_ms: u64 = 0;
 
@@ -93,15 +104,20 @@ impl ReplayEngine {
             let start_cycle = cpu.cycles;
 
             while cpu.cycles - start_cycle < frame_cycles {
-                Interpreter::step(&mut cpu, &mut bus);
-                cpu.ie = true; // Keep interrupts active
+                let instruction = Interpreter::step(&mut cpu, &mut bus);
+                if cpu.halted {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "ROM execution stopped during replay at {:#06X}: {}",
+                            instruction.pc, instruction.mnemonic
+                        ),
+                    ));
+                }
 
                 let t_irq = bus.tick_timers(2);
                 let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
                 InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
-                if cpu.halted {
-                    break;
-                }
             }
 
             let res = ReplayResultFrame {
@@ -110,6 +126,7 @@ impl ReplayEngine {
                 map_kpa: frame.map_kpa,
                 tps_pct: frame.tps_pct,
                 ect_celsius: frame.ect_celsius,
+                speed_kmh: frame.speed_kmh,
                 injector_pw_us: bus.injector_pulse_width_us,
                 iacv_duty_pct: bus.iacv_duty_cycle_pct,
                 vtec_active: bus.vtec_solenoid_active,
@@ -117,29 +134,92 @@ impl ReplayEngine {
             };
 
             let vtec_str = if res.vtec_active { "[VTEC ON]" } else { "        " };
-            println!("{:6}ms | {:6.0} RPM | {:5.1} kPa | {:4.0}% TPS | {:5.1}°C | {:8} us | {:6.1}% | {} | {}",
-                     res.timestamp_ms, res.rpm, res.map_kpa, res.tps_pct, res.ect_celsius,
+            println!("{:6}ms | {:6.0} RPM | {:5.1} kPa | {:4.0}% TPS | {:5.1}°C | {:5.1} km/h | {:8} us | {:6.1}% | {} | {}",
+                     res.timestamp_ms, res.rpm, res.map_kpa, res.tps_pct, res.ect_celsius, res.speed_kmh,
                      res.injector_pw_us, res.iacv_duty_pct, vtec_str, res.note);
 
             results.push(res);
         }
 
-        println!("---------------------------------------------------------------------------------------------------------");
-        println!("Log Replay Completed! Played {} frames successfully.", results.len());
+        println!("---------------------------------------------------------------------------------------------------------------------");
+        println!(
+            "Replay completed: processed {} stimulus frames (no behavior pass/fail implied).",
+            results.len()
+        );
 
         // Save output CSV if requested
         if let Some(out_path) = out_csv_path {
             let mut file = File::create(out_path)?;
-            writeln!(file, "timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,injector_pw_us,iacv_duty_pct,vtec_active,note")?;
+            writeln!(file, "timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,speed_kmh,injector_pw_us,iacv_duty_pct,vtec_active,note")?;
             for r in &results {
-                writeln!(file, "{},{:.1},{:.1},{:.1},{:.1},{},{:.1},{},\"{}\"",
+                writeln!(file, "{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.1},{},\"{}\"",
                          r.timestamp_ms, r.rpm, r.map_kpa, r.tps_pct, r.ect_celsius,
-                         r.injector_pw_us, r.iacv_duty_pct, r.vtec_active as u8, r.note)?;
+                         r.speed_kmh, r.injector_pw_us, r.iacv_duty_pct, r.vtec_active as u8, r.note)?;
             }
             println!("Exported replay results to '{}'", out_path);
         }
 
         Ok(())
+    }
+
+    /// Run the ROM's power-on hardware checks with neutral ADC inputs before
+    /// applying a replay frame. The simplified sensor harness does not yet
+    /// model the P28 board's external analog multiplexer, and feeding direct
+    /// TPS/MAP values into that mux self-test makes a healthy ROM reset with
+    /// boot fault 0x49 before it can process a single scenario frame.
+    fn boot_to_runtime(cpu: &mut Cpu, bus: &mut Bus) -> io::Result<()> {
+        let Some(ready_pc) = Self::runtime_ready_pc(&bus.rom) else {
+            return Ok(());
+        };
+
+        for _ in 0..5_000_000 {
+            if cpu.pc == ready_pc {
+                return Ok(());
+            }
+
+            let instruction = Interpreter::step(cpu, bus);
+            if cpu.halted {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "ROM execution stopped during boot at {:#06X}: {}",
+                        instruction.pc, instruction.mnemonic
+                    ),
+                ));
+            }
+            let irq = bus.tick_timers(2);
+            InterruptController::handle_pending_interrupts(cpu, bus, irq);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("ROM did not finish its power-on checks (target {ready_pc:#06X})"),
+        ))
+    }
+
+    /// Locate the instruction immediately after the ROM's timer-integrity
+    /// failure BRK. The RAM marker byte moves between P28-derived ROMs, so its
+    /// direct address is wildcarded rather than hard-coding P28's 0xEB.
+    fn runtime_ready_pc(rom: &[u8]) -> Option<u16> {
+        rom.windows(6)
+            .position(|w| {
+                w[0] == 0xC5
+                    && w[2] == 0x98
+                    && w[3] == 0x4B
+                    && w[4] == 0xFF
+                    && (0x10..=0x17).contains(&w[5])
+            })
+            .and_then(|offset| u16::try_from(offset + 5).ok())
+    }
+
+    fn is_stock_p28_230(rom: &[u8]) -> bool {
+        // FNV-1a is used only as a stable local identity check, not for
+        // security. Any launch-control patch changes the fingerprint and is
+        // allowed through to the stimulus runner.
+        let fingerprint = rom.iter().fold(0xCBF2_9CE4_8422_2325u64, |hash, byte| {
+            (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01B3)
+        });
+        fingerprint == 0x1AA8_776D_484A_5AD5
     }
 
     fn parse_csv_file(path: &str) -> io::Result<Vec<LogFrame>> {
@@ -604,6 +684,53 @@ impl ReplayEngine {
                 }
             }
 
+            // Launch Control 2-Step Rev Limiter Test
+            // Isolates the 2-step limiter behavior that `drag-pass` only touches briefly:
+            // idle -> throttle stab into the stationary limiter -> sustained bounce
+            // (brake/clutch held, TPS pinned, speed=0) -> clutch drop / launch ->
+            // 2-step release under load -> an off-throttle abort to confirm the
+            // limiter does NOT re-latch once the car is rolling.
+            "launch-control-2step" => {
+                for i in 0..=190 {
+                    let ms = i * 50;
+                    let sec = ms as f64 / 1000.0;
+
+                    let (rpm, map, tps, speed, note) = if sec < 1.0 {
+                        (900.0, 30.0, 0.0, 0.0, "Pre-Launch Idle (Brake Held)")
+                    } else if sec < 1.3 {
+                        let pct = (sec - 1.0) / 0.3;
+                        (900.0 + pct * 3300.0, 60.0 + pct * 35.0, 100.0, 0.0, "Throttle Stab - Approaching 2-Step Limiter")
+                    } else if sec < 5.0 {
+                        let osc = (2.0 * std::f64::consts::PI * (sec - 1.3) / 0.4).sin();
+                        (4200.0 + osc * 250.0, 95.0, 100.0, 0.0, "2-Step Rev Limiter Bounce (Stationary, Brake/Clutch Held)")
+                    } else if sec < 5.2 {
+                        let pct = (sec - 5.0) / 0.2;
+                        (4200.0, 96.0, 100.0, pct * 15.0, "Launch - Clutch Drop / Wheel Speed Rising")
+                    } else if sec < 8.0 {
+                        let pct = (sec - 5.2) / 2.8;
+                        (4200.0 + pct * 4000.0, 99.0, 100.0, 15.0 + pct * 75.0, "1st Gear Full Acceleration (2-Step Released)")
+                    } else if sec < 8.3 {
+                        (8200.0 - (sec - 8.0) * 3000.0, 20.0, 0.0, 90.0, "Off-Throttle Abort (Speed Nonzero - 2-Step Must Stay Disengaged)")
+                    } else {
+                        let pct = (sec - 8.3) / 1.2;
+                        (7300.0 - pct * 5900.0, 25.0, 0.0, (90.0 - pct * 90.0).max(0.0), "Coast Down After Aborted Launch")
+                    };
+
+                    frames.push(LogFrame {
+                        timestamp_ms: ms,
+                        rpm,
+                        map_kpa: map,
+                        tps_pct: tps,
+                        ect_celsius: 88.0,
+                        iat_celsius: 27.0,
+                        o2_volts: if tps > 50.0 { 0.85 } else { 0.15 },
+                        vbatt_volts: 14.1,
+                        speed_kmh: speed,
+                        note,
+                    });
+                }
+            }
+
             // Fallback
             _ => {
                 for i in 0..=20 {
@@ -624,5 +751,130 @@ impl ReplayEngine {
         }
 
         Ok(frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReplayEngine;
+    use crate::bus::Bus;
+    use crate::cpu::Cpu;
+    use crate::engine::EngineState;
+    use crate::interpreter::Interpreter;
+    use crate::interrupts::InterruptController;
+
+    #[test]
+    fn finds_p28_runtime_entry_after_the_hardware_checks() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let Ok(rom) = std::fs::read(path) else {
+            return;
+        };
+
+        assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3946));
+        assert!(ReplayEngine::is_stock_p28_230(&rom[..32_768]));
+    }
+
+    #[test]
+    fn finds_launch_rom_runtime_entry_after_the_hardware_checks() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-roms/lyonnel-2.0-launch-ok.bin"
+        );
+        let Ok(rom) = std::fs::read(path) else {
+            return;
+        };
+
+        assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3475));
+    }
+
+    #[test]
+    fn launch_preset_contains_stationary_hold_release_and_abort_phases() {
+        let frames =
+            ReplayEngine::generate_preset_scenario("launch-control-2step").expect("preset");
+
+        assert!(frames.iter().any(|f| {
+            f.timestamp_ms >= 1300
+                && f.timestamp_ms < 5000
+                && f.speed_kmh == 0.0
+                && f.tps_pct == 100.0
+        }));
+        assert!(frames
+            .iter()
+            .any(|f| f.timestamp_ms >= 5200 && f.speed_kmh > 0.0 && f.rpm > 4200.0));
+        assert!(frames
+            .iter()
+            .any(|f| f.timestamp_ms >= 8000 && f.speed_kmh > 0.0 && f.tps_pct == 0.0));
+    }
+
+    #[test]
+    fn launch_rom_reaches_runtime_and_drives_an_injector() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-roms/lyonnel-2.0-launch-ok.bin"
+        );
+        let mut bus = Bus::new();
+        if bus.load_rom_file(path).is_err() {
+            eprintln!("launch ROM not present at {path}; skipping");
+            return;
+        }
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0);
+        let mut engine = EngineState::new();
+        engine.rpm = 3_500.0;
+        engine.map_kpa = 100.0;
+        engine.tps_pct = 100.0;
+        engine.ect_celsius = 88.0;
+        engine.speed_kmh = 0.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut reached_runtime = false;
+        let mut dispatched = 0u64;
+
+        for _ in 0..1_600_000 {
+            if cpu.pc == 0x2295 || cpu.pc == 0x05EA {
+                reached_runtime = true;
+            }
+            assert!(
+                !matches!(
+                    cpu.pc,
+                    0x0098
+                        | 0x22AE
+                        | 0x235E
+                        | 0x240F
+                        | 0x2488
+                        | 0x32EE
+                        | 0x33C7
+                        | 0x3474
+                        | 0x450B
+                        | 0x4C98
+                        | 0x4CE5
+                ),
+                "launch ROM entered a BRK fault at {:#06X}",
+                cpu.pc
+            );
+
+            let instruction = Interpreter::step(&mut cpu, &mut bus);
+            assert!(
+                !cpu.halted,
+                "halted at {:#06X}: {}",
+                instruction.pc,
+                instruction.mnemonic
+            );
+            let irq = bus.tick_timers(2)
+                | engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+            dispatched +=
+                InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq) as u64;
+
+            if reached_runtime && bus.injector_pulse_width_us > 0 {
+                break;
+            }
+        }
+
+        assert!(reached_runtime, "launch ROM never reached its runtime loop");
+        assert!(dispatched > 0, "launch ROM never accepted an interrupt");
+        assert!(
+            bus.injector_pulse_width_us > 0,
+            "launch ROM never completed an injector pulse"
+        );
     }
 }

@@ -56,8 +56,6 @@ impl DatalogServer {
 
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
-        cpu.ie = true;
-        bus.write_data_u16(0x1A, 0xFFFF);
 
         let mut engine = EngineState::new();
         engine.rpm = 2500.0;
@@ -129,7 +127,6 @@ impl DatalogServer {
         let start_cycle = cpu.cycles;
         while cpu.cycles - start_cycle < 600_000 {
             Interpreter::step(cpu, bus);
-            cpu.ie = true;
             let t_irq = bus.tick_timers(2);
             let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
             InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);

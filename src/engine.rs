@@ -1,6 +1,6 @@
 // Honda OBD1 D16Z6 / P28 Engine Simulator
 
-use crate::bus::Bus;
+use crate::bus::{Bus, IRQ_INT0, IRQ_INT1};
 
 #[derive(Debug, Clone)]
 pub struct EngineState {
@@ -73,22 +73,22 @@ impl EngineState {
             return 0;
         }
 
-        // 4-cylinder 4-stroke engine: 2 ignition events per revolution
-        // CKP fires every 180 degrees of crankshaft rotation
+        // Honda OBD1 distributors provide 24 CKP edges per cam revolution,
+        // i.e. 12 per crank revolution. TDC provides four edges per cam
+        // revolution, so one TDC edge follows every six CKP edges.
         let cycles_per_rev = (cpu_freq_hz as f64 * 60.0) / self.rpm;
-        let cycles_per_ckp = cycles_per_rev / 2.0;
+        let cycles_per_ckp = cycles_per_rev / 12.0;
 
         let elapsed = total_cycles - self.last_int0_cycle;
         if elapsed as f64 >= cycles_per_ckp {
             self.last_int0_cycle = total_cycles;
             self.ckp_pulse_count += 1;
 
-            let mut irq: u16 = 1 << 5; // INT0 (CKP) interrupt bit
+            let mut irq: u16 = 1 << IRQ_INT0;
 
-            // TDC pulse fires every 4 CKP pulses (once per 720 degrees cycle per cylinder)
-            if self.ckp_pulse_count % 4 == 0 {
+            if self.ckp_pulse_count % 6 == 0 {
                 self.tdc_pulse_count += 1;
-                irq |= 1 << 9; // INT1 (TDC/CYP) interrupt bit
+                irq |= 1 << IRQ_INT1;
             }
 
             return irq;
