@@ -310,24 +310,62 @@ asm662/bin/dasm662 P28-230.bin out.asm
 
 ## 8. Current state and known gaps
 
-**Working.** Every CLI command now reaches the table-driven core through the
-small `interpreter.rs` compatibility adapter. The ROM clears its CPU,
-PWM/Port-4, ADC-completion and timer-integrity checks with no undefined
-opcodes. The long boot trace executes 60 million instructions without a BRK.
+**Working.** Every CLI command reaches the table-driven core through the small
+`interpreter.rs` compatibility adapter. The ROM clears its CPU, PWM/Port-4,
+ADC-completion and timer-integrity checks with no undefined opcodes, and the
+long boot trace executes 60 million instructions without a BRK. Peripheral time
+now advances by the datasheet's real machine-cycle counts per instruction
+(`decoder.rs::int_cycles`, from the chapter-3 INT table), the machine-cycle
+clock is pinned at 5 MHz (`bus::CPU_HZ`, = CLK/2 derived from the 400 ns /
+NOP=2-cycle datasheet minimum), all four timer overflow interrupts are
+delivered, and the CYP cylinder-1 marker is delivered as the polled
+transition-detector bit `SFR_TRNS (0x46).0`. Driven by a crank-angle
+CKP/CYP/TDC generator, the OEM P28 ROM computes a real per-injection pulse
+width (~5–6 ms at 5500 rpm), measured from its active-low P2.0–P2.3 driver
+transitions.
 
 **Known gaps.**
 
-1. Instruction cycle counts are still approximated; peripheral time advances
-   by two clocks per executed instruction.
-2. The replay harness does not model the P28 board's external analog
+1. The replay harness does not model the P28 board's external analog
    multiplexer. It runs the ROM's power-on checks with neutral ADC inputs, then
-   applies scenario sensor values.
-3. Board-level VTEC and IACV pin mappings are not asserted from MCU
-   documentation alone. Injector duration is measured from the ROM's
-   active-low P2.0–P2.3 driver transitions rather than inferred from PWMR.
+   applies scenario sensor values. (Feeding direct TPS/MAP into the mux
+   self-test otherwise trips boot fault 0x49.)
+2. Board-level VTEC and IACV pin mappings are not asserted from MCU
+   documentation alone; injector duration is measured from P2.0–P2.3 rather than
+   inferred from PWMR. `bus.rs` annotates P2.0 as **both** injector 0 and the
+   fuel-pump relay driver — an unresolved port-mapping conflict.
+3. **Sustained running injection is not achieved.** At a steady 5500 rpm the ROM
+   fires all four injectors simultaneously only ~1×/second (a batch prime)
+   instead of the tens-to-hundreds/second a running engine needs. Traced
+   exhaustively (see the `injection-sustain-investigation` session memory and
+   task #5):
+   - Timing, RPM capture (TM2 software input-capture, Δ≈3413 counts/TDC) and the
+     per-TDC pulse computation (TDC ISR `0x05D0` → page-relative pulse word,
+     ~0x0BEA) are all correct. The pulse is computed 177×/s; it is *not* stuck.
+   - Injector-ON is driven only from the main loop (`0x4BCC`), which completes
+     ~1–2 passes/second because each pass runs ~424k instructions across a
+     background ROM checksum (`0x2839`; `JRNZ DP` with DP=0 → up to 65536 iters)
+     and fuel/ignition map interpolation (`0x4EC0` axis search + `0x4E77` lerp).
+   - Ruled out: the artificial stimulus (a realistic crank→catch→run RPM ramp
+     does not help), ISR starvation (~50/50 main/ISR with correct
+     interrupt-depth attribution), a spin/hang (a `0x2459` max-count delay loop
+     was only a side effect of feeding rpm=0), and resets/boot re-runs (0 hits
+     on the reset vector / self-test entry at steady rpm; not halted).
+   - A 424k-instruction main loop is ~2 Hz even on real 5 MHz silicon —
+     impossible for a working ECU — so either the emulator inflates per-pass work
+     or the ROM recomputes its maps every pass because a done/skip flag is never
+     set. Resolving this needs the MSM66207 timer / ADC / full-SFR pages missing
+     from the incomplete users manual, to validate the timer and
+     checksum-scheduling semantics before any change.
 
-The datasheet gives real INT/EXT cycle counts per instruction (chapter 3) for a
-future timing-accuracy pass.
+> **Addressing caveat that invalidated a whole prior localization:** the `off
+> N8` operand is LRB-page-relative — `off_page(n) = ((LRB>>5)<<8) | n` in
+> `cpu.rs` — **not** absolute. Reading `bus.ram[N8]` directly for an
+> `off`-addressed ROM variable inspects the wrong byte. An earlier "pulse word
+> 0xC6 stuck at 0x8000 / countdown 0xC0–0xC7 decrements too slowly" conclusion
+> was an artifact of exactly this; the real pulse lives at page-relative `0x1C6`
+> and is computed correctly. Instrument via effective addresses (or by hooking
+> the interpreter's `ea()`), never via absolute RAM.
 
 ---
 

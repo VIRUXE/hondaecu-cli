@@ -99,6 +99,14 @@ Where:
 - $K_{\lambda}$: Closed-loop O2 sensor feedback correction trim.
 - $T_{dead}(V_{batt})$: Injector opening dead-time latency compensation ($1200\,\mu\text{s}$ at 11V; $650\,\mu\text{s}$ at 14V).
 
+> **Emulation status.** Driven by the crank-angle CKP/CYP/TDC generator, the ROM
+> *does* compute a physical pulse width every TDC (~5–6 ms at 5500 rpm, read from
+> the active-low P2.0–P2.3 driver transitions). What is **not** yet achieved is
+> *sustained running* injection: the ROM only drives the injectors ~1×/second (a
+> batch prime) because the main loop that arms them (`0x4BCC`) completes ~1–2
+> passes/second. Full root-cause analysis and the missing-datasheet blocker are
+> in `docs/CPU_CORE.md` §8 (gap 3) and task #5.
+
 ### 2. Ignition Advance Calculation ($\theta_{spark}$)
 
 $$\theta_{spark} = \theta_{base}(\text{RPM}, \text{MAP}) + \theta_{ect} + \theta_{iat} - \theta_{knock}$$
