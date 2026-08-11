@@ -1,4 +1,4 @@
-// Live Serial Datalogging Protocol Server (HTS / Neptune / Crome Compatible)
+// Experimental Honda-style TCP datalog packet server.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -6,33 +6,44 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::cpu::Cpu;
 use crate::bus::Bus;
+use crate::cpu::Cpu;
 use crate::engine::EngineState;
 use crate::interpreter::Interpreter;
 use crate::interrupts::InterruptController;
+use crate::replay::ReplayEngine;
 
 pub struct DatalogServer;
 
 impl DatalogServer {
     /// Start the live serial datalogging TCP server at 127.0.0.1:38400 (or specified port)
     pub fn start_server(rom_path: &str, port: u16) -> std::io::Result<()> {
+        // Fail before binding or printing "Ready" if the ROM cannot be used.
+        let mut rom_preflight = Bus::new();
+        rom_preflight.load_rom_file(rom_path)?;
+
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr)?;
         println!("============================================================");
-        println!("  HONDA ECU LIVE SERIAL DATALOGGING SERVER");
+        println!("  HONDA ECU EXPERIMENTAL TCP DATALOG SERVER");
         println!("  Target ROM     : {}", rom_path);
         println!("  Listening On   : TCP {}", addr);
-        println!("  Protocol       : HTS / Neptune / Crome (38,400 Baud Datalog)");
+        println!(
+            "  Protocol       : 16-byte exploratory framing; tuning-suite compatibility unverified"
+        );
+        println!("  Timing         : Best-effort host TCP; not a real-time 20 Hz guarantee");
         println!("============================================================");
-        println!("  Ready for connection from Honda Tuning Suite or tuning software...");
+        println!("  Ready for a TCP test client...");
 
         let rom_path_owned = rom_path.to_string();
 
         for stream in listener.incoming() {
             match stream {
                 Ok(mut socket) => {
-                    println!("\n[+] Tuning software client connected from {:?}", socket.peer_addr());
+                    println!(
+                        "\n[+] Tuning software client connected from {:?}",
+                        socket.peer_addr()
+                    );
                     let rom_path_clone = rom_path_owned.clone();
                     thread::spawn(move || {
                         if let Err(e) = Self::handle_client(&mut socket, &rom_path_clone) {
@@ -56,8 +67,7 @@ impl DatalogServer {
 
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
-        cpu.ie = true;
-        bus.write_data_u16(0x1A, 0xFFFF);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus)?;
 
         let mut engine = EngineState::new();
         engine.rpm = 2500.0;
@@ -83,12 +93,18 @@ impl DatalogServer {
                     match cmd {
                         // Command 0x20: Main 16-Byte Datalog Packet Request
                         0x20 | 0x30 | 0x40 => {
-                            let packet = Self::build_datalog_packet(&mut cpu, &mut bus, &mut engine, start_time.elapsed().as_secs_f64());
+                            let packet = Self::build_datalog_packet(
+                                &mut cpu,
+                                &mut bus,
+                                &mut engine,
+                                start_time.elapsed().as_secs_f64(),
+                            );
                             socket.write_all(&packet)?;
                         }
                         // Command 0x10: ECU ID Query
                         0x10 => {
-                            let id_response = [0x10, 0x50, 0x32, 0x38, 0x2D, 0x32, 0x33, 0x30, 0x00]; // "P28-230"
+                            let id_response =
+                                [0x10, 0x50, 0x32, 0x38, 0x2D, 0x32, 0x33, 0x30, 0x00]; // "P28-230"
                             socket.write_all(&id_response)?;
                         }
                         // Command 0x00: Ping
@@ -97,15 +113,26 @@ impl DatalogServer {
                         }
                         _ => {
                             // Default packet echo
-                            let packet = Self::build_datalog_packet(&mut cpu, &mut bus, &mut engine, start_time.elapsed().as_secs_f64());
+                            let packet = Self::build_datalog_packet(
+                                &mut cpu,
+                                &mut bus,
+                                &mut engine,
+                                start_time.elapsed().as_secs_f64(),
+                            );
                             socket.write_all(&packet)?;
                         }
                     }
                 }
                 _ => {
-                    // Periodic auto datalog stream (20 Hz = 50ms)
+                    // Best-effort periodic stream. CPU simulation time is in
+                    // addition to this delay, so host throughput is not 20 Hz.
                     thread::sleep(Duration::from_millis(50));
-                    let packet = Self::build_datalog_packet(&mut cpu, &mut bus, &mut engine, start_time.elapsed().as_secs_f64());
+                    let packet = Self::build_datalog_packet(
+                        &mut cpu,
+                        &mut bus,
+                        &mut engine,
+                        start_time.elapsed().as_secs_f64(),
+                    );
                     if socket.write_all(&packet).is_err() {
                         break; // Connection closed
                     }
@@ -116,8 +143,13 @@ impl DatalogServer {
         Ok(())
     }
 
-    /// Build standard HTS/Neptune 16-byte binary datalog packet
-    fn build_datalog_packet(cpu: &mut Cpu, bus: &mut Bus, engine: &mut EngineState, elapsed_sec: f64) -> [u8; 16] {
+    /// Build the emulator's experimental 16-byte binary datalog packet.
+    fn build_datalog_packet(
+        cpu: &mut Cpu,
+        bus: &mut Bus,
+        engine: &mut EngineState,
+        elapsed_sec: f64,
+    ) -> [u8; 16] {
         // Dynamic sweep simulation for continuous live streaming
         let cycle_rpm = 2000.0 + (elapsed_sec * 500.0) % 5500.0;
         engine.rpm = cycle_rpm;
@@ -128,14 +160,15 @@ impl DatalogServer {
         // Run CPU execution for 50ms frame
         let start_cycle = cpu.cycles;
         while cpu.cycles - start_cycle < 600_000 {
+            let instruction_start = cpu.cycles;
             Interpreter::step(cpu, bus);
-            cpu.ie = true;
-            let t_irq = bus.tick_timers(2);
-            let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
-            InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);
             if cpu.halted {
                 break;
             }
+            let elapsed_ticks = (cpu.cycles - instruction_start) as u32;
+            let t_irq = bus.tick_timers(elapsed_ticks);
+            let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
+            InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);
         }
 
         let raw_rpm = (engine.rpm * 4.0) as u16;
@@ -143,22 +176,21 @@ impl DatalogServer {
         let tps_byte = (engine.tps_pct / 100.0 * 255.0).clamp(0.0, 255.0) as u8;
         let ect_byte = (engine.ect_celsius + 40.0) as u8;
         let iat_byte = (engine.iat_celsius + 40.0) as u8;
-        let o2_byte  = (engine.o2_volts / 5.0 * 255.0).clamp(0.0, 255.0) as u8;
+        let o2_byte = (engine.o2_volts / 5.0 * 255.0).clamp(0.0, 255.0) as u8;
         let vbatt_byte = (engine.vbatt_volts / 18.0 * 255.0).clamp(0.0, 255.0) as u8;
         let speed_byte = (engine.speed_kmh).clamp(0.0, 255.0) as u8;
 
         let inj_pw = bus.injector_pulse_width_us as u16;
-        let iacv_duty = (bus.iacv_duty_cycle_pct / 100.0 * 255.0) as u8;
-
-        let mut flags1: u8 = 0;
-        if bus.vtec_solenoid_active { flags1 |= 1 << 0; }
-        if bus.vtec_pressure_switch { flags1 |= 1 << 1; }
-        if bus.mil_check_engine_light { flags1 |= 1 << 2; }
-
+        // Ignition advance, IACV, VTEC, pressure switch, MIL and fuel-pump
+        // bytes stay zero until their ROM state/board pin mappings are known.
+        let flags1: u8 = 0;
         let mut flags2: u8 = 0;
-        if bus.fuel_pump_active { flags2 |= 1 << 0; }
-        if bus.ac_clutch_active { flags2 |= 1 << 1; }
-        if bus.radiator_fan_active { flags2 |= 1 << 2; }
+        if bus.ac_clutch_active {
+            flags2 |= 1 << 1;
+        }
+        if bus.radiator_fan_active {
+            flags2 |= 1 << 2;
+        }
 
         let mut pkt = [0u8; 16];
         pkt[0] = (raw_rpm >> 8) as u8;
@@ -172,8 +204,8 @@ impl DatalogServer {
         pkt[8] = speed_byte;
         pkt[9] = (inj_pw >> 8) as u8;
         pkt[10] = (inj_pw & 0xFF) as u8;
-        pkt[11] = 21; // Ignition advance 21.0°
-        pkt[12] = iacv_duty;
+        pkt[11] = 0;
+        pkt[12] = 0;
         pkt[13] = flags1;
         pkt[14] = flags2;
 

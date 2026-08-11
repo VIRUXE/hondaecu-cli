@@ -1,11 +1,13 @@
-// Honda P28 / OBD1 ECU Comprehensive Matrix Test Suite
-// Full 850+ test coverage matrix across all ROM tables, sensors, trims, and DTCs
+// Honda P28 / OBD1 ECU ROM and hardware sanity checks.
 
+use crate::bus::{
+    Bus, IRQ_INT0, IRQ_SERIAL_RX, IRQ_TM0, SFR_IE, SFR_P2, SFR_TCON0, SFR_TM0, SFR_TMR0,
+};
 use crate::cpu::Cpu;
-use crate::bus::Bus;
 use crate::engine::EngineState;
 use crate::interpreter::Interpreter;
 use crate::interrupts::InterruptController;
+use crate::replay::ReplayEngine;
 
 pub struct TestResult {
     pub name: String,
@@ -20,41 +22,30 @@ impl EcuTestSuite {
         let mut results = Vec::new();
 
         println!("============================================================");
-        println!("  HONDA ECU (OKI MSM66207) 850+ MATRIX EXHAUSTIVE ROM SUITE ");
+        println!("  STOCK P28-230 ROM & MSM66207 HARDWARE SANITY SUITE ");
         println!("  Target ROM: {}", rom_path);
         println!("============================================================");
 
         let start_time = std::time::Instant::now();
 
-        // 1. Core Hardware & Memory Baseline (8 Tests)
-        results.push(Self::test_rom_checksum(rom_path));
+        // Each result below performs an observable check. Calibration-table,
+        // DTC and compensation claims are intentionally excluded until the
+        // ROM's resulting state is decoded and asserted rather than inferred.
+        let rom_check = Self::test_rom_checksum(rom_path);
+        let rom_is_usable = rom_check.passed;
+        results.push(rom_check);
+        if !rom_is_usable {
+            println!(
+                "Stopped after ROM preflight: subsequent checks require an exact, checksum-valid image."
+            );
+            return results;
+        }
         results.push(Self::test_vector_table(rom_path));
         results.push(Self::test_reset_boot(rom_path));
-        results.push(Self::test_adc_sensors(rom_path));
-        results.push(Self::test_interrupt_timing(rom_path));
-        results.push(Self::test_table_lookups(rom_path));
-        results.push(Self::test_vtec_engagement(rom_path));
-        results.push(Self::test_datalogging_protocol(rom_path));
-
-        // 2. Full 400-Cell Low-Cam & High-Cam Fuel Map Grid Matrix Test
-        let fuel_matrix_results = Self::test_fuel_map_grid_matrix(rom_path);
-        results.extend(fuel_matrix_results);
-
-        // 3. Full 400-Cell Low-Cam & High-Cam Ignition Advance Grid Matrix Test
-        let ign_matrix_results = Self::test_ignition_map_grid_matrix(rom_path);
-        results.extend(ign_matrix_results);
-
-        // 4. Complete 15 Diagnostic Trouble Code (DTC) Fault Matrix Test
-        let dtc_results = Self::test_dtc_fault_matrix(rom_path);
-        results.extend(dtc_results);
-
-        // 5. Environmental Compensations & Trims Matrix Test (20 Tests)
-        let comp_results = Self::test_compensation_trims_matrix(rom_path);
-        results.extend(comp_results);
-
-        // 6. Rev Limiter, Launch Control & Safety Cutoffs (10 Tests)
-        let safety_results = Self::test_rev_limiter_safety_matrix(rom_path);
-        results.extend(safety_results);
+        results.push(Self::test_adc_sensors());
+        results.push(Self::test_interrupt_dispatch(rom_path));
+        results.push(Self::test_output_driver_measurement());
+        results.push(Self::test_uart_rx_irq());
 
         let elapsed = start_time.elapsed();
         println!("Executed {} tests in {:.2?}", results.len(), elapsed);
@@ -79,7 +70,9 @@ impl EcuTestSuite {
         let passed = mod8 == 0;
         let details = format!(
             "ROM Size: {} bytes, 8-bit Modulo Sum: 0x{:02X} (Checksum Byte at 0x7FFF: 0x{:02X})",
-            bus.rom.len(), mod8, chk_byte
+            bus.rom.len(),
+            mod8,
+            chk_byte
         );
 
         TestResult {
@@ -94,20 +87,25 @@ impl EcuTestSuite {
         let _ = bus.load_rom_file(rom_path);
 
         let reset_vec = bus.read_code_u16(0x0000);
-        let nmi_vec   = bus.read_code_u16(0x003C);
-        let tm0_vec   = bus.read_code_u16(0x0086);
-        let tm1_vec   = bus.read_code_u16(0x0114);
-        let int0_vec  = bus.read_code_u16(0x01D3);
+        let nmi_vec = bus.read_code_u16(0x0006);
+        let int0_vec = bus.read_code_u16(0x0008);
+        let serial_rx_vec = bus.read_code_u16(0x000A);
+        let tm0_vec = bus.read_code_u16(0x0012);
 
-        let valid = reset_vec < 0x8000 && bus.read_code_u8(reset_vec) != 0xFF;
+        let targets = [reset_vec, nmi_vec, int0_vec, serial_rx_vec, tm0_vec];
+        // These are the stock P28-230 vector targets and are retained by the
+        // launch ROM fixtures used by this project. This prevents an arbitrary
+        // checksum-balanced 32 KiB blob from being called a P28 ROM.
+        let expected = [0x21E2, 0x003C, 0x01D3, 0x01FD, 0x0086];
+        let valid = targets == expected;
 
         let details = format!(
-            "Reset: {:#06X}, NMI: {:#06X}, TM0: {:#06X}, TM1: {:#06X}, INT0: {:#06X}",
-            reset_vec, nmi_vec, tm0_vec, tm1_vec, int0_vec
+            "Reset: {:#06X}, NMI: {:#06X}, INT0: {:#06X}, serial RX: {:#06X}, TM0: {:#06X}",
+            reset_vec, nmi_vec, int0_vec, serial_rx_vec, tm0_vec
         );
 
         TestResult {
-            name: "Vector Table Audit".to_string(),
+            name: "P28 Vector Table Audit".to_string(),
             passed: valid,
             details,
         }
@@ -121,31 +119,26 @@ impl EcuTestSuite {
         let reset_target = bus.read_code_u16(0x0000);
         cpu.pc = reset_target;
 
-        let mut steps = 0;
-        for _ in 0..10_000 {
-            Interpreter::step(&mut cpu, &mut bus);
-            steps += 1;
-            if cpu.halted {
-                break;
-            }
-        }
-
-        let passed = steps > 100 && cpu.pc != reset_target;
-        let details = format!(
-            "Executed {} instructions from boot vector {:#06X}. Final PC: {:#06X}, SSP: {:#06X}",
-            steps, reset_target, cpu.pc, cpu.ssp
-        );
+        let (passed, details) = match ReplayEngine::boot_to_runtime(&mut cpu, &mut bus) {
+            Ok(()) => (
+                true,
+                format!(
+                    "Reached runtime entry {:#06X} from reset vector {:#06X} after {} instructions; SSP: {:#06X}",
+                    cpu.pc, reset_target, cpu.instructions, cpu.ssp
+                ),
+            ),
+            Err(error) => (false, format!("Power-on path failed: {error}")),
+        };
 
         TestResult {
-            name: "Reset Vector & CPU Boot Init".to_string(),
+            name: "Power-On Path Reaches Runtime".to_string(),
             passed,
             details,
         }
     }
 
-    fn test_adc_sensors(rom_path: &str) -> TestResult {
+    fn test_adc_sensors() -> TestResult {
         let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
         let mut engine = EngineState::new();
 
         engine.map_kpa = 100.0;
@@ -156,7 +149,7 @@ impl EcuTestSuite {
         let adcr0 = bus.read_data_u16(0x60);
         let adcr1 = bus.read_data_u16(0x62);
 
-        let passed = adcr0 > 300 && adcr1 > 300;
+        let passed = adcr0 == bus.adc_inputs[0] << 6 && adcr1 == bus.adc_inputs[1] << 6;
         let details = format!(
             "MAP 100kPa -> ADCR0: {}, TPS 50% -> ADCR1: {}",
             adcr0, adcr1
@@ -169,273 +162,85 @@ impl EcuTestSuite {
         }
     }
 
-    fn test_interrupt_timing(rom_path: &str) -> TestResult {
+    fn test_interrupt_dispatch(rom_path: &str) -> TestResult {
         let mut bus = Bus::new();
         let _ = bus.load_rom_file(rom_path);
         let mut cpu = Cpu::new();
         let mut engine = EngineState::new();
 
         cpu.pc = bus.read_code_u16(0x0000);
-        cpu.ie = true;
-        bus.write_data_u16(0x1A, 0xFFFF);
-        bus.write_data_u16(0x32, 1000);
-        bus.write_data_u16(0x36, 500);
-        bus.write_data_u16(0x3A, 2000);
+        cpu.set_mie(true);
+        bus.write_data_u16(SFR_IE, (1 << IRQ_INT0) | (1 << IRQ_TM0));
+        bus.write_data_u16(SFR_TM0, 999);
+        bus.write_data_u16(SFR_TMR0, 1000);
+        bus.write_data_u8(SFR_TCON0, 0x10);
         engine.rpm = 7500.0;
 
-        let mut interrupts_handled = 0;
-        for cycle in 0..50_000 {
-            Interpreter::step(&mut cpu, &mut bus);
-            cpu.ie = true;
+        // TM0 uses the /4 clock at this control setting, so four CPU clocks
+        // advance it onto the compare value. At 7,500 RPM, one CKP edge is
+        // emitted every 8,000 CPU clocks.
+        let timer_irq = bus.tick_timers(4);
+        let dist_irq = engine.check_distributor_pulses(8_000, 12_000_000);
+        let dispatched = InterruptController::handle_pending_interrupts(
+            &mut cpu,
+            &mut bus,
+            timer_irq | dist_irq,
+        );
 
-            let timer_irq = bus.tick_timers(2);
-            let dist_irq = engine.check_distributor_pulses(cycle, 12_000_000);
-
-            if InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, timer_irq | dist_irq) {
-                interrupts_handled += 1;
-            }
-        }
-
-        let passed = interrupts_handled > 0;
+        let passed =
+            timer_irq & (1 << IRQ_TM0) != 0 && dist_irq & (1 << IRQ_INT0) != 0 && dispatched;
         let details = format!(
-            "Handled {} real-time hardware interrupts (Timers & INT0 CKP at 7500 RPM)",
-            interrupts_handled
+            "TM0 IRQ: {}, INT0 CKP IRQ: {}, controller dispatched: {}",
+            timer_irq & (1 << IRQ_TM0) != 0,
+            dist_irq & (1 << IRQ_INT0) != 0,
+            dispatched
         );
 
         TestResult {
-            name: "Real-Time Hardware Interrupt ISR Timing".to_string(),
+            name: "Timer/CKP Interrupt Dispatch Plumbing".to_string(),
             passed,
             details,
         }
     }
 
-    fn test_table_lookups(rom_path: &str) -> TestResult {
+    fn test_output_driver_measurement() -> TestResult {
         let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut cpu = Cpu::new();
 
-        cpu.dp = 0x5465;
-        cpu.x1 = 0x0010;
-        
-        let val1 = bus.read_code_u16(cpu.dp);
-        let val2 = bus.read_code_u8(cpu.dp + cpu.x1);
+        // The four injector drivers are active-low on P2. Measure a 120-clock
+        // pulse at 12 MHz and verify that it is surfaced as 10 microseconds.
+        bus.write_data_u8(SFR_P2, 0xFF);
+        bus.write_data_u8(SFR_P2, 0xFE);
+        bus.tick_timers(120);
+        bus.write_data_u8(SFR_P2, 0xFF);
 
-        let passed = val1 != 0xFFFF || val2 != 0xFF;
+        let passed = bus.injector_pulse_width_us == 10;
         let details = format!(
-            "Fetched ROM Fuel Map Table bytes at 0x5465 -> Word: {:#06X}, Byte at +10: {:#04X}",
-            val1, val2
+            "Active-low P2 injector pulse: {} us (expected 10 us)",
+            bus.injector_pulse_width_us
         );
 
         TestResult {
-            name: "ROM Table Lookup (LC/LCB Instructions)".to_string(),
+            name: "Injector Output Driver Pulse Measurement".to_string(),
             passed,
             details,
         }
     }
 
-    fn test_vtec_engagement(rom_path: &str) -> TestResult {
+    fn test_uart_rx_irq() -> TestResult {
         let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        engine.rpm = 5500.0;
-        engine.tps_pct = 50.0;
-        engine.ect_celsius = 85.0;
-        engine.sync_sensors_to_bus(&mut bus);
-        bus.vtec_pressure_switch = true;
-        bus.write_data_u8(0x28, 0x02);
-
-        let passed = bus.vtec_solenoid_active;
-        let details = format!(
-            "VTEC Conditions (5500 RPM, 50% TPS, 85°C ECT) -> Solenoid Active: {}, Oil Switch OK",
-            bus.vtec_solenoid_active
-        );
-
-        TestResult {
-            name: "VTEC Spool Valve & Pressure Switch Logic".to_string(),
-            passed,
-            details,
-        }
-    }
-
-    fn test_datalogging_protocol(rom_path: &str) -> TestResult {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
 
         let irq = bus.push_serial_rx_byte(0x20);
 
-        let passed = (irq & (1 << 6)) != 0;
+        let passed = (irq & (1 << IRQ_SERIAL_RX)) != 0;
         let details = format!(
-            "Serial RX Datalogging Command 0x20 -> Triggered UART RX Interrupt Vector {:#06X}",
-            0x01FD
+            "Serial RX byte 0x20 queued and raised IRQ bit {} (P28 handler {:#06X})",
+            IRQ_SERIAL_RX, 0x01FD
         );
 
         TestResult {
-            name: "UART Serial RX/TX Datalogging Protocol".to_string(),
+            name: "UART Serial RX Buffer & Interrupt Plumbing".to_string(),
             passed,
             details,
         }
-    }
-
-    /// 400-Cell Fuel Map Grid Matrix Test (RPM x MAP across Low-Cam and High-Cam)
-    fn test_fuel_map_grid_matrix(rom_path: &str) -> Vec<TestResult> {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        let mut results = Vec::new();
-        let rpms = [500.0, 800.0, 1500.0, 2500.0, 3500.0, 4500.0, 5500.0, 6500.0, 7500.0, 8500.0];
-        let maps = [10.0, 20.0, 30.0, 40.0, 50.0, 65.0, 80.0, 100.0, 150.0, 220.0];
-
-        let base_fuel_tbl = 0x5465;
-
-        for (r_idx, &rpm) in rpms.iter().enumerate() {
-            for (m_idx, &map_kpa) in maps.iter().enumerate() {
-                engine.rpm = rpm;
-                engine.map_kpa = map_kpa;
-                engine.sync_sensors_to_bus(&mut bus);
-
-                let cell_addr = base_fuel_tbl + (r_idx * 20 + m_idx) as u16;
-                let raw_val = bus.read_code_u8(cell_addr);
-
-                let valid = raw_val != 0x00 && raw_val != 0xFF;
-
-                if (r_idx * 10 + m_idx) % 20 == 0 { // Sample subset to avoid log spam
-                    results.push(TestResult {
-                        name: format!("Fuel Map Grid Cell [RPM {:.0}, MAP {:.0}kPa]", rpm, map_kpa),
-                        passed: valid,
-                        details: format!("ROM Addr {:#06X} -> Raw Fuel Term: 0x{:02X}", cell_addr, raw_val),
-                    });
-                }
-            }
-        }
-
-        results
-    }
-
-    /// 400-Cell Ignition Timing Grid Matrix Test
-    fn test_ignition_map_grid_matrix(rom_path: &str) -> Vec<TestResult> {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        let mut results = Vec::new();
-        let rpms = [800.0, 2000.0, 3500.0, 5000.0, 6500.0, 8000.0];
-        let maps = [20.0, 40.0, 60.0, 80.0, 100.0];
-
-        let base_ign_tbl = 0x5800;
-
-        for &rpm in &rpms {
-            for &map_kpa in &maps {
-                engine.rpm = rpm;
-                engine.map_kpa = map_kpa;
-                engine.sync_sensors_to_bus(&mut bus);
-
-                let raw_val = bus.read_code_u8(base_ign_tbl);
-                let timing_deg = (raw_val as f32 * 0.25) - 6.0;
-
-                results.push(TestResult {
-                    name: format!("Ignition Map Cell [RPM {:.0}, MAP {:.0}kPa]", rpm, map_kpa),
-                    passed: true,
-                    details: format!("Timing Angle: {:.2}° BTDC (Raw: {:#02X})", timing_deg, raw_val),
-                });
-            }
-        }
-
-        results
-    }
-
-    /// Complete 30 Diagnostic Trouble Code (DTC) Fault Injection Test
-    fn test_dtc_fault_matrix(rom_path: &str) -> Vec<TestResult> {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        let mut results = Vec::new();
-        for info in crate::dtc::ALL_HONDA_OBD1_DTCS {
-            let (passed, details) = crate::dtc::DtcEvaluator::test_dtc_code(info, &mut bus, &mut engine);
-            results.push(TestResult {
-                name: format!("DTC Code {:02} ({})", info.number, info.name),
-                passed,
-                details: format!("{} | Description: {}", details, info.description),
-            });
-        }
-
-        results
-    }
-
-    /// Environmental Compensations & Trims Matrix Test (20 Sweep Tests)
-    fn test_compensation_trims_matrix(rom_path: &str) -> Vec<TestResult> {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        let mut results = Vec::new();
-
-        // 1. Cold Start Enrichment Sweep (-20°C to +80°C)
-        let temps = [-20.0, 0.0, 20.0, 60.0, 85.0];
-        for &temp in &temps {
-            engine.ect_celsius = temp;
-            engine.sync_sensors_to_bus(&mut bus);
-            let ect_adc = bus.read_data_u16(0x64); // ADCR2
-            results.push(TestResult {
-                name: format!("ECT Warmup Trim [Temp {:.0}°C]", temp),
-                passed: true,
-                details: format!("ECT ADC Count: {} -> Correction Factor Verified", ect_adc),
-            });
-        }
-
-        // 2. Battery Dead-Time Voltage Compensation Sweep (9V to 15V)
-        let voltages = [9.0, 11.0, 13.5, 15.0];
-        for &volts in &voltages {
-            engine.vbatt_volts = volts;
-            engine.sync_sensors_to_bus(&mut bus);
-            let vbatt_adc = bus.read_data_u16(0x6A); // ADCR5
-            results.push(TestResult {
-                name: format!("Battery Dead-Time Trim [{:.1}V]", volts),
-                passed: true,
-                details: format!("Vbatt ADC Count: {} -> Injector Dead-Time Compensation Verified", vbatt_adc),
-            });
-        }
-
-        results
-    }
-
-    /// Rev Limiter, Launch Control & Safety Cutoffs (10 Tests)
-    fn test_rev_limiter_safety_matrix(rom_path: &str) -> Vec<TestResult> {
-        let mut bus = Bus::new();
-        let _ = bus.load_rom_file(rom_path);
-        let mut engine = EngineState::new();
-
-        let mut results = Vec::new();
-
-        // Test 1: Normal 3000 RPM (No Cutoff)
-        engine.rpm = 3000.0;
-        engine.sync_sensors_to_bus(&mut bus);
-        results.push(TestResult {
-            name: "Fuel Delivery @ 3000 RPM".to_string(),
-            passed: true,
-            details: "Normal injection pulse active".to_string(),
-        });
-
-        // Test 2: OEM Rev Limiter @ 7300 RPM
-        engine.rpm = 7400.0;
-        engine.sync_sensors_to_bus(&mut bus);
-        results.push(TestResult {
-            name: "Rev Limiter Fuel Cut-Off @ 7400 RPM".to_string(),
-            passed: true,
-            details: "Fuel Cut-Off Active (Rev Limiter Triggered)".to_string(),
-        });
-
-        // Test 3: Engine Overheat Protection @ 115°C ECT
-        engine.ect_celsius = 115.0;
-        engine.sync_sensors_to_bus(&mut bus);
-        results.push(TestResult {
-            name: "Overheat Thermal Protection @ 115°C ECT".to_string(),
-            passed: true,
-            details: "Safety Ignition Retard & Extra Fuel Enrichment Active".to_string(),
-        });
-
-        results
     }
 }

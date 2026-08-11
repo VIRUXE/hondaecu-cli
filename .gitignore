@@ -3,4 +3,5 @@
 *.zip
 RELEASE_NOTES.md
 *.csv
-
+# Ground truth contains instruction windows derived from an external OEM ROM.
+/tests/fixtures/p28_dasm662.tsv

@@ -1,21 +1,18 @@
 // Interactive REPL Shell for Honda ECU Simulation & Debugging
 
-use std::io::{self, Write};
-use crate::cpu::Cpu;
 use crate::bus::Bus;
+use crate::cpu::Cpu;
 use crate::engine::EngineState;
 use crate::interpreter::Interpreter;
 use crate::interrupts::InterruptController;
+use std::io::{self, Write};
 
 pub struct InteractiveShell;
 
 impl InteractiveShell {
     pub fn run(rom_path: &str) -> io::Result<()> {
         let mut bus = Bus::new();
-        if let Err(e) = bus.load_rom_file(rom_path) {
-            println!("Error loading ROM file '{}': {}", rom_path, e);
-            return Ok(());
-        }
+        bus.load_rom_file(rom_path)?;
 
         let mut cpu = Cpu::new();
         let mut engine = EngineState::new();
@@ -43,7 +40,7 @@ impl InteractiveShell {
                 break;
             }
 
-            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.is_empty() {
                 continue;
             }
@@ -56,7 +53,9 @@ impl InteractiveShell {
                     println!("  regs              - Print CPU registers and PSW flags");
                     println!("  status            - Print ECU & virtual engine telemetry");
                     println!("  set rpm <val>     - Set simulated engine RPM (e.g. set rpm 3000)");
-                    println!("  set map <val>     - Set manifold pressure in kPa (e.g. set map 45)");
+                    println!(
+                        "  set map <val>     - Set manifold pressure in kPa (e.g. set map 45)"
+                    );
                     println!("  set tps <val>     - Set throttle position % (e.g. set tps 25)");
                     println!("  set ect <val>     - Set engine coolant temp °C (e.g. set ect 85)");
                     println!("  set iat <val>     - Set intake air temp °C (e.g. set iat 25)");
@@ -70,11 +69,22 @@ impl InteractiveShell {
                 "step" | "s" => {
                     let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                     for _ in 0..count {
+                        let instruction_start = cpu.cycles;
                         let ins = Interpreter::step(&mut cpu, &mut bus);
-                        println!("  {:#06X}: {:18} ; {}", ins.pc, ins.mnemonic, Self::hex_bytes(&ins.bytes));
-                        let t_irq = bus.tick_timers(2);
+                        println!(
+                            "  {:#06X}: {:18} ; {}",
+                            ins.pc,
+                            ins.mnemonic,
+                            Self::hex_bytes(&ins.bytes)
+                        );
+                        let elapsed_ticks = (cpu.cycles - instruction_start) as u32;
+                        let t_irq = bus.tick_timers(elapsed_ticks);
                         let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
-                        InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
+                        InterruptController::handle_pending_interrupts(
+                            &mut cpu,
+                            &mut bus,
+                            t_irq | d_irq,
+                        );
                     }
                 }
 
@@ -83,26 +93,60 @@ impl InteractiveShell {
                     println!("Running for {} cycles...", count);
                     let start_cycles = cpu.cycles;
                     while cpu.cycles - start_cycles < count as u64 {
+                        let instruction_start = cpu.cycles;
                         Interpreter::step(&mut cpu, &mut bus);
-                        let t_irq = bus.tick_timers(2);
+                        let elapsed_ticks = (cpu.cycles - instruction_start) as u32;
+                        let t_irq = bus.tick_timers(elapsed_ticks);
                         let d_irq = engine.check_distributor_pulses(cpu.cycles, 12_000_000);
-                        InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
+                        InterruptController::handle_pending_interrupts(
+                            &mut cpu,
+                            &mut bus,
+                            t_irq | d_irq,
+                        );
                         if cpu.halted {
                             println!("CPU Halted.");
                             break;
                         }
                     }
-                    println!("Executed {} cycles. Current PC: {:#06X}", cpu.cycles - start_cycles, cpu.pc);
+                    println!(
+                        "Executed {} cycles. Current PC: {:#06X}",
+                        cpu.cycles - start_cycles,
+                        cpu.pc
+                    );
                 }
 
                 "regs" => {
+                    let pointing_base = 0x0080 + cpu.scb() * 8;
+                    let x1 = bus.read_data_u16(pointing_base);
+                    let x2 = bus.read_data_u16(pointing_base + 2);
+                    let dp = bus.read_data_u16(pointing_base + 4);
+                    let usp = bus.read_data_u16(pointing_base + 6);
                     println!("CPU Register File:");
-                    println!("  PC : {:#06X}   A  : {:#06X} (AL:{:#04X}, AH:{:#04X})", cpu.pc, cpu.a, cpu.al(), cpu.ah());
-                    println!("  DP : {:#06X}   X1 : {:#06X}   X2 : {:#06X}", cpu.dp, cpu.x1, cpu.x2);
-                    println!("  SSP: {:#06X}   USP: {:#06X}   LRB: {:#04X}", cpu.ssp, cpu.usp, cpu.lrb);
-                    println!("  PSW: {:#06X} [ ZF:{} CF:{} HC:{} DD:{} IE:{} ]",
-                             cpu.psw_u16(), cpu.zf as u8, cpu.cf as u8, cpu.hc as u8, cpu.dd as u8, cpu.ie as u8);
-                    println!("  Cycles: {}, Instructions: {}", cpu.cycles, cpu.instructions);
+                    println!(
+                        "  PC : {:#06X}   A  : {:#06X} (AL:{:#04X}, AH:{:#04X})",
+                        cpu.pc,
+                        cpu.a,
+                        cpu.al(),
+                        cpu.ah()
+                    );
+                    println!("  DP : {:#06X}   X1 : {:#06X}   X2 : {:#06X}", dp, x1, x2);
+                    println!(
+                        "  SSP: {:#06X}   USP: {:#06X}   LRB: {:#06X}",
+                        cpu.ssp, usp, cpu.lrb
+                    );
+                    println!(
+                        "  PSW: {:#06X} [ ZF:{} CF:{} HC:{} DD:{} MIE:{} ]",
+                        cpu.psw_u16(),
+                        cpu.zf as u8,
+                        cpu.cf as u8,
+                        cpu.hc as u8,
+                        cpu.dd as u8,
+                        cpu.mie() as u8
+                    );
+                    println!(
+                        "  Cycles: {}, Instructions: {}",
+                        cpu.cycles, cpu.instructions
+                    );
                 }
 
                 "status" => {
@@ -114,9 +158,17 @@ impl InteractiveShell {
                     println!("  IAT Temp         : {:.1} °C", engine.iat_celsius);
                     println!("  O2 Sensor        : {:.2} V", engine.o2_volts);
                     println!("  Battery Voltage  : {:.1} V", engine.vbatt_volts);
-                    println!("  Distributor Pulses: CKP: {}, TDC: {}", engine.ckp_pulse_count, engine.tdc_pulse_count);
-                    println!("  Calculated Injector Pulse Width : {} us", bus.injector_pulse_width_us);
-                    println!("  IACV Duty Cycle                 : {:.1} %", bus.iacv_duty_cycle_pct);
+                    println!(
+                        "  Distributor Pulses: CKP: {}, TDC: {}",
+                        engine.ckp_pulse_count, engine.tdc_pulse_count
+                    );
+                    println!(
+                        "  Last Measured Injector Pulse    : {} us",
+                        bus.injector_pulse_width_us
+                    );
+                    println!(
+                        "  VTEC/IACV Telemetry             : unavailable (board mapping unverified)"
+                    );
                 }
 
                 "set" => {
@@ -139,7 +191,10 @@ impl InteractiveShell {
                 "dump" => {
                     if parts.len() >= 2 {
                         let addr = Self::parse_hex_or_dec(parts[1]);
-                        let cnt = parts.get(2).map(|s| Self::parse_hex_or_dec(s)).unwrap_or(32);
+                        let cnt = parts
+                            .get(2)
+                            .map(|s| Self::parse_hex_or_dec(s))
+                            .unwrap_or(32);
                         for i in (0..cnt).step_by(16) {
                             let curr = addr + i;
                             print!("{:04X}: ", curr);
@@ -156,13 +211,24 @@ impl InteractiveShell {
                 }
 
                 "disasm" => {
-                    let addr = parts.get(1).map(|s| Self::parse_hex_or_dec(s)).unwrap_or(cpu.pc as u32) as u16;
-                    let cnt = parts.get(2).map(|s| Self::parse_hex_or_dec(s)).unwrap_or(10);
+                    let addr = parts
+                        .get(1)
+                        .map(|s| Self::parse_hex_or_dec(s))
+                        .unwrap_or(cpu.pc as u32) as u16;
+                    let cnt = parts
+                        .get(2)
+                        .map(|s| Self::parse_hex_or_dec(s))
+                        .unwrap_or(10);
                     let mut temp_cpu = cpu.clone();
                     temp_cpu.pc = addr;
                     for _ in 0..cnt {
-                        let ins = Interpreter::step(&mut temp_cpu, &mut bus);
-                        println!("  {:#06X}: {:18} ; {}", ins.pc, ins.mnemonic, Self::hex_bytes(&ins.bytes));
+                        let ins = Interpreter::disassemble(&mut temp_cpu, &bus);
+                        println!(
+                            "  {:#06X}: {:18} ; {}",
+                            ins.pc,
+                            ins.mnemonic,
+                            Self::hex_bytes(&ins.bytes)
+                        );
                     }
                 }
 
@@ -178,7 +244,10 @@ impl InteractiveShell {
                 }
 
                 _ => {
-                    println!("Unknown command: '{}'. Type 'help' for available commands.", parts[0]);
+                    println!(
+                        "Unknown command: '{}'. Type 'help' for available commands.",
+                        parts[0]
+                    );
                 }
             }
         }
@@ -187,7 +256,11 @@ impl InteractiveShell {
     }
 
     fn hex_bytes(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
+        bytes
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn parse_hex_or_dec(s: &str) -> u32 {
