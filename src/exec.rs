@@ -683,7 +683,7 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> Result<Decoded, ExecError> {
     cpu.pc = pc.wrapping_add(d.len as u16);
     // `cycles` now tracks real INT machine cycles (decoder::int_cycles), not
     // instruction bytes, so peripheral time and injector pulse widths measured
-    // off it come out in true microseconds at the 12 MHz core clock.
+    // from it use the 5 MHz machine-cycle clock and come out in microseconds.
     cpu.cycles += d.cycles as u64;
     cpu.instructions += 1;
 

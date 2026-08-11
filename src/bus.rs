@@ -20,6 +20,10 @@ pub const RAM_SIZE: usize = 4096;  // 4KB Data RAM & SFR space (0x0000..0x0FFF)
 pub const CPU_HZ: u64 = 5_000_000;
 /// Machine cycles per microsecond (`CPU_HZ / 1_000_000`).
 pub const CYCLES_PER_US: u64 = CPU_HZ / 1_000_000;
+/// A/D conversion time at the modeled machine-cycle rate. The MSM66207 manual
+/// specifies 64 microseconds (640 oscillator clocks at the P28 clock); one
+/// modeled machine cycle is two oscillator clocks, so this is 320 cycles.
+pub const ADC_CONVERSION_CYCLES: u32 = (64 * CYCLES_PER_US) as u32;
 
 // SFR Offsets
 pub const SFR_ASSP: u16 = 0x00;
@@ -126,6 +130,25 @@ pub const SFR_ADSCAN: u16 = 0x58;
 pub const SFR_ADSEL: u16  = 0x59;
 pub const SFR_ADCR0: u16  = 0x60;
 
+/// P28 board-level CD4051 banks. U6 feeds P5.0/AI0 (ADCR0), while U5 feeds
+/// P5.1/AI1 (ADCR1). Both parts share A/B/C selects on P2.5/P2.6/P2.7.
+pub const P28_MUX_U6_ADCR0: usize = 0;
+pub const P28_MUX_U5_ADCR1: usize = 1;
+
+/// Sensor positions confirmed from Bomarc 37820-P28-A51, sheet 3.
+pub const P28_U5_ELD_SELECT: usize = 0;
+pub const P28_U5_ECT_SELECT: usize = 2;
+/// U5/X3 is sampled by the ROM's fault-0x49 boot check. Its external signal
+/// semantics remain unresolved.
+pub const P28_U5_BOOT_CHECK_SELECT: usize = 3;
+pub const P28_U6_HEGO_SELECT: usize = 0;
+pub const P28_U6_BARO_SELECT: usize = 3;
+
+/// Direct (unmultiplexed) P5 analog inputs on the P28 board.
+pub const P28_ADC_EGR: usize = 3;
+pub const P28_ADC_MAP: usize = 6;
+pub const P28_ADC_TPS: usize = 7;
+
 pub const SFR_PWMC0: u16  = 0x70;
 pub const SFR_PWMR0: u16  = 0x72;
 pub const SFR_PWMC1: u16  = 0x74;
@@ -133,15 +156,20 @@ pub const SFR_PWMR1: u16  = 0x76;
 pub const SFR_PWCON0: u16 = 0x78;
 pub const SFR_PWCON1: u16 = 0x7A;
 
-pub const SFR_SRBUF: u16  = 0x54;
+pub const SFR_SRBUF: u16  = 0x55;
 pub const SFR_STBUF: u16  = 0x51;
 
 pub struct Bus {
     pub rom: Vec<u8>,
     pub ram: [u8; RAM_SIZE],
     
-    // Virtual ADC Channels (0..7)
+    // Direct MCU ADC-pin levels (P5.0..P5.7). P28 channels 0 and 1 are driven
+    // by the external muxes below and do not sample these two array entries.
     pub adc_inputs: [u16; 8],
+
+    /// External P28 analog mux inputs, indexed [U6/U5][select]. The first bank
+    /// drives ADCR0 and the second drives ADCR1. Values are 10-bit ADC counts.
+    pub p28_mux_inputs: [[u16; 8]; 2],
     
     // PWM output measurements
     pub injector_pulse_width_us: u32,
@@ -165,7 +193,7 @@ pub struct Bus {
     /// Fractional prescaler remainder for TM0..TM3.
     pub timer_accum: [u32; 4],
 
-    /// Remaining CPU clocks in the current A/D conversion. `ADSCAN.4` starts
+    /// Remaining machine cycles in the current A/D conversion. `ADSCAN.4` starts
     /// continuous scan conversions; each completion raises IRQH.4, which the
     /// P28 boot routine polls at 0x52C5.
     pub adc_cycles_remaining: Option<u32>,
@@ -186,6 +214,9 @@ impl Bus {
             rom: vec![0xFF; ROM_SIZE],
             ram: [0; RAM_SIZE],
             adc_inputs: [512; 8], // Default to ~2.5V (mid scale 10-bit)
+            // Board reference dividers and unspecified external inputs start
+            // at mid-scale. EngineState replaces the modeled sensor slots.
+            p28_mux_inputs: [[512; 8]; 2],
             injector_pulse_width_us: 0,
             iacv_duty_cycle_pct: 0.0,
             elapsed_cycles: 0,
@@ -213,14 +244,23 @@ impl Bus {
 
     pub fn load_rom_file(&mut self, path: &str) -> io::Result<()> {
         let data = fs::read(path)?;
-        if data.len() == 32769 {
-            // Trim 1 trailing byte if 32769
-            self.rom.copy_from_slice(&data[..ROM_SIZE]);
-        } else if data.len() >= ROM_SIZE {
-            self.rom.copy_from_slice(&data[..ROM_SIZE]);
-        } else {
-            self.rom[..data.len()].copy_from_slice(&data);
-        }
+        let image = match data.as_slice() {
+            image if image.len() == ROM_SIZE => image,
+            // Some P28 dumps carry one zero byte after the addressable 32 KiB
+            // image. Accept only that exact, known footer; never truncate an
+            // arbitrary larger file or pad a short one.
+            image if image.len() == ROM_SIZE + 1 && image[ROM_SIZE] == 0 => &image[..ROM_SIZE],
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected a {ROM_SIZE}-byte ROM image (optionally followed by one 00 byte), got {} bytes",
+                        data.len()
+                    ),
+                ));
+            }
+        };
+        self.rom.copy_from_slice(image);
         Ok(())
     }
 
@@ -240,15 +280,9 @@ impl Bus {
     pub fn read_data_u8(&mut self, addr: u16) -> u8 {
         let idx = (addr as usize) & (RAM_SIZE - 1);
 
-        // Handle special SFR reads
-        if addr >= SFR_ADCR0 && addr < SFR_ADCR0 + 16 {
-            let val = self.adc_result(((addr - SFR_ADCR0) / 2) as usize);
-            return if addr % 2 == 0 {
-                (val & 0xFF) as u8
-            } else {
-                (val >> 8) as u8
-            };
-        } else if addr == SFR_SRBUF {
+        // Handle special SFR reads. ADCR0..ADCR7 come from the backing latches
+        // below; live input changes are not visible until conversion completes.
+        if addr == SFR_SRBUF {
             if !self.serial_rx_queue.is_empty() {
                 return self.serial_rx_queue.remove(0);
             }
@@ -337,6 +371,12 @@ impl Bus {
 
     // Data Space Write (RAM & SFRs)
     pub fn write_data_u8(&mut self, addr: u16, val: u8) {
+        // ADCR0..ADCR7 are read-only. Conversion completion updates their
+        // backing latches directly in `trigger_adc_conversion`.
+        if (SFR_ADCR0..SFR_ADCR0 + 16).contains(&addr) {
+            return;
+        }
+
         let idx = (addr as usize) & (RAM_SIZE - 1);
         let old = self.ram[idx];
         self.ram[idx] = val;
@@ -346,7 +386,11 @@ impl Bus {
             // ADSCAN.4 is the start/scan bit. Conversion is deliberately not
             // completed in this write: the firmware clears IRQH.4 immediately
             // after starting and then waits for hardware to set it again.
-            self.adc_cycles_remaining = if val & 0x10 != 0 { Some(64) } else { None };
+            self.adc_cycles_remaining = if val & 0x10 != 0 {
+                Some(ADC_CONVERSION_CYCLES)
+            } else {
+                None
+            };
         } else if addr == SFR_P2 || addr == SFR_P3 {
             // P2.0..P2.3 are the four active-low injector drivers. PWMR0 is
             // an on-chip PWM reload register used by the firmware's scheduler;
@@ -376,8 +420,8 @@ impl Bus {
 
             let p2 = self.ram[SFR_P2 as usize];
             self.ac_clutch_active = (p2 & (1 << 4)) != 0;
-            self.radiator_fan_active = (p2 & (1 << 5)) != 0;
-            self.purge_solenoid_active = (p2 & (1 << 6)) != 0;
+            // P2.5..P2.7 are the shared A/B/C selects for U5 and U6, not fan
+            // or purge outputs. Those board-output mappings remain unresolved.
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }
@@ -399,7 +443,20 @@ impl Bus {
     /// right-justified makes a mid-scale input read back as 002h and the ROM
     /// BRKs at 0x532B on a "sensor out of range" fault.
     pub fn adc_result(&self, channel: usize) -> u16 {
-        (self.adc_inputs[channel] & 0x03FF) << 6
+        (self.adc_input(channel) & 0x03FF) << 6
+    }
+
+    /// Resolve the voltage present at an MCU analog pin. The ROM drives the
+    /// shared P28 mux select through P2.5..P2.7. Sampling at conversion
+    /// completion leaves the previous ADCR result latched during settling.
+    pub fn adc_input(&self, channel: usize) -> u16 {
+        match channel {
+            0 | 1 => {
+                let select = (self.read_port(2) >> 5) as usize & 0x07;
+                self.p28_mux_inputs[channel][select]
+            }
+            _ => self.adc_inputs[channel],
+        }
     }
 
     pub fn trigger_adc_conversion(&mut self) {
@@ -466,7 +523,7 @@ impl Bus {
                 // Scan mode continues producing one completion per conversion
                 // until firmware clears ADSCAN.4.
                 self.adc_cycles_remaining = if self.ram[SFR_ADSCAN as usize] & 0x10 != 0 {
-                    Some(64)
+                    Some(ADC_CONVERSION_CYCLES)
                 } else {
                     None
                 };
@@ -532,12 +589,6 @@ impl Bus {
 
             if matched {
                 irq_flags |= 1 << *irq_bit;
-                // Compare match flips the timer output pin, which is what the
-                // ROM watches on Port 4.
-                let _ = i;
-                if *tm_sfr == SFR_TM1 {
-                    self.trigger_adc_conversion();
-                }
             }
             // Every timer raises a counter-overflow interrupt on the even bit
             // just below its event bit (Table 17-1): TM0->4, TM1->6, TM2->8,
@@ -568,13 +619,109 @@ mod tests {
     #[test]
     fn adc_start_completes_later_and_sets_irqh_bit_four() {
         let mut bus = Bus::new();
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][0] = 0x0155;
         bus.write_data_u16(SFR_IRQ, 0);
         bus.write_data_u8(SFR_ADSCAN, 0x10);
 
         assert_eq!(bus.read_data_u16(SFR_IRQ), 0);
-        assert_eq!(bus.tick_timers(62) & (1 << IRQ_ADC), 0);
-        assert_ne!(bus.tick_timers(2) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0);
+        assert_eq!(
+            bus.tick_timers(ADC_CONVERSION_CYCLES - 1) & (1 << IRQ_ADC),
+            0
+        );
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_ADC), 0);
         assert_ne!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0155 << 6);
+    }
+
+    #[test]
+    fn p28_shared_select_lines_route_both_mux_banks() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        for select in 0..8 {
+            bus.p28_mux_inputs[P28_MUX_U6_ADCR0][select] = 100 + select as u16;
+            bus.p28_mux_inputs[P28_MUX_U5_ADCR1][select] = 700 + select as u16;
+        }
+
+        for select in 0..8 {
+            bus.write_data_u8(SFR_P2, (select as u8) << 5);
+            bus.trigger_adc_conversion();
+
+            assert_eq!(bus.read_data_u16(SFR_ADCR0), (100 + select as u16) << 6);
+            assert_eq!(bus.read_data_u16(SFR_ADCR0 + 2), (700 + select as u16) << 6);
+        }
+    }
+
+    #[test]
+    fn mux_selection_settles_before_the_next_conversion_latches() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][0] = 0x0100;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][1] = 0x0200;
+        bus.write_data_u8(SFR_P2, 0x00);
+        bus.write_data_u8(SFR_ADSCAN, 0x10);
+
+        assert_ne!(
+            bus.tick_timers(ADC_CONVERSION_CYCLES) & (1 << IRQ_ADC),
+            0
+        );
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0100 << 6);
+
+        bus.write_data_u8(SFR_P2, 0x20);
+        assert_eq!(
+            bus.tick_timers(ADC_CONVERSION_CYCLES - 1) & (1 << IRQ_ADC),
+            0
+        );
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0100 << 6);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0200 << 6);
+    }
+
+    #[test]
+    fn p28_mux_does_not_change_direct_adc_channels() {
+        let mut bus = Bus::new();
+        bus.adc_inputs[2] = 0x02AA;
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        bus.write_data_u8(SFR_P2, 0xE0);
+
+        bus.trigger_adc_conversion();
+
+        assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x02AA << 6);
+    }
+
+    #[test]
+    fn timer_one_compare_does_not_bypass_the_adc_schedule() {
+        let mut bus = Bus::new();
+        bus.adc_inputs[2] = 0x0100;
+        bus.trigger_adc_conversion();
+        bus.adc_inputs[2] = 0x0200;
+        bus.write_data_u16(SFR_TM1, 0);
+        bus.write_data_u16(SFR_TMR1, 1);
+        bus.write_data_u8(SFR_TCON1, 0x10);
+
+        assert_ne!(bus.tick_timers(8) & (1 << IRQ_TM1), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x0100 << 6);
+    }
+
+    #[test]
+    fn adc_result_registers_ignore_software_writes() {
+        let mut bus = Bus::new();
+
+        bus.write_data_u16(SFR_ADCR0, 0xFFFF);
+
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0);
+    }
+
+    #[test]
+    fn serial_receive_byte_is_consumed_from_srbuf_not_srcon() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x54, 0xA5); // SRCON remains an ordinary control register.
+        bus.push_serial_rx_byte(0x20);
+
+        assert_eq!(bus.read_data_u8(0x54), 0xA5);
+        assert_eq!(bus.read_data_u8(SFR_SRBUF), 0x20);
+        assert!(bus.serial_rx_queue.is_empty());
     }
 
     #[test]

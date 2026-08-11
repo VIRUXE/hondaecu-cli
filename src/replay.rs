@@ -56,11 +56,16 @@ impl ReplayEngine {
             ));
         }
 
+        let mut engine = EngineState::new();
+        if let Some(frame) = frames.first() {
+            Self::apply_frame_to_engine(frame, &mut engine);
+        }
+        engine.sync_sensors_to_bus(&mut bus);
+
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
         Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
-        let mut engine = EngineState::new();
         let mut results = Vec::new();
 
         println!("============================================================");
@@ -88,18 +93,10 @@ impl ReplayEngine {
             };
             last_ms = frame.timestamp_ms;
 
-            // Update virtual engine sensors
-            engine.rpm = frame.rpm;
-            engine.map_kpa = frame.map_kpa;
-            engine.tps_pct = frame.tps_pct;
-            engine.ect_celsius = frame.ect_celsius;
-            engine.iat_celsius = frame.iat_celsius;
-            engine.o2_volts = frame.o2_volts;
-            engine.vbatt_volts = frame.vbatt_volts;
-            engine.speed_kmh = frame.speed_kmh;
+            Self::apply_frame_to_engine(frame, &mut engine);
             engine.sync_sensors_to_bus(&mut bus);
 
-            // Calculate cycles for dt_ms (12 MHz CPU = 12,000 cycles per ms)
+            // Convert the frame interval to modeled 5 MHz machine cycles.
             let frame_cycles = dt_ms * (crate::bus::CPU_HZ / 1000);
             let start_cycle = cpu.cycles;
 
@@ -163,11 +160,9 @@ impl ReplayEngine {
         Ok(())
     }
 
-    /// Run the ROM's power-on hardware checks with neutral ADC inputs before
-    /// applying a replay frame. The simplified sensor harness does not yet
-    /// model the P28 board's external analog multiplexer, and feeding direct
-    /// TPS/MAP values into that mux self-test makes a healthy ROM reset with
-    /// boot fault 0x49 before it can process a single scenario frame.
+    /// Run the ROM's power-on hardware checks. Callers configure and sync the
+    /// board inputs first, so the mux scan observes the same sensor state that
+    /// subsequent runtime conversions use.
     fn boot_to_runtime(cpu: &mut Cpu, bus: &mut Bus) -> io::Result<()> {
         let Some(ready_pc) = Self::runtime_ready_pc(&bus.rom) else {
             return Ok(());
@@ -224,6 +219,17 @@ impl ReplayEngine {
         fingerprint == 0x1AA8_776D_484A_5AD5
     }
 
+    fn apply_frame_to_engine(frame: &LogFrame, engine: &mut EngineState) {
+        engine.rpm = frame.rpm;
+        engine.map_kpa = frame.map_kpa;
+        engine.tps_pct = frame.tps_pct;
+        engine.ect_celsius = frame.ect_celsius;
+        engine.iat_celsius = frame.iat_celsius;
+        engine.o2_volts = frame.o2_volts;
+        engine.vbatt_volts = frame.vbatt_volts;
+        engine.speed_kmh = frame.speed_kmh;
+    }
+
     /// Python-drivable execution-trace primitive for emulator/ROM exploration.
     /// Boots the ROM to runtime, holds `rpm` with warm running sensors, warms
     /// up 0.5 s, then runs `secs` of engine-time emitting whitespace-delimited
@@ -248,9 +254,8 @@ impl ReplayEngine {
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
 
-        // Boot-phase tracing: run reset -> runtime_ready with no engine (as
-        // boot_to_runtime does) while watching PCs (bootpc) or RAM (bootram) --
-        // for inspecting the power-on / init decisions.
+        // Boot-phase tracing intentionally uses the board defaults so bootpc
+        // and bootram expose the raw power-on path without runtime stimuli.
         if mode == "bootpc" || mode == "bootram" {
             let wpc = list(rest.first());
             let wram: Vec<usize> = list(rest.first()).iter().map(|&a| a as usize)
@@ -284,8 +289,6 @@ impl ReplayEngine {
             return Ok(());
         }
 
-        Self::boot_to_runtime(&mut cpu, &mut bus)?;
-
         let mut engine = EngineState::new();
         engine.rpm = rpm;
         engine.map_kpa = 90.0;
@@ -294,6 +297,8 @@ impl ReplayEngine {
         engine.iat_celsius = 30.0;
         engine.vbatt_volts = 14.2;
         engine.sync_sensors_to_bus(&mut bus);
+
+        Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
         let step = |cpu: &mut Cpu, bus: &mut Bus, engine: &mut EngineState| -> crate::interpreter::DisasmInstruction {
             let before = cpu.cycles;
@@ -397,42 +402,93 @@ impl ReplayEngine {
 
     fn parse_csv_file(path: &str) -> io::Result<Vec<LogFrame>> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        Self::parse_csv(BufReader::new(file))
+    }
+
+    fn parse_csv(reader: impl BufRead) -> io::Result<Vec<LogFrame>> {
         let mut frames = Vec::new();
 
         for (idx, line) in reader.lines().enumerate() {
             let l = line?;
-            if idx == 0 && l.to_lowercase().contains("rpm") {
-                continue; // Skip CSV header line
+            let line_number = idx + 1;
+            if l.trim().is_empty() {
+                continue;
             }
-            let parts: Vec<&str> = l.split(',').collect();
-            if parts.len() >= 4 {
-                let ms: u64 = parts[0].trim().parse().unwrap_or(idx as u64 * 50);
-                let rpm: f64 = parts[1].trim().parse().unwrap_or(800.0);
-                let map: f64 = parts[2].trim().parse().unwrap_or(30.0);
-                let tps: f64 = parts[3].trim().parse().unwrap_or(0.0);
-                let ect: f64 = parts.get(4).and_then(|s| s.trim().parse().ok()).unwrap_or(85.0);
-                let iat: f64 = parts.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(25.0);
-                let o2: f64  = parts.get(6).and_then(|s| s.trim().parse().ok()).unwrap_or(0.45);
-                let vbatt: f64 = parts.get(7).and_then(|s| s.trim().parse().ok()).unwrap_or(14.2);
-                let speed: f64 = parts.get(8).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+            let lowercase = l.to_lowercase();
+            if frames.is_empty() && lowercase.contains("timestamp") && lowercase.contains("rpm") {
+                continue;
+            }
 
-                frames.push(LogFrame {
-                    timestamp_ms: ms,
-                    rpm,
-                    map_kpa: map,
-                    tps_pct: tps,
-                    ect_celsius: ect,
-                    iat_celsius: iat,
-                    o2_volts: o2,
-                    vbatt_volts: vbatt,
-                    speed_kmh: speed,
-                    note: "CSV Datalog Frame",
-                });
+            let parts: Vec<&str> = l.split(',').collect();
+            if parts.len() < 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("CSV line {line_number} has fewer than four fields"),
+                ));
             }
+
+            let invalid = |field: &str| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid {field} on CSV line {line_number}"),
+                )
+            };
+            let ms = parts[0]
+                .trim()
+                .parse()
+                .map_err(|_| invalid("timestamp_ms"))?;
+            let rpm = parts[1].trim().parse().map_err(|_| invalid("rpm"))?;
+            let map = parts[2].trim().parse().map_err(|_| invalid("map_kpa"))?;
+            let tps = parts[3].trim().parse().map_err(|_| invalid("tps_pct"))?;
+            let ect = Self::optional_csv_f64(&parts, 4, 85.0, line_number, "ect_celsius")?;
+            let iat = Self::optional_csv_f64(&parts, 5, 25.0, line_number, "iat_celsius")?;
+            let o2 = Self::optional_csv_f64(&parts, 6, 0.45, line_number, "o2_volts")?;
+            let vbatt = Self::optional_csv_f64(&parts, 7, 14.2, line_number, "vbatt_volts")?;
+            let speed = Self::optional_csv_f64(&parts, 8, 0.0, line_number, "speed_kmh")?;
+
+            frames.push(LogFrame {
+                timestamp_ms: ms,
+                rpm,
+                map_kpa: map,
+                tps_pct: tps,
+                ect_celsius: ect,
+                iat_celsius: iat,
+                o2_volts: o2,
+                vbatt_volts: vbatt,
+                speed_kmh: speed,
+                note: "CSV Datalog Frame",
+            });
+        }
+
+        if frames.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CSV contains no data frames",
+            ));
         }
 
         Ok(frames)
+    }
+
+    fn optional_csv_f64(
+        parts: &[&str],
+        index: usize,
+        default: f64,
+        line_number: usize,
+        field: &str,
+    ) -> io::Result<f64> {
+        let Some(value) = parts.get(index).map(|value| value.trim()) else {
+            return Ok(default);
+        };
+        if value.is_empty() {
+            return Ok(default);
+        }
+        value.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid {field} on CSV line {line_number}"),
+            )
+        })
     }
 
     fn generate_preset_scenario(preset: &str) -> io::Result<Vec<LogFrame>> {
@@ -904,22 +960,11 @@ impl ReplayEngine {
                 }
             }
 
-            // Fallback
             _ => {
-                for i in 0..=20 {
-                    frames.push(LogFrame {
-                        timestamp_ms: i * 100,
-                        rpm: 800.0,
-                        map_kpa: 30.0,
-                        tps_pct: 0.0,
-                        ect_celsius: 85.0,
-                        iat_celsius: 25.0,
-                        o2_volts: 0.45,
-                        vbatt_volts: 14.2,
-                        speed_kmh: 0.0,
-                        note: "Idle Steady State",
-                    });
-                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown replay preset '{preset}'"),
+                ));
             }
         }
 
@@ -930,7 +975,7 @@ impl ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::ReplayEngine;
-    use crate::bus::Bus;
+    use crate::bus::{Bus, P28_MUX_U5_ADCR1, P28_U5_BOOT_CHECK_SELECT};
     use crate::cpu::Cpu;
     use crate::engine::EngineState;
     use crate::interpreter::Interpreter;
@@ -945,6 +990,33 @@ mod tests {
 
         assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3946));
         assert!(ReplayEngine::is_stock_p28_230(&rom[..32_768]));
+    }
+
+    #[test]
+    fn stock_p28_boots_with_live_sensor_inputs_through_the_mux() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let mut bus = Bus::new();
+        if bus.load_rom_file(path).is_err() {
+            eprintln!("stock P28 ROM not present at {path}; skipping");
+            return;
+        }
+
+        let mut engine = EngineState::new();
+        engine.map_kpa = 100.0;
+        engine.tps_pct = 50.0;
+        engine.ect_celsius = 85.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus)
+            .expect("stock P28 should pass its mux self-test");
+
+        assert_eq!(cpu.pc, 0x3946);
+        let boot_check_high =
+            (bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_BOOT_CHECK_SELECT] >> 2) as u8;
+        assert_eq!(bus.ram[0x03C6 + P28_U5_BOOT_CHECK_SELECT], boot_check_high);
+        assert_ne!(bus.ram[0x00EB], 0x49, "boot fault 0x49 must not latch");
     }
 
     #[test]
@@ -977,6 +1049,28 @@ mod tests {
         assert!(frames
             .iter()
             .any(|f| f.timestamp_ms >= 8000 && f.speed_kmh > 0.0 && f.tps_pct == 0.0));
+    }
+
+    #[test]
+    fn unknown_preset_is_rejected_instead_of_silently_running_idle() {
+        let error = ReplayEngine::generate_preset_scenario("dyno-pul")
+            .expect_err("misspelled preset should fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("dyno-pul"));
+    }
+
+    #[test]
+    fn malformed_or_empty_csv_is_rejected() {
+        let malformed = "timestamp_ms,rpm,map_kpa,tps_pct\n0,nope,30,0\n";
+        let error = ReplayEngine::parse_csv(std::io::Cursor::new(malformed))
+            .expect_err("invalid numeric field should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let header_only = "timestamp_ms,rpm,map_kpa,tps_pct\n";
+        let error = ReplayEngine::parse_csv(std::io::Cursor::new(header_only))
+            .expect_err("header-only CSV should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

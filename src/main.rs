@@ -152,7 +152,7 @@ fn main() {
             println!("  Total Cycles     : {}", cpu.cycles);
             println!("  Instructions     : {}", cpu.instructions);
             println!("  Execution Time   : {:.3?}", duration);
-            println!("  Performance      : {:.2} instructions/sec ({:.2} MHz virtual CPU)", ips, ips / 1_000_000.0);
+            println!("  Host throughput  : {:.2} instructions/sec", ips);
             println!("  Interrupts Handled: {}", interrupts_handled);
             println!("  Calculated Injector Pulse Width: {} us", bus.injector_pulse_width_us);
             println!("  IACV Idle Valve Duty Cycle     : {:.1} %", bus.iacv_duty_cycle_pct);
@@ -174,7 +174,7 @@ fn main() {
 
             println!("Disassembly of '{}' starting at {:#06X}:", rom_path, start_addr);
             for _ in 0..count {
-                let ins = Interpreter::step(&mut cpu, &mut bus);
+                let ins = Interpreter::disassemble(&mut cpu, &bus);
                 let hex = ins.bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
                 println!("  {:#06X}: {:18} ; {}", ins.pc, ins.mnemonic, hex);
             }

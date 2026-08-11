@@ -1,6 +1,14 @@
 // Honda OBD1 D16Z6 / P28 Engine Simulator
 
-use crate::bus::{Bus, IRQ_INT0, IRQ_INT1};
+use crate::bus::{
+    Bus, IRQ_INT0, IRQ_INT1, P28_ADC_MAP, P28_ADC_TPS, P28_MUX_U5_ADCR1,
+    P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT,
+};
+
+// Existing battery-monitor model. Its board net has not yet been traced with
+// the same confidence as MAP/TPS/EGR, so it is intentionally not a public P28
+// wiring constant.
+const ADC_VBATT_MODEL_CHANNEL: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct EngineState {
@@ -35,36 +43,37 @@ impl EngineState {
         }
     }
 
-    /// Update ADC channels on the Bus from current physical sensor parameters
+    /// Update the P28 board's analog inputs from physical sensor parameters.
+    /// U5/U6 are external CD4051s selected by P2.5..P2.7. MAP and TPS use
+    /// confirmed direct pins; the existing battery model remains on AI5 while
+    /// that board net awaits a full trace.
     pub fn sync_sensors_to_bus(&self, bus: &mut Bus) {
-        // Channel 0: MAP Sensor (10..250 kPa -> 0.5V..4.5V -> 102..920 ADC counts)
+        // MAP: P5.6/AI6 (10..250 kPa -> 0.5V..4.5V -> 102..920 counts)
         let map_counts = ((self.map_kpa - 10.0) / 240.0 * 818.0 + 102.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[0] = map_counts;
+        bus.adc_inputs[P28_ADC_MAP] = map_counts;
 
-        // Channel 1: TPS Sensor (0..100% -> 0.5V..4.5V -> 102..920 ADC counts)
+        // TPS: P5.7/AI7 (0..100% -> 0.5V..4.5V -> 102..920 counts)
         let tps_counts = (self.tps_pct / 100.0 * 818.0 + 102.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[1] = tps_counts;
+        bus.adc_inputs[P28_ADC_TPS] = tps_counts;
 
-        // Channel 2: ECT Temp Sensor (NTC thermistor mapping)
+        // ECT: U5/X2. High temperature lowers the NTC voltage.
         // High temp = low resistance = low voltage = low ADC count
         let ect_counts = (1023.0 - ((self.ect_celsius + 40.0) / 160.0 * 900.0)).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[2] = ect_counts;
+        bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ECT_SELECT] = ect_counts;
 
-        // Channel 3: IAT Temp Sensor
-        let iat_counts = (1023.0 - ((self.iat_celsius + 40.0) / 160.0 * 900.0)).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[3] = iat_counts;
+        // The IAT field remains available to scenarios and telemetry, but its
+        // final P28 mux/ADC endpoint is not yet verified from the schematic.
 
-        // Channel 4: O2 Sensor (0.0..1.0V -> 0..205 ADC counts)
+        // Primary HEGO: conditioned by U22, then U6/X0.
         let o2_counts = (self.o2_volts / 5.0 * 1023.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[4] = o2_counts;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_HEGO_SELECT] = o2_counts;
 
-        // Channel 5: Battery Voltage (Scaled voltage divider 0..18V -> 0..1023)
+        // Battery monitor: retain the existing AI5 model pending a full net trace.
         let vbatt_counts = (self.vbatt_volts / 20.0 * 1023.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[5] = vbatt_counts;
+        bus.adc_inputs[ADC_VBATT_MODEL_CHANNEL] = vbatt_counts;
 
-        // Channel 6: Vehicle Speed Sensor / Aux
-        let vss_counts = (self.speed_kmh / 250.0 * 1023.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[6] = vss_counts;
+        // VSS is a conditioned digital pulse input on the P28, not an ADC
+        // channel. `speed_kmh` remains available to scenarios and telemetry.
 
         // VTEC spool valve. On the real board this output is driven by the ASIC
         // (schematic pin A25, active-low low-side driver), not a directly

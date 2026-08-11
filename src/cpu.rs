@@ -46,7 +46,7 @@ impl Cpu {
             zf: false,
             cf: false,
             hc: false,
-            dd: true, // Defaults to 16-bit Word mode on boot
+            dd: false, // Reset PSW is 0x0CC8; DD starts in byte mode.
             cycles: 0,
             instructions: 0,
             halted: false,
@@ -97,9 +97,9 @@ impl Cpu {
     // MSM66201/207 user's manual calls it MIE and defines 1 = all maskable
     // interrupts enabled, 0 = disabled. Interrupt entry saves PSW and clears
     // MIE; RTI restores the saved PSW.
-    // Bits 3, 6 and 7 read as 1: the ROM's self-test at 0x2265 writes 0x55
-    // to PSWL and requires 0xDD back, then writes 0xAA and requires 0xEA.
-    const PSW_READS_ONE: u16 = 0b1100_1000;
+    // Bits 3, 6, 7, 10 and 11 are not implemented and read as 1. This yields
+    // the documented reset PSW of 0x0CC8 with every writable flag cleared.
+    const PSW_READS_ONE: u16 = 0x0CC8;
     /// Bits PSW keeps verbatim after excluding the four named arithmetic/data
     /// flags. Leaving a named flag in this shadow copy would let a stale bit
     /// override its live `Cpu` boolean when `psw_u16()` combines the fields.
@@ -191,7 +191,15 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.set_psw_u16(0x0337);
 
-        assert_eq!(cpu.psw_u16(), 0x03FF);
+        assert_eq!(cpu.psw_u16(), 0x0FFF);
+    }
+
+    #[test]
+    fn reset_psw_starts_in_documented_byte_mode() {
+        let cpu = Cpu::new();
+
+        assert_eq!(cpu.psw_u16(), 0x0CC8);
+        assert!(!cpu.dd);
     }
 
     #[test]
