@@ -55,10 +55,10 @@ flowchart TD
 
 - **Table-Driven OKI MSM66207 Virtual CPU**: Decodes whole instruction patterns with `DD`-aware word/byte selection. An opt-in external `dasm662` fixture checks mnemonic and length coverage; it does not certify execution semantics or timing for every opcode.
 - **Peripheral and Interrupt Model**: Simulates hardware timers and distributor interrupts; exact per-instruction clock counts remain an explicit known gap.
-- **ADC Hardware & Sensor Simulation**: Direct synthetic sensor values feed eight 10-bit channels. `ADSCAN.4` schedules a completion after 640 modeled ticks, then all eight read-only `ADCR0`–`ADCR7` latches update in left-justified format and ADC IRQ bit 12 is raised. Channel scanning and the P28 external analog multiplexer are not modeled.
-- **Board-I/O Boundaries Kept Explicit**: The emulator measures active-low transitions on P2.0–P2.3 under its current injector assumption, but the conflicting P28 board mapping is unresolved. Trustworthy VTEC, IACV, fuel-pump, and other board-output telemetry is unavailable.
+- **ADC Hardware & P28 Sensor Simulation**: Synthetic sensors feed the two board-level 4051 muxes and the direct 10-bit ADC pins. P2.5–P2.7 select U5/U6; `ADSCAN.4` completes after 640 modeled ticks, latches all eight left-justified `ADCR0`–`ADCR7` results, and raises ADC IRQ bit 12. On-chip scan-mode details remain simplified.
+- **Board-I/O Boundaries Kept Explicit**: The emulator measures active-low transitions on P2.0–P2.3 under its current injector assumption and now reserves P2.5–P2.7 for the analog mux. Trustworthy VTEC, IACV, fuel-pump, fan, purge, and other board-output telemetry is unavailable.
 - **Experimental TCP Datalog Server**: Provides ID, ping, framed sensor packets, and checksums for protocol exploration. Compatibility and real-time 20 Hz throughput are not yet claimed.
-- **Observable Stock-P28 Sanity Checks**: The CLI checks image shape/checksum, selected P28 vectors, a recognized runtime entry, direct ADC latching, IRQ plumbing, assumed P2 pulse capture, and UART RX plumbing. This is not CPU, ROM, ECU, or hardware certification.
+- **Observable Stock-P28 Sanity Checks**: The CLI checks image shape/checksum, selected P28 vectors, a recognized runtime entry, muxed/direct ADC latching, IRQ plumbing, assumed P2 pulse capture, and UART RX plumbing. This is not CPU, ROM, ECU, or hardware certification.
 - **Honda OBD1 DTC Catalog**: Includes reference metadata; firmware-level detection for the listed codes is not validated.
 - **Interactive REPL Console**: Live interactive shell to step instructions, set RPM/MAP/TPS parameters, dump memory, and monitor measured injector transitions. VTEC/IACV telemetry remains unavailable until board mappings are verified.
 - **Release Builds**: Optimized builds are substantially faster than debug builds; throughput depends on the host and scenario.
@@ -72,7 +72,6 @@ issues below materially limit physical-ECU conclusions:
 
 | Issue | Current behavior |
 |---|---|
-| [#1](https://github.com/VIRUXE/hondaecu-cli/issues/1) | The P28 external analog multiplexer is absent. Replay boots with neutral direct ADC inputs, then applies scenario values straight to modeled MCU channels. |
 | [#2](https://github.com/VIRUXE/hondaecu-cli/issues/2) | P28 board-output mapping is unresolved, including a P2.0 injector/fuel-pump conflict. P2.0–P2.3 pulse measurement is an emulator assumption, not verified harness behavior. |
 | [#3](https://github.com/VIRUXE/hondaecu-cli/issues/3) | Timer compare/free-running behavior is modeled, but the documented auto-reload mode is not. |
 | [#4](https://github.com/VIRUXE/hondaecu-cli/issues/4) | ADC conversion now waits 640 modeled ticks instead of the old 64-tick shortcut and latches all eight left-justified 10-bit results. Scan selection remains simplified, and wall-clock accuracy depends on #8. |
@@ -86,6 +85,10 @@ issues below materially limit physical-ECU conclusions:
 The built-in scenarios inject stimuli; they do not by themselves verify a DTC,
 failsafe, fuel strategy, or physical output. See [the scenario guide](docs/SCENARIOS.md)
 for the observation boundary.
+
+Resolved issue #1 added the stock-P28 U5/U6 mux path and removed replay's
+neutral-ADC boot workaround. It did not resolve the separate external digital
+input-buffer and sustained-injection investigation tracked in issue #6.
 
 ### Rust tests and external ROM fixtures
 

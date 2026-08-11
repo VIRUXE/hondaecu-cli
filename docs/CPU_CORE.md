@@ -240,6 +240,28 @@ Therefore the ROM reaching the current Port-4 power-on path does **not** certify
 the PWM peripheral model. Correct PWM semantics are tracked in
 [issue #7](https://github.com/VIRUXE/hondaecu-cli/issues/7).
 
+### P28 external analog mux
+
+The P28 board places two 4051 analog muxes in front of the first two ADC pins.
+Bomarc schematic 37820-P28-A51 sheet 3 gives the wiring:
+
+| board part | MCU input | shared select |
+|---|---|---|
+| U6 common | P5.0 / AI0 / ADCR0 | P2.5=A, P2.6=B, P2.7=C |
+| U5 common | P5.1 / AI1 / ADCR1 | P2.5=A, P2.6=B, P2.7=C |
+
+The stock ROM proves the sampling sequence at `0x52DE..0x52F7`: it derives an
+index from `P2 >> 5`, stores `ADCR1H` at `0x03C6[index]` and `ADCR0H` at
+`0x03BE[index]`, then advances both muxes with `P2 += 0x20`. Results remain
+latched while the new selection gets a full 640-clock conversion interval.
+
+The power-on check at `0x530C` reads U5 selection 3 (`0x03C9`) and accepts
+`0x78..0x88` or `>=0xFC`. This is a separate boot-check input, not ELD; its
+external semantics remain unresolved. Feeding a closed-throttle value directly
+into ADCR1 produced about `0x19` and fault `0x49`. Routing each input through
+U5/U6 leaves that path at its clean mid-scale model default and fixes the
+failure without boot-only ADC overrides.
+
 ### The ROM's power-on peripheral check (0x2316–0x2343)
 
 ```
@@ -286,7 +308,7 @@ something plausible. That is deliberate, and it caught three real bugs:
 
 ## 8. Verification
 
-Fixture-free checks run with `cargo test --release`. The two OEM-derived
+Fixture-free checks run with `cargo test --release`. The OEM-derived
 decoder/ROM checks below are ignored unless their external fixtures are supplied.
 
 | test | what it proves |
@@ -295,6 +317,7 @@ decoder/ROM checks below are ignored unless their external fixtures are supplied
 | `decoder::decodes_reset_sequence` | pins the exact reset path that broke before |
 | `operand::every_pattern_parses` | all 2623 patterns parse |
 | `exec::oem_rom_passes_its_cpu_self_test` | with an external ROM, the OEM image clears its CPU checks and reaches the currently modeled Port-4 path |
+| `replay::stock_p28_boots_with_live_sensor_inputs_through_the_mux` | with an external ROM, non-neutral scenario sensors are present before reset and the OEM image clears mux fault `0x49` to reach runtime |
 
 The ground-truth fixture carries OEM-derived instruction windows and is not
 distributed or committed. Run the opt-in checks explicitly:
@@ -304,6 +327,8 @@ HONDAECU_DASM662_FIXTURE=/path/to/p28_dasm662.tsv \
   cargo test --release matches_dasm662_ground_truth -- --ignored
 HONDAECU_P28_ROM=/path/to/P28-230.bin \
   cargo test --release oem_rom_passes_its_cpu_self_test -- --ignored
+HONDAECU_P28_ROM=/path/to/P28-230.bin \
+  cargo test --release stock_p28_boots_with_live_sensor_inputs_through_the_mux -- --ignored
 ```
 
 The ROM-driven check is useful execution evidence, but it is opt-in and does not
@@ -333,11 +358,8 @@ transition. These observations are narrower than complete ECU validation.
    ([issue #8](https://github.com/VIRUXE/hondaecu-cli/issues/8)).
 2. ADC conversion uses the documented 640-clock duration at the modeled
    12 MHz clock, but scan-channel rotation is still simplified.
-3. The replay harness does not model the P28 board's external analog
-   multiplexer. It runs the ROM's power-on checks with neutral ADC inputs, then
-   applies scenario sensor values.
-4. PWM mode is not modeled correctly; see issue #7.
-5. Board-level VTEC and IACV pin mappings are not asserted from MCU
+3. PWM mode is not modeled correctly; see issue #7.
+4. Board-level VTEC and IACV pin mappings are not asserted from MCU
    documentation alone. Injector duration is measured from the ROM's
    active-low P2.0–P2.3 driver transitions rather than inferred from PWMR.
 
@@ -352,7 +374,7 @@ future timing-accuracy pass.
 |---|---|
 | **OKI MSM66201 Instruction Manual** (266 pp) | CPU architecture, PSW/SCB/DD, bit addressing, per-instruction flags & cycles |
 | **OKI MSM66207 datasheet** (20 pp) | pin functions, Port 4 map, SFR list |
-| **P28 board schematic** — *Engine Control Computer for Honda/Acura, 37820-P28-A51*, Bomarc, 8 sheets | board wiring; sheet 6 is the MCU sheet |
+| **P28 board schematic** — *Engine Control Computer for Honda/Acura, 37820-P28-A51*, Bomarc, 8 sheets | board wiring; sheet 3 is the analog front end and sheet 6 is the MCU/data bus |
 | [**HondaBase 66K assembler docs**](https://www.hondabase.com/pgmfi/wiki/library/66k-assembler-docs) | archive containing the OKI manuals and scans used for cross-checking |
 | `asm662/src/66207.op` | authoritative opcode table (RCS archive — `co -p` it) |
 | `asm662/bin/dasm662` | reference disassembler, ground truth for decoding |

@@ -67,8 +67,49 @@ flowchart TD
 | `0x0000` – `0x007F` | **SFR Space** | Special Function Registers (Timers, ADC, PWM, I/O Ports) |
 | `0x0080` – `0x00BF` | **Pointing Registers** | 8 sets `PR0..PR7`, each `X1, X2, DP, USP`; the live set is chosen by PSW `SCB` |
 | `0x00C0` – `0x047F` | **On-chip Data RAM** | Internal transient state and learned trims |
-| `0x0480` – `0x0FFF` | **Modeled External Data Space** | Emulator-provided expansion; not on-chip MSM66207 RAM |
+| `0x0480` – `0xFFFF` | **External Data Space** | Architectural external bus; the emulator currently backs only 4 KiB and aliases higher addresses, a known fidelity gap |
 | `0x0000` – `0x7FFF` | **Code ROM** | 32KB External EPROM (Machine code instructions, Fuel & Ignition 3D Lookup Tables) |
+
+---
+
+## P28 Analog Front End
+
+Bomarc sheet 3 shows two CD4051 muxes sharing `P2.5=A`, `P2.6=B`, and
+`P2.7=C`. U6 common feeds `P5.0/AI0/ADCR0`; U5 common feeds
+`P5.1/AI1/ADCR1`. Confirmed signal positions are:
+
+| path | select | signal |
+|---|---:|---|
+| U6 → ADCR0 | 0 | conditioned primary HEGO |
+| U6 → ADCR0 | 3 | on-board barometric sensor |
+| U5 → ADCR1 | 0 | ELD |
+| U5 → ADCR1 | 2 | ECT |
+| U5 → ADCR1 | 3 | boot-check input; external semantics unresolved |
+| direct AI3 | — | optional EGR position |
+| direct AI6 | — | MAP |
+| direct AI7 | — | TPS |
+
+The IAT field remains available in scenarios, but its final P28 mux/ADC
+endpoint is not asserted until that schematic path is traced completely.
+
+At `0x52DE..0x52F7`, the stock ROM captures both mux outputs into
+`0x03BE..0x03CD` and increments P2 by `0x20`. The emulator resolves the mux
+selection when each modeled 640-clock conversion completes, so the previous
+ADCR result remains latched while the next selection settles.
+
+### Boot-latch trace: `0x0320` is not the source
+
+The cold-boot write trace disproves the earlier mux/inject-enable hypothesis.
+The clear loop writes zero to `0x0320` at `0x2403`; `0x241D..0x2423` then only
+applies `0x0320 &= 0xF0`. This address begins a DTC/status bitmap, and its
+writers run later. No pre-mux configuration value should populate it.
+
+`0x9F.0` instead comes from an external-data read: `0x220E` selects `0x4700`,
+`0x2211` reads it, `0x2212` shifts bit 0 into carry, and `0x2213` stores carry
+into `0x9F.0`. The bit is saved before RAM clear and restored at `0x2426`.
+Because the current 4 KiB Bus aliases `0x4700` to `0x0700`, that input reads
+zero. Modeling the P28 external digital-input buffer is separate from the analog
+mux and remains part of [issue #6](https://github.com/VIRUXE/hondaecu-cli/issues/6).
 
 ---
 
@@ -139,4 +180,5 @@ not apply generically to digital solenoids and switches.
 - Instruction/peripheral timing is approximate ([issue #8](https://github.com/VIRUXE/hondaecu-cli/issues/8)).
 - OEM/launch ROM checks are opt-in external-fixture tests ([issue #9](https://github.com/VIRUXE/hondaecu-cli/issues/9)).
 - TCP datalog framing is experimental ([issue #10](https://github.com/VIRUXE/hondaecu-cli/issues/10)).
-- P28 board-output mappings and the external analog mux remain unresolved.
+- P28 board-output mappings and the external digital-input buffer at `0x4700`
+  remain unresolved.
