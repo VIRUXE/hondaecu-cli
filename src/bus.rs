@@ -87,6 +87,25 @@ pub const SFR_ADSCAN: u16 = 0x58;
 pub const SFR_ADSEL: u16 = 0x59;
 pub const SFR_ADCR0: u16 = 0x60;
 
+/// P28 board-level CD4051 banks. U6 feeds P5.0/AI0 (ADCR0), while U5 feeds
+/// P5.1/AI1 (ADCR1). Both parts share A/B/C select lines on P2.5/P2.6/P2.7.
+pub const P28_MUX_U6_ADCR0: usize = 0;
+pub const P28_MUX_U5_ADCR1: usize = 1;
+
+/// Sensor positions confirmed from Bomarc 37820-P28-A51, sheet 3.
+pub const P28_U5_ELD_SELECT: usize = 0;
+pub const P28_U5_ECT_SELECT: usize = 2;
+/// U5/X3 is sampled by the ROM's fault-0x49 boot check. Its external signal
+/// semantics remain unresolved.
+pub const P28_U5_BOOT_CHECK_SELECT: usize = 3;
+pub const P28_U6_HEGO_SELECT: usize = 0;
+pub const P28_U6_BARO_SELECT: usize = 3;
+
+/// Direct (unmultiplexed) P5 analog inputs on the P28 board.
+pub const P28_ADC_EGR: usize = 3;
+pub const P28_ADC_MAP: usize = 6;
+pub const P28_ADC_TPS: usize = 7;
+
 pub const SFR_PWMC0: u16 = 0x70;
 pub const SFR_PWMR0: u16 = 0x72;
 pub const SFR_PWMC1: u16 = 0x74;
@@ -101,8 +120,14 @@ pub struct Bus {
     pub rom: Vec<u8>,
     pub ram: [u8; RAM_SIZE],
 
-    // Virtual ADC Channels (0..7)
+    // Direct MCU ADC-pin levels (P5.0..P5.7). On the P28 board channels 0
+    // and 1 are driven by the external muxes below, so their entries here are
+    // not sampled while the board model is enabled.
     pub adc_inputs: [u16; 8],
+
+    /// External P28 analog mux inputs, indexed [U6/U5][select]. The first bank
+    /// drives ADCR0 and the second drives ADCR1. Values are 10-bit ADC counts.
+    pub p28_mux_inputs: [[u16; 8]; 2],
 
     // PWM output measurements
     pub injector_pulse_width_us: u32,
@@ -118,8 +143,8 @@ pub struct Bus {
     pub vtec_solenoid_active: bool,
     pub vtec_pressure_switch: bool,
     pub ac_clutch_active: bool, // P2.4: A/C Compressor Clutch Relay Driver
-    pub radiator_fan_active: bool, // P2.5: Radiator Cooling Fan Relay Driver
-    pub purge_solenoid_active: bool, // P2.6: EVAP Purge Control Solenoid Driver
+    pub radiator_fan_active: bool, // Board output not yet mapped to an MCU pin.
+    pub purge_solenoid_active: bool, // Board output not yet mapped to an MCU pin.
 
     /// PWM0/PWM1 output pin state, surfaced on P4.2 / P4.3.
     pub pwm_out: [bool; 2],
@@ -148,6 +173,9 @@ impl Bus {
             rom: vec![0xFF; ROM_SIZE],
             ram: [0; RAM_SIZE],
             adc_inputs: [512; 8], // Default to ~2.5V (mid scale 10-bit)
+            // Board reference dividers and unspecified external inputs start
+            // at mid-scale. EngineState replaces the modeled sensor slots.
+            p28_mux_inputs: [[512; 8]; 2],
             injector_pulse_width_us: 0,
             iacv_duty_cycle_pct: 0.0,
             elapsed_cycles: 0,
@@ -349,8 +377,8 @@ impl Bus {
 
             let p2 = self.ram[SFR_P2 as usize];
             self.ac_clutch_active = (p2 & (1 << 4)) != 0;
-            self.radiator_fan_active = (p2 & (1 << 5)) != 0;
-            self.purge_solenoid_active = (p2 & (1 << 6)) != 0;
+            // P2.5..P2.7 are the shared A/B/C selects for U5 and U6, not fan
+            // or purge outputs. Those board-output mappings remain unresolved.
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         }
@@ -372,7 +400,22 @@ impl Bus {
     /// right-justified makes a mid-scale input read back as 002h and the ROM
     /// BRKs at 0x532B on a "sensor out of range" fault.
     pub fn adc_result(&self, channel: usize) -> u16 {
-        (self.adc_inputs[channel] & 0x03FF) << 6
+        (self.adc_input(channel) & 0x03FF) << 6
+    }
+
+    /// Resolve the voltage present at an MCU analog pin. P2.5..P2.7 select
+    /// both external CD4051s. The firmware changes those lines immediately
+    /// after consuming a completed sample, leaving the full 640-clock ADC
+    /// conversion for the next pair to settle; sampling here at conversion
+    /// completion models that sequence without an arbitrary extra delay.
+    pub fn adc_input(&self, channel: usize) -> u16 {
+        match channel {
+            0 | 1 => {
+                let select = (self.read_port(2) >> 5) as usize & 0x07;
+                self.p28_mux_inputs[channel][select]
+            }
+            _ => self.adc_inputs[channel],
+        }
     }
 
     pub fn trigger_adc_conversion(&mut self) {
@@ -488,12 +531,6 @@ impl Bus {
 
             if matched {
                 irq_flags |= 1 << *irq_bit;
-                // Compare match flips the timer output pin, which is what the
-                // ROM watches on Port 4.
-                let _ = i;
-                if *tm_sfr == SFR_TM1 {
-                    self.trigger_adc_conversion();
-                }
             }
             if overflow && *tm_sfr == SFR_TM2 {
                 irq_flags |= 1 << IRQ_TM2_OVF;
@@ -519,7 +556,7 @@ mod tests {
     #[test]
     fn adc_start_completes_later_and_sets_irqh_bit_four() {
         let mut bus = Bus::new();
-        bus.adc_inputs[0] = 0x0155;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][0] = 0x0155;
         bus.write_data_u16(SFR_IRQ, 0);
         bus.write_data_u8(SFR_ADSCAN, 0x10);
 
@@ -530,6 +567,69 @@ mod tests {
         assert_ne!(bus.tick_timers(2) & (1 << IRQ_ADC), 0);
         assert_ne!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_ADC), 0);
         assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0155 << 6);
+    }
+
+    #[test]
+    fn p28_shared_select_lines_route_both_mux_banks() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        for select in 0..8 {
+            bus.p28_mux_inputs[P28_MUX_U6_ADCR0][select] = 100 + select as u16;
+            bus.p28_mux_inputs[P28_MUX_U5_ADCR1][select] = 700 + select as u16;
+        }
+
+        for select in 0..8 {
+            bus.write_data_u8(SFR_P2, (select as u8) << 5);
+            bus.trigger_adc_conversion();
+
+            assert_eq!(bus.read_data_u16(SFR_ADCR0), (100 + select as u16) << 6);
+            assert_eq!(bus.read_data_u16(SFR_ADCR0 + 2), (700 + select as u16) << 6);
+        }
+    }
+
+    #[test]
+    fn mux_selection_settles_before_the_next_conversion_latches() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][0] = 0x0100;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][1] = 0x0200;
+        bus.write_data_u8(SFR_P2, 0x00);
+        bus.write_data_u8(SFR_ADSCAN, 0x10);
+
+        assert_ne!(bus.tick_timers(640) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0100 << 6);
+
+        bus.write_data_u8(SFR_P2, 0x20);
+        assert_eq!(bus.tick_timers(639) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0100 << 6);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_ADC), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0), 0x0200 << 6);
+    }
+
+    #[test]
+    fn p28_mux_does_not_change_direct_adc_channels() {
+        let mut bus = Bus::new();
+        bus.adc_inputs[2] = 0x02AA;
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        bus.write_data_u8(SFR_P2, 0xE0);
+
+        bus.trigger_adc_conversion();
+
+        assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x02AA << 6);
+    }
+
+    #[test]
+    fn timer_one_compare_does_not_bypass_the_adc_schedule() {
+        let mut bus = Bus::new();
+        bus.adc_inputs[2] = 0x0100;
+        bus.trigger_adc_conversion();
+        bus.adc_inputs[2] = 0x0200;
+        bus.write_data_u16(SFR_TM1, 0);
+        bus.write_data_u16(SFR_TMR1, 1);
+        bus.write_data_u8(SFR_TCON1, 0x10);
+
+        assert_ne!(bus.tick_timers(4) & (1 << IRQ_TM1), 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x0100 << 6);
     }
 
     #[test]

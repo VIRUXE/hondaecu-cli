@@ -153,11 +153,12 @@ fn main() {
             let mut engine = EngineState::new();
 
             cpu.pc = bus.read_code_u16(0x0000);
+            engine.rpm = target_rpm;
+            engine.sync_sensors_to_bus(&mut bus);
             if let Err(e) = ReplayEngine::boot_to_runtime(&mut cpu, &mut bus) {
                 eprintln!("Failed to initialize ROM: {}", e);
                 process::exit(1);
             }
-            engine.rpm = target_rpm;
 
             let start = std::time::Instant::now();
             let start_instructions = cpu.instructions;

@@ -262,7 +262,7 @@ pub const ALL_HONDA_OBD1_DTCS: &[DtcInfo] = &[
 
 #[cfg(test)]
 mod tests {
-    use crate::bus::Bus;
+    use crate::bus::{Bus, P28_ADC_MAP, P28_ADC_TPS, SFR_ADCR0};
     use crate::engine::EngineState;
 
     #[test]
@@ -274,8 +274,11 @@ mod tests {
         engine.sync_sensors_to_bus(&mut bus);
         bus.trigger_adc_conversion();
 
-        assert!(bus.adc_inputs[0] < 100);
-        assert_eq!(bus.read_data_u16(0x60), bus.adc_inputs[0] << 6);
+        assert!(bus.adc_inputs[P28_ADC_MAP] < 100);
+        assert_eq!(
+            bus.read_data_u16(SFR_ADCR0 + (P28_ADC_MAP as u16 * 2)),
+            bus.adc_inputs[P28_ADC_MAP] << 6
+        );
     }
 
     #[test]
@@ -284,11 +287,11 @@ mod tests {
         let mut engine = EngineState::new();
         engine.tps_pct = 0.0;
         engine.sync_sensors_to_bus(&mut bus);
-        assert_eq!(bus.adc_inputs[1], 102);
+        assert_eq!(bus.adc_inputs[P28_ADC_TPS], 102);
 
-        bus.adc_inputs[1] = 0;
+        bus.adc_inputs[P28_ADC_TPS] = 0;
         bus.trigger_adc_conversion();
-        assert_eq!(bus.adc_inputs[1], 0);
-        assert_eq!(bus.read_data_u16(0x62), 0);
+        assert_eq!(bus.adc_inputs[P28_ADC_TPS], 0);
+        assert_eq!(bus.read_data_u16(SFR_ADCR0 + (P28_ADC_TPS as u16 * 2)), 0);
     }
 }

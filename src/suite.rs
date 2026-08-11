@@ -1,7 +1,9 @@
 // Honda P28 / OBD1 ECU ROM and hardware sanity checks.
 
 use crate::bus::{
-    Bus, IRQ_INT0, IRQ_SERIAL_RX, IRQ_TM0, SFR_IE, SFR_P2, SFR_TCON0, SFR_TM0, SFR_TMR0,
+    Bus, IRQ_INT0, IRQ_SERIAL_RX, IRQ_TM0, P28_ADC_MAP, P28_ADC_TPS, P28_MUX_U5_ADCR1,
+    P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT, SFR_ADCR0, SFR_IE, SFR_P2, SFR_P2IO,
+    SFR_TCON0, SFR_TM0, SFR_TMR0,
 };
 use crate::cpu::Cpu;
 use crate::engine::EngineState;
@@ -115,6 +117,8 @@ impl EcuTestSuite {
         let mut bus = Bus::new();
         let _ = bus.load_rom_file(rom_path);
         let mut cpu = Cpu::new();
+        let engine = EngineState::new();
+        engine.sync_sensors_to_bus(&mut bus);
 
         let reset_target = bus.read_code_u16(0x0000);
         cpu.pc = reset_target;
@@ -144,15 +148,25 @@ impl EcuTestSuite {
         engine.map_kpa = 100.0;
         engine.tps_pct = 50.0;
         engine.sync_sensors_to_bus(&mut bus);
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        // Selector 0 samples HEGO through U6.
+        bus.write_data_u8(SFR_P2, 0x00);
         bus.trigger_adc_conversion();
+        let hego_adcr0 = bus.read_data_u16(SFR_ADCR0);
 
-        let adcr0 = bus.read_data_u16(0x60);
-        let adcr1 = bus.read_data_u16(0x62);
+        // Selector 2 samples ECT through U5.
+        bus.write_data_u8(SFR_P2, (P28_U5_ECT_SELECT as u8) << 5);
+        bus.trigger_adc_conversion();
+        let ect_adcr1 = bus.read_data_u16(SFR_ADCR0 + 2);
+        let adcr6 = bus.read_data_u16(SFR_ADCR0 + (P28_ADC_MAP as u16 * 2));
+        let adcr7 = bus.read_data_u16(SFR_ADCR0 + (P28_ADC_TPS as u16 * 2));
 
-        let passed = adcr0 == bus.adc_inputs[0] << 6 && adcr1 == bus.adc_inputs[1] << 6;
+        let passed = hego_adcr0 == bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_HEGO_SELECT] << 6
+            && ect_adcr1 == bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ECT_SELECT] << 6
+            && adcr6 == bus.adc_inputs[P28_ADC_MAP] << 6
+            && adcr7 == bus.adc_inputs[P28_ADC_TPS] << 6;
         let details = format!(
-            "MAP 100kPa -> ADCR0: {}, TPS 50% -> ADCR1: {}",
-            adcr0, adcr1
+            "HEGO -> ADCR0: {hego_adcr0}, ECT -> ADCR1: {ect_adcr1}; MAP -> ADCR6: {adcr6}, TPS -> ADCR7: {adcr7}"
         );
 
         TestResult {

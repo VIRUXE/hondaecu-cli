@@ -65,10 +65,6 @@ impl DatalogServer {
         let mut bus = Bus::new();
         bus.load_rom_file(rom_path)?;
 
-        let mut cpu = Cpu::new();
-        cpu.pc = bus.read_code_u16(0x0000);
-        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus)?;
-
         let mut engine = EngineState::new();
         engine.rpm = 2500.0;
         engine.map_kpa = 45.0;
@@ -78,6 +74,11 @@ impl DatalogServer {
         engine.o2_volts = 0.45;
         engine.vbatt_volts = 14.2;
         engine.speed_kmh = 40.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0x0000);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus)?;
 
         socket.set_read_timeout(Some(Duration::from_millis(50)))?;
         socket.set_nodelay(true)?;

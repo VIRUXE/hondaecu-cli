@@ -54,11 +54,16 @@ impl ReplayEngine {
             ));
         }
 
+        let mut engine = EngineState::new();
+        if let Some(frame) = frames.first() {
+            Self::apply_frame_to_engine(frame, &mut engine);
+        }
+        engine.sync_sensors_to_bus(&mut bus);
+
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
         Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
-        let mut engine = EngineState::new();
         let mut results = Vec::new();
 
         println!("============================================================");
@@ -92,15 +97,7 @@ impl ReplayEngine {
             };
             last_ms = frame.timestamp_ms;
 
-            // Update virtual engine sensors
-            engine.rpm = frame.rpm;
-            engine.map_kpa = frame.map_kpa;
-            engine.tps_pct = frame.tps_pct;
-            engine.ect_celsius = frame.ect_celsius;
-            engine.iat_celsius = frame.iat_celsius;
-            engine.o2_volts = frame.o2_volts;
-            engine.vbatt_volts = frame.vbatt_volts;
-            engine.speed_kmh = frame.speed_kmh;
+            Self::apply_frame_to_engine(frame, &mut engine);
             engine.sync_sensors_to_bus(&mut bus);
             Self::apply_fault_overrides(log_source, frame, &mut bus);
 
@@ -189,11 +186,9 @@ impl ReplayEngine {
         Ok(())
     }
 
-    /// Run the ROM's power-on hardware checks with neutral ADC inputs before
-    /// applying a replay frame. The simplified sensor harness does not yet
-    /// model the P28 board's external analog multiplexer, and feeding direct
-    /// TPS/MAP values into that mux self-test makes a healthy ROM reset with
-    /// boot fault 0x49 before it can process a single scenario frame.
+    /// Run the ROM's power-on hardware checks. Callers configure the board
+    /// inputs first, so the external U5/U6 mux scan sees the same sensor and
+    /// reference network that subsequent runtime conversions use.
     pub(crate) fn boot_to_runtime(cpu: &mut Cpu, bus: &mut Bus) -> io::Result<()> {
         let Some(ready_pc) = Self::runtime_ready_pc(&bus.rom) else {
             return Err(io::Error::new(
@@ -234,12 +229,23 @@ impl ReplayEngine {
     /// TPS signal; a ground short must drive the ADC channel itself to zero.
     fn apply_fault_overrides(log_source: &str, frame: &LogFrame, bus: &mut Bus) {
         if log_source == "error-tps-short" && frame.timestamp_ms >= 750 {
-            bus.adc_inputs[1] = 0;
+            bus.adc_inputs[crate::bus::P28_ADC_TPS] = 0;
         }
 
         if log_source == "error-vtec-oil-pressure-loss" {
             bus.vtec_pressure_switch = frame.timestamp_ms < 750;
         }
+    }
+
+    fn apply_frame_to_engine(frame: &LogFrame, engine: &mut EngineState) {
+        engine.rpm = frame.rpm;
+        engine.map_kpa = frame.map_kpa;
+        engine.tps_pct = frame.tps_pct;
+        engine.ect_celsius = frame.ect_celsius;
+        engine.iat_celsius = frame.iat_celsius;
+        engine.o2_volts = frame.o2_volts;
+        engine.vbatt_volts = frame.vbatt_volts;
+        engine.speed_kmh = frame.speed_kmh;
     }
 
     /// Locate the instruction immediately after the ROM's timer-integrity
@@ -938,7 +944,7 @@ impl ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::ReplayEngine;
-    use crate::bus::Bus;
+    use crate::bus::{Bus, P28_MUX_U5_ADCR1, P28_U5_BOOT_CHECK_SELECT};
     use crate::cpu::Cpu;
     use crate::engine::EngineState;
     use crate::interpreter::Interpreter;
@@ -971,6 +977,38 @@ mod tests {
 
         assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3946));
         assert!(ReplayEngine::is_stock_p28_230(&rom[..32_768]));
+    }
+
+    #[test]
+    #[ignore = "requires an external OEM P28 ROM fixture"]
+    fn stock_p28_boots_with_live_sensor_inputs_through_the_mux() {
+        let path = external_rom(
+            "HONDAECU_P28_ROM",
+            &["../P28-230.bin", "../decomp/p28-230/P28_recompiled.bin"],
+        );
+        let mut bus = Bus::new();
+        bus.load_rom_file(path.to_str().expect("UTF-8 ROM path"))
+            .expect("load OEM P28 ROM");
+
+        let mut engine = EngineState::new();
+        engine.map_kpa = 100.0;
+        engine.tps_pct = 50.0;
+        engine.ect_celsius = 85.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus)
+            .expect("stock P28 should pass its mux self-test");
+
+        assert_eq!(cpu.pc, 0x3946);
+        // The ROM stores U5/ADCR1 samples at 0x03C6 + P2[7:5]. Slot 3 is the
+        // input read by the boot check at 0x530C; its clean board-model default
+        // is mid-scale, which reads as 0x80 in ADCR1H.
+        let boot_check_high =
+            (bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_BOOT_CHECK_SELECT] >> 2) as u8;
+        assert_eq!(bus.ram[0x03C6 + P28_U5_BOOT_CHECK_SELECT], boot_check_high);
+        assert_ne!(bus.ram[0x00EB], 0x49, "boot fault 0x49 must not latch");
     }
 
     #[test]
@@ -1042,13 +1080,14 @@ mod tests {
         engine.tps_pct = frame.tps_pct;
         engine.sync_sensors_to_bus(&mut bus);
         assert_eq!(
-            bus.adc_inputs[1], 102,
+            bus.adc_inputs[crate::bus::P28_ADC_TPS],
+            102,
             "0% TPS remains a valid 0.5 V signal"
         );
 
         ReplayEngine::apply_fault_overrides("error-tps-short", frame, &mut bus);
 
-        assert_eq!(bus.adc_inputs[1], 0);
+        assert_eq!(bus.adc_inputs[crate::bus::P28_ADC_TPS], 0);
     }
 
     #[test]
