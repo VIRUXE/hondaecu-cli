@@ -1,48 +1,71 @@
-# Honda OBD1 ECU Real-Life Engine Runtime Scenarios & Fault Injection Playback Guide
+# Honda OBD1 ECU Scripted Stimulus & Fault-Injection Guide
 
-`hondaecu-cli` features a real-time ECU log playback and scripted trace engine (`hondaecu-cli replay`). This subsystem feeds dynamic sensor conditions into the virtual OKI MSM66207 CPU and hardware peripherals frame-by-frame, observing how the ROM binary calculates fuel pulse widths ($T_{inj}$), ignition advance ($\theta_{spark}$), idle air control duty cycle (IACV), VTEC solenoid activation, and Diagnostic Trouble Codes (DTCs).
+`hondaecu-cli replay` feeds scripted sensor conditions into the virtual OKI
+MSM66207 frame by frame. Its timestamps use approximate instruction timing;
+this is not a real-time or closed-loop engine simulation. Fuel, ignition,
+idle-control, VTEC, and DTC behavior are **inspection targets** only.
+
+## How to Interpret a Replay
+
+The preset definition establishes only the **injected stimulus**: values such as
+RPM, MAP, TPS, temperature, voltage, switch state, and vehicle speed over time.
+RPM and speed are scripted inputs, not results of a closed-loop engine or chassis
+model.
+
+A ROM response is verified only when the run observes it independently—for
+example, a documented RAM/SFR state change, DTC bit, or output-pin transition—and
+an assertion compares that observation with a stated expectation. Record the ROM
+identity and the address, bit, or pin used by the assertion. A scripted sensor,
+RPM, or speed value cannot also serve as evidence that the ECU caused it.
+
+The OKI 66K manuals document CPU, ADC, serial, timer, port, and interrupt
+behavior. They do **not** document Honda's ROM-specific DTC assignments,
+calibration thresholds, failsafe policy, or ECU-board signal wiring. Claims in
+those areas remain hypotheses until they are traced in the selected ROM and, for
+physical outputs, checked against the board mapping.
 
 ---
 
 ## 📌 Available Scenario Presets
 
-### ⚠️ Fault & Error Injection Presets (Testing DTC Diagnostics & Failsafes)
+### ⚠️ Fault & Error Injection Presets (DTC/Failsafe Verification Targets)
 
-| Preset Name | Simulated Sensor Fault / Anomaly | Diagnostic DTC Triggered | ROM Emergency Failsafe & Limp Mode |
+| Preset Name | Injected Sensor Fault / Anomaly | DTC to Check | Failsafe/Output to Check |
 |---|---|---|---|
-| **`error-map-failure`** | MAP sensor vacuum line pops off under load (0.0 kPa) | **DTC 3** (MAP High/Low) & **DTC 5** (MAP Range) | Enters Speed-Density Alpha-N fallback using TPS sensor matrix. |
-| **`error-ect-overheat`** | ECT sensor open circuit / thermistor unplugged (135°C+) | **DTC 6** (ECT Temp Sensor) | Initiates **Thermal Safety Ignition Retard** (-10° BTDC) & rich coolant protection. |
-| **`error-tps-short`** | TPS grounds out (0% TPS) while engine MAP is at 95 kPa | **DTC 7** (TPS Throttle Sensor Bounds) | Defaults TPS to fail-safe 50% value to prevent severe lean stumble. |
-| **`error-ckp-distributor-loss`** | Crankshaft CKP distributor pulse drops out at 4500 RPM | **DTC 4** (CKP Position Sensor) | Emergency fuel cut-off & ignition spark disable to protect engine. |
-| **`error-vtec-oil-pressure-loss`** | VTEC commanded at 5500 RPM but oil pressure switch stays open (0 psi) | **DTC 22** (VTEC Pressure Switch) | Disengages VTEC solenoid output; limits engine revs to low-cam profile. |
-| **`error-alt-low-voltage`** | Alternator brownout / dying battery voltage (Vbatt drops to 8.5V) | **DTC 20** (ELD / Electrical Load) | Injector dead-time compensation ($T_{dead}$) spikes to maximum pulse width. |
-| **`error-o2-lean-stuck`** | Primary O2 sensor stuck at 0.02V lean despite +25% fuel trim | **DTC 1** (O2 Sensor) & **DTC 43** (Fuel System) | Disables closed-loop fuel correction; locks ECU into open-loop safety tables. |
+| **`error-map-failure`** | MAP input drops to 0.0 kPa under load. | Candidate **DTC 3/5**; verify the ROM's actual DTC bits and qualification delay. | Check for a MAP-substitution strategy; Alpha-N fallback is not yet established. |
+| **`error-ect-overheat`** | ECT input is driven to 135°C+. | Candidate **DTC 6**; verify the ROM's threshold, polarity, and delay. | Check ignition/fuel outputs; a fixed -10° retard and enrichment are not yet established. |
+| **`error-tps-short`** | The modeled TPS ADC channel is forced to ground under high MAP; 0% TPS alone would remain a valid 0.5 V signal. | Candidate **DTC 7**; verify the ROM's plausibility logic. | Check the value used by fuel logic; a substitution strategy is not established. |
+| **`error-ckp-distributor-loss`** | Scripted RPM drops to zero, stopping generated distributor edges. | Candidate **DTC 4/8**; verify the ROM's timeout and DTC state. | Check independently observed outputs; the trace does not prove a fuel cut. |
+| **`error-vtec-oil-pressure-loss`** | High-RPM/TPS values are injected and an emulator-side pressure-switch flag is opened. Its MCU/board connection is not implemented. | Candidate **DTC 22** only after the input mapping exists. | VTEC and limiter behavior cannot currently be asserted. |
+| **`error-alt-low-voltage`** | Battery-voltage input drops to 8.5 V. | Candidate **DTC 20**; verify whether this ROM associates it with the injected signal. | Check measured injector timing; maximum dead-time compensation is not yet established. |
+| **`error-o2-lean-stuck`** | Primary O2 input is held at 0.02 V. | Candidate **DTC 1/43**; verify closed-loop preconditions, delay, and DTC bits. | Check trim/control state; a +25% limit and open-loop fallback are not yet established. |
 
 ---
 
 ### 🏎️ Normal Driving & Performance Presets
 
-| Preset Name | Description & Real-World Condition | Primary ECU Physics Tested |
+| Preset Name | Injected Trace | ROM Behavior to Inspect |
 |---|---|---|
-| **`overrun-decel`** | High RPM WOT snap closed to 0% TPS; engine braking down to 800 RPM | **Deceleration Fuel Cut-Off (DFCO)** ($T_{inj} = 0\,\mu\text{s}$) when RPM > 1100 & TPS = 0%, followed by anti-stall fuel re-injection. |
-| **`overrun-downhill`** | Extended downhill coasting with intermittent heel-toe throttle blips | Intermittent DFCO cut-off, transient blip enrichment, and engine braking vacuum transitions. |
-| **`accel-stomp`** | Steady cruise (2500 RPM, 15% TPS) followed by instant 100% TPS WOT stomp | **Transient Acceleration Tip-In Enrichment** ($\frac{d\text{TPS}}{dt}$ & $\Delta\text{MAP}$ derivative enrichment multipliers). |
-| **`drag-pass`** | 1/4 Mile Drag Strip Pass (2-Step launch → 1st → 2nd → 3rd → 4th → trap overrun) | **Launch Control 2-Step Limiter**, high-load fuel delivery, VTEC high-cam crossover, gear-shift lifts, and high-RPM trap DFCO. |
-| **`vtec-hysteresis`** | RPM oscillating around 4800 RPM threshold with VTEC oil pressure fault injection | VTEC Spool Valve engagement criteria (RPM $\ge$ 4800, TPS $\ge$ 20%, ECT $\ge$ 60°C) and DTC 22 pressure switch hysteresis. |
-| **`electrical-load-idle`** | Engine idling at 800 RPM while AC compressor and headlights cycle ON/OFF | **Idle Air Control Valve (IACV) Load Compensation** & alternator voltage dip dead-time compensation ($T_{dead}$). |
-| **`heat-soak-start`** | Hot engine restart after sitting (ECT = 98°C, IAT = 60°C) | Hot-start anti-percolation fuel enrichment and IAT air density trim corrections. |
-| **`dyno-pull`** | Full WOT Dyno Sweep from 2000 RPM to 8200 RPM | 3D Fuel & Ignition matrix interpolation across low-cam and high-cam VTEC maps. |
-| **`cold-start`** | Engine startup in cold ambient (-10°C) warming up to operating temp (85°C) | Cold-start ECT enrichment multiplier ($K_{ect}$) and fast-idle thermal valve / IACV warmup position. |
+| **`overrun-decel`** | High RPM/WOT followed by scripted TPS closure and RPM decay. | Check for DFCO and later fuel restoration; the 1100-RPM threshold must be established per ROM. |
+| **`overrun-downhill`** | Extended scripted coast with throttle blips. | Check measured injector response for cut and transient enrichment. |
+| **`accel-stomp`** | Steady cruise inputs followed by an instant 100% TPS command. | Check measured fuel response for transient enrichment; no derivative multiplier is assumed. |
+| **`drag-pass`** | Scripted staged launch, gear pulls, shift lifts, and overrun. | Check limiter, fuel, VTEC, and DFCO outputs; the scripted launch/RPM path proves none of them. |
+| **`launch-control-2step`** | Dedicated 2-Step stimulus: idle → WOT stab → stationary RPM bounce → clutch drop/launch → 1st gear pull → off-throttle abort | Compare ECU outputs across stationary, rolling and abort phases on a ROM that contains launch control. |
+| **`electrical-load-idle`** | Scripted 800-RPM idle while electrical-load inputs cycle. | Check independently observed IACV and injector timing response. |
+| **`heat-soak-start`** | Scripted restart with ECT 98°C and IAT 60°C. | Check fuel/timing changes; no anti-percolation strategy is assumed. |
+| **`dyno-pull`** | Scripted WOT sweep from 2000 to 8200 RPM. | Check ROM table use and output transitions; scripted RPM does not prove VTEC crossover. |
+| **`cold-start`** | Scripted -10°C start and warm-up to 85°C. | Check injector and idle-control outputs for temperature-dependent behavior. |
 
 ---
 
 ## 🛠️ Detailed Fault & Error Breakdown
 
 ### 1. MAP Sensor Disconnect (`error-map-failure`)
+
 - **Fault Injection**: At $t = 750\,\text{ms}$, MAP sensor signal drops to $0.0\,\text{kPa}$ while engine is under $45\%$ TPS load.
-- **ROM Diagnostic Action**: Evaluated by ADC ISR. Detects voltage $<0.2\,\text{V}$ ($<102$ ADC counts).
-- **DTC Triggered**: **DTC 3** (MAP High/Low) & **DTC 5** (MAP Circuit Range).
-- **Failsafe**: Switches fuel calculation from Speed-Density (MAP vs RPM) to Alpha-N (TPS vs RPM).
+- **Observation Required**: Trace the resulting ADCR value into this ROM's diagnostic branch and identify its threshold and qualification delay.
+- **Expected DTC to Verify**: Candidate **DTC 3/5**; confirm the actual ROM DTC address and bits.
+- **Expected Failsafe to Verify**: Check fuel calculations for a substituted MAP or TPS-based strategy; Alpha-N fallback is not assumed.
 
 ```bash
 # Linux / macOS
@@ -55,10 +78,11 @@
 ---
 
 ### 2. Coolant Sensor Open / Overheat (`error-ect-overheat`)
+
 - **Fault Injection**: At $t = 750\,\text{ms}$, ECT thermistor voltage drops $<0.2\,\text{V}$ (reading $>135^\circ\text{C}$).
-- **ROM Diagnostic Action**: Evaluated by ADC ISR.
-- **DTC Triggered**: **DTC 6** (Engine Coolant Temperature Circuit).
-- **Failsafe**: Initiates safety ignition retard (retards spark $-10^\circ$ BTDC) and enriches fuel to prevent engine melt.
+- **Observation Required**: Trace the ADCR value through this ROM's ECT diagnostic logic and record its threshold and delay.
+- **Expected DTC to Verify**: Candidate **DTC 6**; confirm the actual ROM DTC address and bit.
+- **Expected Failsafe to Verify**: Compare independently observed fuel and ignition outputs before and after injection; no fixed retard or enrichment is assumed.
 
 ```bash
 # Linux / macOS
@@ -71,10 +95,11 @@
 ---
 
 ### 3. VTEC Low Oil Pressure Fault (`error-vtec-oil-pressure-loss`)
-- **Fault Injection**: Engine revs to $5,500\,\text{RPM}$ under WOT. ECU energizes VTEC spool valve solenoid output, but VTEC oil pressure switch contacts fail to close ($0\,\text{psi}$ pressure).
-- **ROM Diagnostic Action**: Evaluated after 200 ms hysteresis timer.
-- **DTC Triggered**: **DTC 22** (VTEC Oil Pressure Switch Fault).
-- **Failsafe**: De-energizes VTEC spool valve; locks rev limiter to low-cam profile.
+
+- **Fault Injection**: Scripted RPM reaches $5,500\,\text{RPM}$ under WOT while the VTEC oil-pressure-switch input remains open. VTEC command state is an output to observe, not part of the stimulus.
+- **Observation Required**: Establish this ROM's command/switch qualification logic and delay; 200 ms is not treated as verified.
+- **Expected DTC to Verify**: Candidate **DTC 22**; confirm the actual ROM DTC address and bit.
+- **Expected Failsafe to Verify**: Check VTEC output transitions and independently measured fuel/ignition behavior; a low-cam limiter is not assumed.
 
 ```bash
 # Linux / macOS
@@ -87,10 +112,11 @@
 ---
 
 ### 4. Primary O2 Stuck Lean (`error-o2-lean-stuck`)
-- **Fault Injection**: O2 sensor reads $0.02\,\text{V}$ lean continuously. Closed-loop fuel trim ramps up to maximum (+25%).
-- **ROM Diagnostic Action**: Evaluated after closed-loop integration timer expires.
-- **DTC Triggered**: **DTC 1** (Primary O2 Sensor) & **DTC 43** (Fuel System Lean Limit Exceeded).
-- **Failsafe**: Disables closed-loop feedback; locks ECU into safe open-loop base tables.
+
+- **Fault Injection**: O2 sensor input remains at $0.02\,\text{V}$. Fuel-trim movement is a ROM response to observe, not an injected condition.
+- **Observation Required**: Establish closed-loop entry conditions, the integration timer, and the trim representation for this ROM.
+- **Expected DTC to Verify**: Candidate **DTC 1/43**; confirm the actual ROM DTC addresses and bits.
+- **Expected Failsafe to Verify**: Check control-state and fuel-output changes; a +25% limit or open-loop fallback is not assumed.
 
 ```bash
 # Linux / macOS
@@ -102,11 +128,51 @@
 
 ---
 
+### 5. Dedicated 2-Step Launch-Control Stimulus (`launch-control-2step`)
+
+This is an input trace, not a closed-loop chassis simulation. It feeds RPM,
+speed and sensor values to a ROM so its output response can be inspected. The
+RPM rise above 4200 is scripted and therefore does **not**, by itself, prove
+that a limiter released. Use a ROM that actually contains a 2-step patch; the
+OEM P28-230 image is a stock calibration and is not a positive 2-step fixture.
+The CLI detects that exact stock image and fails fast with an unsupported-ROM
+error instead of reporting a false pass.
+
+- **$t = 0$–$1.0\text{s}$**: Idle at 900 RPM, 0% TPS, 0 km/h — brake/clutch held, baseline before the stab.
+- **$t = 1.0$–$1.3\text{s}$**: Driver stabs to 100% TPS while stationary; RPM ramps 900 → 4200 approaching the 2-step ceiling.
+- **$t = 1.3$–$5.0\text{s}$**: **2-Step Rev Limiter Bounce** — RPM sawtooths ±250 around 4200 (period 0.4s) at 100% TPS / 0 km/h, simulating the fuel/spark-cut oscillation of a held limiter.
+- **$t = 5.0$–$5.2\text{s}$**: Clutch drop / launch — speed rises 0 → 15 km/h while RPM holds near 4200.
+- **$t = 5.2$–$8.0\text{s}$**: 1st gear pull stimulus — RPM climbs 4200 → 8200 as speed rises 15 → 90 km/h.
+- **$t = 8.0$–$8.3\text{s}$**: Off-throttle abort stimulus — TPS snaps to 0% at high RPM / high speed.
+- **$t = 8.3$–$9.5\text{s}$**: Coast down to a stop, TPS held at 0%.
+
+```bash
+# Linux / macOS
+./hondaecu-cli replay P28-230.bin launch-control-2step launch_2step_results.csv
+
+# Windows (PowerShell / CMD)
+.\hondaecu-cli.exe replay P28-230.bin launch-control-2step launch_2step_results.csv
+```
+
+The CSV includes scripted `speed_kmh` and an injector-duration value that the
+emulator currently derives from active-low P2.0–P2.3 transitions. A meaningful
+assertion must compare observed transitions between the stationary, rolling,
+and abort phases; it must not assert against the scripted RPM input. Treating
+those pins as physical injector outputs also depends on separately verified P28
+board wiring, which the OKI CPU manual does not define.
+
+---
+
 ## 📝 Writing Custom CSV Trace Files
 
 You can export log files from **Honda Tuning Suite (HTS)**, **Crome**, **Neptune**, or **Hondata**, or construct custom CSV traces.
 
 ### CSV Header Requirement
+
+Every column in the input CSV below is a stimulus supplied to the emulator. A
+value appearing here is not an ECU output and cannot verify a limiter, fuel cut,
+VTEC transition, DTC, or failsafe.
+
 ```csv
 timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,speed_kmh
 0,800,30.0,0.0,85.0,25.0,0.45,14.2,0.0
