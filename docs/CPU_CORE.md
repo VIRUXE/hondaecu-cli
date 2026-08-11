@@ -233,6 +233,36 @@ Evidence: the ROM writes `PWMC0` and `PWMR0` to the *same* value (`0xFF00`),
 which only makes sense for a reload. That gives a 256-count half period, which
 fits the timeout budgets its own power-on check allows.
 
+This reload/toggle model is sufficient to explore the stock ROM's current boot
+path, but it is not a complete implementation of the manual's PWM modes. It
+must not be used to infer P28 duty cycle or board-output behavior.
+
+### P28 external analog mux
+
+The P28 board places two CD4051 analog muxes in front of the first two ADC
+inputs. Bomarc schematic 37820-P28-A51 sheet 3 gives the wiring:
+
+| board path | MCU input | shared select |
+|---|---|---|
+| U6 common | P5.0 / AI0 / ADCR0 | P2.5=A, P2.6=B, P2.7=C |
+| U5 common | P5.1 / AI1 / ADCR1 | P2.5=A, P2.6=B, P2.7=C |
+
+Confirmed endpoints are U6/X0 primary HEGO, U6/X3 barometric pressure,
+U5/X0 ELD, U5/X2 ECT, and U5/X3 a boot-check input whose external meaning is
+unresolved. The direct inputs confirmed so far are AI3 optional EGR, AI6 MAP,
+and AI7 TPS. The scenario model still has an IAT field, but its P28 ADC/mux
+endpoint is not yet asserted.
+
+The stock sampler at `0x52DE..0x52F7` derives the select index from `P2 >> 5`,
+stores ADCR1H at `0x03C6[index]` and ADCR0H at `0x03BE[index]`, then advances
+the shared selector with `P2 += 0x20`. ADCR results stay latched while the next
+selection settles. One conversion is modeled as the documented 64 us: 320
+machine cycles at 5 MHz, equal to 640 clocks of the 10 MHz oscillator.
+
+The boot check at `0x530C` reads U5/X3 (`0x03C9`) and faults with marker `0x49`
+when it is outside the accepted range. It is not ELD, and no sensor-specific
+meaning is assigned to it merely to make boot pass.
+
 ### The ROM's power-on peripheral check (0x2316–0x2343)
 
 ```
@@ -288,15 +318,19 @@ cargo test --release
 | `decoder::matches_dasm662_ground_truth` | **10914 / 10914** instructions match `dasm662` on mnemonic *and* length |
 | `decoder::decodes_reset_sequence` | pins the exact reset path that broke before |
 | `operand::every_pattern_parses` | all 2623 patterns parse |
-| `exec::oem_rom_passes_its_cpu_self_test` | the OEM ROM clears **its own** power-on CPU self-test and the PWM/Port-4 check |
+| `exec::oem_rom_passes_its_cpu_self_test` | when the external stock ROM is present, observes it reaching the modeled Port-4 check |
+| `replay::stock_p28_boots_with_live_sensor_inputs_through_the_mux` | when the stock ROM is present, checks the mux sampler and absence of boot marker `0x49` |
 
-The ground-truth fixture `tests/fixtures/p28_dasm662.tsv` is self-contained: it
-carries a 6-byte decode window and the DD state per instruction, so the test
-needs no ROM image.
+The tracked ground-truth fixture `tests/fixtures/p28_dasm662.tsv` is
+self-contained: it carries a six-byte decode window and DD state per
+instruction, so that decoder test needs no ROM image. Mnemonic/length agreement
+does not validate every execution semantic or cycle count.
 
-The self-test being ROM-driven is the strongest signal available — it re-passed
-unchanged after the pointing registers moved into RAM, SCB appeared, DD moved to
-bit 12, and bit indexing changed.
+The ROM-backed tests look for non-distributable images outside this repository
+and currently return early when an image is absent. A green test run is
+ROM-backed evidence only when the required image was actually present. Even
+then, reaching the observed checkpoints does not certify every peripheral or
+physical board connection.
 
 ### Regenerating the fixture
 
@@ -308,83 +342,62 @@ asm662/bin/dasm662 P28-230.bin out.asm
 
 ---
 
-## 8. Current state and known gaps
+## 9. Current state and known gaps
 
-**Working.** Every CLI command reaches the table-driven core through the small
-`interpreter.rs` compatibility adapter. The ROM clears its CPU, PWM/Port-4,
-ADC-completion and timer-integrity checks with no undefined opcodes, and the
-long boot trace executes 60 million instructions without a BRK. Peripheral time
-now advances by the datasheet's real machine-cycle counts per instruction
-(`decoder.rs::int_cycles`, from the chapter-3 INT table), the machine-cycle
-clock is pinned at 5 MHz (`bus::CPU_HZ`, = CLK/2 derived from the 400 ns /
-NOP=2-cycle datasheet minimum), all four timer overflow interrupts are
-delivered, and the CYP cylinder-1 marker is delivered as the polled
-transition-detector bit `SFR_TRNS (0x46).0`. Driven by a crank-angle
-CKP/CYP/TDC generator, the OEM P28 ROM computes a real per-injection pulse
-width (~5–6 ms at 5500 rpm), measured from its active-low P2.0–P2.3 driver
-transitions.
+Every execution command reaches the table-driven core through
+`interpreter.rs`. Instruction timing now uses the manual's internal-memory
+machine-cycle counts and taken-branch penalties, and CPU/peripheral/replay time
+shares a 5 MHz machine-cycle clock. A few documented pointer-indirect
+surcharges remain optimistic, so this is a substantially improved timing model,
+not a claim of cycle-perfect hardware emulation.
+
+All four timer event/compare and counter-overflow IRQ paths are delivered. The
+crank-angle generator supplies CKP/TDC interrupts and latches CYP on the
+transition detector. The stock-P28 mux is selected by P2.5--P2.7, conversion
+completes after 64 us (320 machine cycles / 640 oscillator clocks), and ADCR
+results are latched and read-only.
+
+The CLI includes boot and runtime trace modes. `bootpc` and `bootram` expose
+the raw power-on path; runtime `ramwatch`, `pcwatch`, `pccount`, `pchist`,
+`snap`, `exec`, and `injcount` run with configured warm sensor inputs. Trace
+addresses are absolute data-space addresses: an `off N8` operand resolves
+through the active LRB page, not plain address `N8`.
 
 **Known gaps.**
 
-1. The replay harness does not model the P28 board's external analog
-   multiplexer. It runs the ROM's power-on checks with neutral ADC inputs, then
-   applies scenario sensor values. (Feeding direct TPS/MAP into the mux
-   self-test otherwise trips boot fault 0x49.)
-2. Board-level VTEC and IACV pin mappings are not asserted from MCU
-   documentation alone; injector duration is measured from P2.0–P2.3 rather than
-   inferred from PWMR. `bus.rs` annotates P2.0 as **both** injector 0 and the
-   fuel-pump relay driver — an unresolved port-mapping conflict.
-3. **Sustained running injection is not achieved.** At a steady 5500 rpm the ROM
-   fires all four injectors simultaneously only ~1×/second (a batch prime)
-   instead of the tens-to-hundreds/second a running engine needs. Traced
-   exhaustively (see the `injection-sustain-investigation` session memory and
-   task #5):
-   - Timing, RPM capture (TM2 software input-capture, Δ≈3413 counts/TDC) and the
-     per-TDC pulse computation (TDC ISR `0x05D0` → page-relative pulse word,
-     ~0x0BEA) are all correct. The pulse is computed 177×/s; it is *not* stuck.
-   - Injector-ON is driven only from the main loop (`0x4BCC`), which completes
-     ~1–2 passes/second because each pass runs ~424k instructions across a
-     background ROM checksum (`0x2839`; `JRNZ DP` with DP=0 → up to 65536 iters)
-     and fuel/ignition map interpolation (`0x4EC0` axis search + `0x4E77` lerp).
-   - Ruled out: the artificial stimulus (a realistic crank→catch→run RPM ramp
-     does not help), ISR starvation (~50/50 main/ISR with correct
-     interrupt-depth attribution), a spin/hang (a `0x2459` max-count delay loop
-     was only a side effect of feeding rpm=0), and resets/boot re-runs (0 hits
-     on the reset vector / self-test entry at steady rpm; not halted).
-   - **Datasheet validation (the peripheral models are essentially correct, so
-     they are *not* the cause).** Against `MSM66201/66P201/66207/66P207` (SFR
-     map) and the searchable family user manuals: the timer/ADC SFR addresses
-     match exactly; the timer clock-select field lives in the **high** control
-     bits (CK2/1/0 = bits 7/6/5), so the emulator's bits-5–6 prescaler is the
-     right region for this chip generation (the ML66517's bits-0–2 layout is a
-     newer generation and does *not* apply). Two real but non-causal gaps: the
-     family's **auto-reload** timer mode (overflow → TM←TMR + IRQ) is not
-     modeled — but it governs periodic timer interrupts, not the main-loop
-     computation; and A/D conversion is 64 *cycles* here vs the datasheet's
-     64 µs — which makes the ROM *faster*, not slower. The exact TM0–3 mode-select
-     bits are on pages 132–146, which are the pages **missing** from the only
-     66207 user manual.
-   - **Reframed conclusion.** The emulator is **not** grossly inflating work: the
-     fuel/ignition interpolation runs at a healthy ~0.5–2 kHz (≈1900
-     axis-searches/s, ~5 iterations each). The earlier "424k instructions/pass"
-     measured a slow *outer* loop; the inner computation rate is normal. So
-     injection firing ~1×/s is a **gating/logic condition in the ROM's injection
-     state machine** (the arm at `0x4B35`/`0x4BCC` and its page-relative state
-     bytes 0xBF/0xB6/…), not a performance or peripheral bug. That gate — read
-     with LRB-page-aware effective addresses — is the next thing to trace.
+1. PWM remains a reload/toggle approximation, and board-output mappings are
+   incomplete. P2.0--P2.3 transition capture is an emulator assumption; P2.0
+   also has an unresolved fuel-pump/injector conflict.
+2. Timer auto-reload mode is not modeled. The distributor generator can emit at
+   most one edge per call and slightly stretch a period when a step crosses
+   multiple edges.
+3. The P28 external digital input at DATA[`0x4700`] is not modeled separately;
+   the 4 KiB backing array aliases it to `0x0700`. This is distinct from the
+   analog mux.
+4. Sustained normal sequential injection has not been demonstrated. Occasional
+   key-on prime or batch transitions are not evidence of normal running fuel
+   control.
+5. The IAT analog endpoint and several U5/U6 positions remain unresolved. ADC
+   scan-mode details beyond the stock sampler's observed behavior are
+   simplified.
+6. Scenario names, DTC metadata, and synthetic evaluators are research aids,
+   not firmware-level proof of a DTC, failsafe, calibration strategy, or
+   physical output. TCP datalog compatibility remains experimental.
 
-> **Addressing caveat that invalidated a whole prior localization:** the `off
-> N8` operand is LRB-page-relative — `off_page(n) = ((LRB>>5)<<8) | n` in
-> `cpu.rs` — **not** absolute. Reading `bus.ram[N8]` directly for an
-> `off`-addressed ROM variable inspects the wrong byte. An earlier "pulse word
-> 0xC6 stuck at 0x8000 / countdown 0xC0–0xC7 decrements too slowly" conclusion
-> was an artifact of exactly this; the real pulse lives at page-relative `0x1C6`
-> and is computed correctly. Instrument via effective addresses (or by hooking
-> the interpreter's `ea()`), never via absolute RAM.
+### Boot-latch correction: `0x0320` is not the source
+
+A cold-boot trace shows the clear loop zeroing `0x0320` at `0x2403`, after
+which `0x241D..0x2423` only applies `0x0320 &= 0xF0`. That RAM location is
+part of later DTC/status state; it does not provide the pre-mux boot latch.
+
+The saved bit at `0x9F.0` instead comes from external data: `0x220E` selects
+`0x4700`, `0x2211` reads it, `0x2212` moves bit 0 into carry, and
+`0x2213` stores carry into `0x9F.0`. The bit is preserved across RAM clear
+and restored at `0x2426`. Modeling DATA[`0x4700`].0 is a separate digital
+board-input task; it must not be replaced with an invented value in `0x0320`.
 
 ---
-
-## 9. Sources
+## 10. Sources
 
 | source | use |
 |---|---|

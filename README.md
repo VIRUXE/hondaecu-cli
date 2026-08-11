@@ -2,18 +2,18 @@
 
 [![License](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-85%2F85%20passed-brightgreen.svg)]()
-[![Performance](https://img.shields.io/badge/speed-9%2B%20MIPS-blueviolet.svg)]()
 
-A high-performance command-line emulator and ROM testing suite for **Honda OBD1 ECUs** (P28, P30, P72, PR4) powered by an OKI MSM66207 16-bit CPU virtual core and peripheral hardware simulation.
+An experimental command-line emulator and ROM-inspection suite for the stock
+Honda P28 ECU, powered by an OKI MSM66207 16-bit CPU core and a developing
+peripheral/board model.
 
 ---
 
 ## 📚 Documentation Index
 
-- 📖 [**Real-World Scenario Playback Guide (`docs/SCENARIOS.md`)**](docs/SCENARIOS.md): Complete guide to preset runtime engine scenarios (Overrun DFCO, Drag Strip Pass, Accel Tip-In Stomp, VTEC Hysteresis, Electrical Idle Load, Heat Soak Start, Cold Start) and writing custom CSV datalog traces.
-- 🧠 [**OKI MSM66207 CPU Core — Findings & Implementation Notes (`docs/CPU_CORE.md`)**](docs/CPU_CORE.md): How instructions are decoded and executed, the register/memory model (memory-mapped SFRs, pointing registers, LRB paging, real PSW layout), Port 4 / PWM peripheral behaviour, how the core is verified against `dasm662` and the ROM's own power-on self-test, plus current gaps and primary sources.
-- 📐 [**Honda P28 ECU Hardware Architecture (`docs/P28_ARCHITECTURE.md`)**](docs/P28_ARCHITECTURE.md): Deep technical specification of OKI MSM66207 memory mapping, Special Function Registers (SFRs), Interrupt Vector Table, Fuel & Ignition math formulas, VTEC logic, and DTC diagnostic pipeline.
+- 📖 [**Scripted Stimulus & Fault-Injection Guide (`docs/SCENARIOS.md`)**](docs/SCENARIOS.md): Preset and CSV inputs, plus the boundary between an injected condition and an observed ROM response.
+- 🧠 [**OKI MSM66207 CPU Core — Findings & Implementation Notes (`docs/CPU_CORE.md`)**](docs/CPU_CORE.md): Instruction decoding/execution, machine-cycle timing, register and memory models, peripherals, stock-P28 observations, trace tooling, and known gaps.
+- 📐 [**Honda P28 ECU Architecture Notes (`docs/P28_ARCHITECTURE.md`)**](docs/P28_ARCHITECTURE.md): MSM66207 memory mapping, the P28 analog front end, boot traces, interrupt vectors, and clearly labelled control-strategy hypotheses.
 
 ---
 
@@ -37,10 +37,11 @@ flowchart TD
     end
     
     subgraph Modes ["CLI Modes & Subcommands"]
-        Test["Automated ROM Test Suite<br/>(85-Test Exhaustive Matrix)"]
-        Run["High-Speed Simulation Run<br/>(9+ MIPS Execution Speed)"]
+        Test["ROM and Hardware<br/>Sanity Checks"]
+        Run["Timed Simulation Run"]
         REPL["Interactive REPL Shell<br/>(Step, Inspect, Set MAP/RPM, Dump)"]
-        Disasm["Machine Code Disassembler"]
+        Disasm["Linear Disassembler"]
+        Trace["Boot and Runtime<br/>Trace Modes"]
     end
 
     Bus <--> CPU
@@ -55,15 +56,69 @@ flowchart TD
 
 ## 🔥 Key Features
 
-- **Byte-Precise OKI MSM66207 Virtual CPU**: Interprets raw machine code opcode bytes line-by-line using a virtual register file (`A`, `DP`, `X1`, `X2`, `USP`, `SSP`, `LRB`, `er0`–`er3`, `r0`–`r7`) with word/byte accumulator mode switching (`DD` flag) and borrow-correct carry flags (`CF`).
-- **Microsecond-Accurate ISR Timing**: Simulates hardware timers (`TM0`–`TM3`, `TMR0`–`TMR3`) and distributor position pulse interrupts (`INT0` CKP crankshaft pulse and `INT1` TDC/CYP cylinder position pulse).
-- **ADC Hardware & Sensor Simulation**: Simulates analog-to-digital conversion (`ADSCAN`, `ADCR0`–`ADCR7`) for engine sensors: MAP (Manifold Absolute Pressure), TPS (Throttle Position), ECT (Engine Coolant Temp), IAT (Intake Air Temp), O2, Battery Voltage, and VSS.
-- **VTEC Spool Valve & Pressure Switch**: Models VTEC spool valve solenoid engagement outputs and oil pressure switch feedback hysteresis logic (RPM >= 4800, TPS >= 20%, ECT >= 60°C).
-- **UART Serial Datalogging Protocol**: Implements serial RX/TX protocol handler (vector `0x01FD`, Baud rate 38400, command frames like `0x20` sensor payload data used by Honda Tuning Suite, Neptune, and Crome).
-- **85-Test Exhaustive ROM Matrix Suite**: Sweeps 400 fuel map grid cells, 400 ignition map timing cells, environmental trims (cold start, battery dead-time, overheat retard), and rev limiters.
-- **Complete 30-DTC OBD1 Honda Fault Code Support**: Covers all official Honda OBD1 fault codes (DTC 0 through DTC 92).
-- **Interactive REPL Console**: Live interactive shell to step instructions, set RPM/MAP/TPS parameters, dump memory, and monitor calculated fuel injection pulse width and IACV duty cycles.
-- **Blazing Performance**: Executes **9.01+ Million Instructions per second** (~9.01 MHz virtual CPU speed) in Rust.
+- **Table-driven MSM66207 core**: Whole instruction patterns are decoded with
+  `DD`-aware byte/word selection. Machine-cycle counts come from the manual's
+  internal-memory timing table, including taken-branch penalties; a small set
+  of indirect data-access surcharges remains unmodeled.
+- **One 5 MHz machine-cycle clock domain**: CPU execution, timers, distributor
+  scheduling, replay time, and pulse-width conversion share the same modeled
+  clock. Host instructions per second are only a performance measurement.
+- **P28 analog front end**: The two board-level 4051 muxes feed ADCR0/ADCR1 and
+  share P2.5/P2.6/P2.7 as A/B/C. Direct inputs include optional EGR on AI3,
+  MAP on AI6, and TPS on AI7. Conversion takes 64 us: 320 modeled machine
+  cycles, equal to 640 oscillator clocks.
+- **Timer and distributor plumbing**: All four timer compare/event and overflow
+  IRQ paths are delivered, with CKP/TDC interrupt generation and the CYP
+  transition-detector latch. Timer auto-reload mode is still missing.
+- **Inspection tools**: Linear disassembly, an interactive shell, replay, an
+  experimental TCP datalog server, and boot/runtime `trace` modes for PC/RAM
+  watches, histograms, snapshots, execution ranges, and injector-transition
+  counts.
+- **Tracked decoder ground truth**: `tests/fixtures/p28_dasm662.tsv` exercises
+  mnemonic and length agreement for 10,914 stock-P28 instruction windows. It
+  does not certify every execution semantic, peripheral, or board connection.
+- **DTC reference catalog**: The catalog is metadata. Scenario inputs and
+  synthetic evaluator checks are not proof that stock firmware qualified or
+  stored a DTC.
+
+---
+
+## Accuracy and Test Scope
+
+The current tree can execute the stock P28 image through its modeled power-on
+path with live mux inputs, but it is not a physical-ECU validator.
+
+- U6 feeds ADCR0 and U5 feeds ADCR1. Confirmed endpoints are U6/X0 HEGO,
+  U6/X3 barometric pressure, U5/X0 ELD, U5/X2 ECT, U5/X3 an unresolved
+  boot-check signal, direct AI3 optional EGR, AI6 MAP, and AI7 TPS. The P28 IAT
+  endpoint is still unresolved.
+- The stock sampler at `0x52DE..0x52F7` stores ADCR0 high bytes at
+  `0x03BE[index]` and ADCR1 high bytes at `0x03C6[index]` while advancing the
+  shared selector.
+- Board-output wiring is incomplete. Active-low P2.0–P2.3 transition capture is
+  an emulator assumption, and P2.0 is also labelled as the fuel-pump driver.
+  VTEC/IACV and other output telemetry must not be treated as verified harness
+  behavior.
+- PWM mode is still a reload/toggle approximation; timer auto-reload is not
+  modeled; the distributor generator can stretch periods slightly when a call
+  spans more than one edge; and external data addresses above the 4 KiB backing
+  store currently alias.
+- The stock run does not yet sustain normal sequential injection. Occasional
+  prime/batch transitions are not proof of runtime fueling.
+- Replay presets are scripted stimuli. They do not by themselves prove a DTC,
+  limiter, failsafe, fuel strategy, or physical output. The TCP datalog protocol
+  is experimental.
+
+Run the Rust suite with:
+
+```bash
+cargo test --release
+```
+
+The tracked `dasm662` fixture is included and runs normally. Some stock-ROM and
+launch-ROM tests look for non-distributable images outside this repository and
+return without exercising the ROM when those files are absent; read their test
+output and source before treating a green run as ROM-backed evidence.
 
 ---
 
@@ -88,7 +143,7 @@ cargo build --release
 
 > **Note**: For Windows, replace `./hondaecu-cli` with `.\hondaecu-cli.exe`.
 
-### 1. Run Complete Automated ROM Test Suite
+### 1. Run Stock P28 ROM and Hardware Sanity Checks
 ```bash
 # Linux / macOS
 ./hondaecu-cli test P28-230.bin
@@ -98,12 +153,14 @@ cargo build --release
 ```
 
 ### 2. ECU Datalog CSV Replay & Scripted Trace Playback
-Replay an actual CSV driving log or scripted engine preset through the ECU and export calculated pulse width & VTEC status:
+Replay a CSV log or scripted sensor preset through the emulator and export its
+observed output fields. Scenario names describe stimuli, not verified ROM
+responses:
 ```bash
 # Replay built-in dyno pull preset (2000 -> 8200 RPM WOT)
 ./hondaecu-cli replay P28-230.bin dyno-pull output_results.csv
 
-# Replay fault injection scenario (MAP sensor disconnect -> DTC 3)
+# Replay a MAP-fault stimulus; inspect the ROM response separately
 ./hondaecu-cli replay P28-230.bin error-map-failure
 
 # Replay custom CSV datalog file
@@ -118,10 +175,14 @@ timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,sp
 200,4800,95,100,85,25,0.85,14.1,80
 ```
 
-Available presets: `dyno-pull`, `overrun-decel`, `accel-stomp`, `drag-pass`, `error-map-failure`, `error-ect-overheat`, `error-tps-short`, `error-vtec-oil-pressure-loss`, `cold-start`, `electrical-load-idle`, `heat-soak-start`. See [`docs/SCENARIOS.md`](docs/SCENARIOS.md) for full scenario descriptions.
+Available presets include `dyno-pull`, `overrun-decel`, `accel-stomp`,
+`drag-pass`, `launch-control-2step`, the `error-*` stimuli, `cold-start`,
+`electrical-load-idle`, and `heat-soak-start`. See
+[`docs/SCENARIOS.md`](docs/SCENARIOS.md) for the complete list.
 
 ### 3. Live Serial Datalogging Protocol Server
-Start the live TCP serial datalogging server on port `38400` so tuning software (**Honda Tuning Suite**, **Neptune**, or **Crome**) can connect directly to the running emulator:
+Start the experimental TCP datalogging server on port `38400` for protocol
+development. Client compatibility and real-time cadence are not guaranteed:
 ```bash
 # Linux / macOS
 ./hondaecu-cli datalog P28-230.bin 38400
@@ -130,13 +191,13 @@ Start the live TCP serial datalogging server on port `38400` so tuning software 
 .\hondaecu-cli.exe datalog P28-230.bin 38400
 ```
 
-### 4. High-Speed ECU Simulation Run
-Simulate ECU execution for 100,000 cycles at a simulated 3000 RPM:
+### 4. ECU Simulation Run
+Execute 100,000 instructions with a scripted 3000 RPM input:
 ```bash
 ./hondaecu-cli run P28-230.bin 100000 3000
 ```
 
-### 4. Interactive Debugging REPL
+### 5. Interactive Debugging REPL
 Launch the interactive shell to single-step, inspect registers, and manipulate virtual engine parameters in real time:
 ```bash
 ./hondaecu-cli interactive P28-230.bin
@@ -153,50 +214,63 @@ ecu [0x21EA]> status
 ecu [0x21EA]> dump 0x0060 16
 ```
 
-### 5. Machine Code Disassembler
-Disassemble instructions starting at a given hexadecimal memory offset:
+### 6. Machine Code Disassembler
+Linearly decode instructions starting at a hexadecimal ROM offset without
+executing them:
 ```bash
 ./hondaecu-cli disasm P28-230.bin 0x21E2 20
+```
+
+### 7. Boot and Runtime Trace
+
+The `trace` command emits machine-readable PC/RAM observations. Runtime modes
+include `ramwatch`, `pcwatch`, `pccount`, `pchist`, `snap`, `exec`, and
+`injcount`; `bootpc` and `bootram` inspect the raw power-on path.
+
+```bash
+./hondaecu-cli trace P28-230.bin pchist 5500 1.0 25
+./hondaecu-cli trace P28-230.bin bootpc 0 0 0x220E,0x2211,0x2213,0x2426
 ```
 
 ---
 
 ## 🚦 Honda OBD1 Diagnostic Trouble Code (DTC) Matrix
 
-The test suite validates all 30 official Honda OBD1 fault codes:
+The table is reference metadata. `CATALOGUED` does not mean the emulator has
+observed the stock ROM qualifying or storing that DTC:
 
 | DTC Code | Component Name | Description & Fault Condition | Status |
 |---|---|---|---|
-| **DTC 0** | ECU Internal ROM | Corrupt Checksum / Modulo Sum Mismatch (Solid CEL) | **PASSED** |
-| **DTC 1** | Primary O2 Sensor | Signal out of range (<0.1V / >1.1V / Open circuit) | **PASSED** |
-| **DTC 2** | Secondary O2 Sensor | Secondary O2 circuit fault (JDM / Lean spot) | **PASSED** |
-| **DTC 3** | MAP Sensor High/Low | Manifold Absolute Pressure sensor out of bounds | **PASSED** |
-| **DTC 4** | CKP Position Sensor | Crankshaft position pulse signal missing at high RPM | **PASSED** |
-| **DTC 5** | MAP Sensor Range | Vacuum mismatch vs engine RPM/TPS | **PASSED** |
-| **DTC 6** | ECT Engine Temp | Coolant temp sensor open (<0.2V) or shorted (>4.8V) | **PASSED** |
-| **DTC 7** | TPS Throttle Sensor | Throttle position voltage out of bounds (<0.3V or >4.8V) | **PASSED** |
-| **DTC 8** | TDC Sensor Pulses | Top Dead Center distributor pulse sync fault | **PASSED** |
-| **DTC 9** | CYP Sensor Pulses | Cylinder position pulse phase fault | **PASSED** |
-| **DTC 10** | IAT Intake Air Temp | Air temp voltage open (<0.2V) or shorted (>4.8V) | **PASSED** |
-| **DTC 11** | Ignition Module | Distributor igniter module pulse missing | **PASSED** |
-| **DTC 12** | EGR System | EGR valve position sensor out of range | **PASSED** |
-| **DTC 13** | BARO Sensor | Atmospheric pressure sensor internal circuit fault | **PASSED** |
-| **DTC 14** | IACV Idle Valve | Idle Air Control Valve open/short circuit | **PASSED** |
-| **DTC 15** | Ignition Coil Output | Ignition coil primary circuit failure | **PASSED** |
-| **DTC 16** | Injector Driver | Fuel injector driver transistor open/short | **PASSED** |
-| **DTC 17** | VSS Speed Sensor | Missing speed pulse while RPM > 2000 & high MAP | **PASSED** |
-| **DTC 19** | A/T Lockup Solenoid | Automatic transmission lockup solenoid circuit fault | **PASSED** |
-| **DTC 20** | ELD Load Detector | Fuse box ELD current sensor out of range | **PASSED** |
-| **DTC 21** | VTEC Solenoid | VTEC solenoid coil open/short circuit | **PASSED** |
-| **DTC 22** | VTEC Pressure Switch | Low oil pressure / switch open when VTEC commanded | **PASSED** |
-| **DTC 23** | Knock Sensor (KS) | Knock sensor circuit open or signal noise fault | **PASSED** |
-| **DTC 30** | A/T Shift Signal A | Automatic transmission shift solenoid A circuit | **PASSED** |
-| **DTC 31** | A/T Shift Signal B | Automatic transmission shift solenoid B circuit | **PASSED** |
-| **DTC 41** | O2 Sensor Heater | Oxygen sensor heater element circuit open/short | **PASSED** |
-| **DTC 43** | Fuel Supply System | Fuel pressure or O2 trim lean limit exceeded | **PASSED** |
-| **DTC 45** | Fuel System Rich/Lean | Air/Fuel ratio out of closed-loop correction range | **PASSED** |
-| **DTC 48** | LAF Wideband Sensor | Linear air-fuel ratio sensor circuit fault (Civic VX) | **PASSED** |
-| **DTC 92** | EVAP Purge Solenoid | Evaporative emissions purge solenoid circuit | **PASSED** |
+| **DTC 0** | ECU Internal ROM | Corrupt Checksum / Modulo Sum Mismatch (Solid CEL) | **CATALOGUED** |
+| **DTC 1** | Primary O2 Sensor | Signal out of range (<0.1V / >1.1V / Open circuit) | **CATALOGUED** |
+| **DTC 2** | Secondary O2 Sensor | Secondary O2 circuit fault (JDM / Lean spot) | **CATALOGUED** |
+| **DTC 3** | MAP Sensor High/Low | Manifold Absolute Pressure sensor out of bounds | **CATALOGUED** |
+| **DTC 4** | CKP Position Sensor | Crankshaft position pulse signal missing at high RPM | **CATALOGUED** |
+| **DTC 5** | MAP Sensor Range | Vacuum mismatch vs engine RPM/TPS | **CATALOGUED** |
+| **DTC 6** | ECT Engine Temp | Coolant temp sensor open (<0.2V) or shorted (>4.8V) | **CATALOGUED** |
+| **DTC 7** | TPS Throttle Sensor | Throttle position voltage out of bounds (<0.3V or >4.8V) | **CATALOGUED** |
+| **DTC 8** | TDC Sensor Pulses | Top Dead Center distributor pulse sync fault | **CATALOGUED** |
+| **DTC 9** | CYP Sensor Pulses | Cylinder position pulse phase fault | **CATALOGUED** |
+| **DTC 10** | IAT Intake Air Temp | Air temp voltage open (<0.2V) or shorted (>4.8V) | **CATALOGUED** |
+| **DTC 11** | Ignition Module | Distributor igniter module pulse missing | **CATALOGUED** |
+| **DTC 12** | EGR System | EGR valve position sensor out of range | **CATALOGUED** |
+| **DTC 13** | BARO Sensor | Atmospheric pressure sensor internal circuit fault | **CATALOGUED** |
+| **DTC 14** | IACV Idle Valve | Idle Air Control Valve open/short circuit | **CATALOGUED** |
+| **DTC 15** | Ignition Coil Output | Ignition coil primary circuit failure | **CATALOGUED** |
+| **DTC 16** | Injector Driver | Fuel injector driver transistor open/short | **CATALOGUED** |
+| **DTC 17** | VSS Speed Sensor | Missing speed pulse while RPM > 2000 & high MAP | **CATALOGUED** |
+| **DTC 19** | A/T Lockup Solenoid | Automatic transmission lockup solenoid circuit fault | **CATALOGUED** |
+| **DTC 20** | ELD Load Detector | Fuse box ELD current sensor out of range | **CATALOGUED** |
+| **DTC 21** | VTEC Solenoid | VTEC solenoid coil open/short circuit | **CATALOGUED** |
+| **DTC 22** | VTEC Pressure Switch | Low oil pressure / switch open when VTEC commanded | **CATALOGUED** |
+| **DTC 23** | Knock Sensor (KS) | Knock sensor circuit open or signal noise fault | **CATALOGUED** |
+| **DTC 30** | A/T Shift Signal A | Automatic transmission shift solenoid A circuit | **CATALOGUED** |
+| **DTC 31** | A/T Shift Signal B | Automatic transmission shift solenoid B circuit | **CATALOGUED** |
+| **DTC 41** | O2 Sensor Heater | Oxygen sensor heater element circuit open/short | **CATALOGUED** |
+| **DTC 43** | Fuel Supply System | Fuel pressure or O2 trim lean limit exceeded | **CATALOGUED** |
+| **DTC 45** | Fuel System Rich/Lean | Air/Fuel ratio out of closed-loop correction range | **CATALOGUED** |
+| **DTC 48** | LAF Wideband Sensor | Linear air-fuel ratio sensor circuit fault (Civic VX) | **CATALOGUED** |
+| **DTC 92** | EVAP Purge Solenoid | Evaporative emissions purge solenoid circuit | **CATALOGUED** |
 
 ---
 
@@ -214,8 +288,8 @@ hondaecu-cli/
     ├── engine.rs       # Virtual Engine Simulator, Sensor Signals, Distributor Pulses
     ├── interpreter.rs  # Machine Code Opcode Decoder & Interpreter
     ├── interrupts.rs   # ISR Vector Dispatcher (INT0, INT1, TM0-TM3, Serial RX)
-    ├── dtc.rs          # Complete 30 Honda OBD1 DTC Diagnostic Fault Module
-    ├── suite.rs        # 85-Test Exhaustive Matrix Test Suite
+    ├── dtc.rs          # Honda OBD1 DTC metadata and selected synthetic checks
+    ├── suite.rs        # Observable ROM and hardware sanity checks
     └── interactive.rs  # Interactive Debugging REPL Shell
 ```
 
