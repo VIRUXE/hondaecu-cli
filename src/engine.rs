@@ -1,9 +1,18 @@
 // Honda OBD1 D16Z6 / P28 Engine Simulator
 
 use crate::bus::{
-    Bus, IRQ_INT0, IRQ_INT1, P28_ADC_MAP, P28_ADC_TPS, P28_MUX_U5_ADCR1,
-    P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT,
+    Bus, IRQ_INT0, IRQ_INT1, P28_ADC_MAP, P28_ADC_TPS, P28_CKP_CAPTURE_TIMER,
+    P28_MUX_U5_ADCR1, P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT,
 };
+
+/// TDC edges fall half a tooth after CKP teeth 0, 6, 12 and 18 of the cam
+/// revolution; CYP falls half a tooth after tooth `CYP_AFTER_TOOTH`.
+const TDC_AFTER_TOOTH: u32 = 0;
+const CYP_AFTER_TOOTH: u32 = 2;
+
+/// Honda's speed sensor gives four pulses per turn of a 637 rev/km speedometer
+/// drive. Used only to give INT0 a plausible rate; not derived from the ROM.
+const VSS_PULSES_PER_KM: f64 = 4.0 * 637.0;
 
 // Existing battery-monitor model. Its board net has not yet been traced with
 // the same confidence as MAP/TPS/EGR, so it is intentionally not a public P28
@@ -23,7 +32,12 @@ pub struct EngineState {
     
     pub ckp_pulse_count: u64,
     pub tdc_pulse_count: u64,
+    /// Cycle of the most recent distributor half-tooth edge.
     pub last_int0_cycle: u64,
+    /// Position within the cam revolution, in half CKP teeth (0..48).
+    half_tooth_count: u32,
+    next_half_tooth_cycle: Option<f64>,
+    next_vss_cycle: Option<f64>,
 }
 
 impl EngineState {
@@ -40,6 +54,9 @@ impl EngineState {
             ckp_pulse_count: 0,
             tdc_pulse_count: 0,
             last_int0_cycle: 0,
+            half_tooth_count: 0,
+            next_half_tooth_cycle: None,
+            next_vss_cycle: None,
         }
     }
 
@@ -93,49 +110,88 @@ impl EngineState {
             && oil_pressure_switch
     }
 
-    /// Check if distributor CKP (INT0) or TDC (INT1) pulse should fire based on
-    /// elapsed CPU cycles, and raise the CYP cylinder-1 marker on the bus's
-    /// transition-detector status once per camshaft revolution.
+    /// Advance the distributor and vehicle-speed sensors to `total_cycles` and
+    /// deliver their edges to the pins the stock P28 ROM reads them on:
+    ///
+    /// | signal | rate | MCU input | ROM consumer |
+    /// |---|---|---|---|
+    /// | CKP | 24 / cam rev | P3.6/TM2IO, timer-2 capture | 0x014D -> soft IRQ 3 -> 0x03DC |
+    /// | TDC | 4 / cam rev | P3.3/INT1 | polled as IRQH.7; 0x037B in backup mode |
+    /// | CYP | 1 / cam rev | P4.4/TRNS0 | polled as TRNSIT.0 |
+    /// | VSS | speed | P3.2/INT0 | 0x01D3 (period capture off TM2) |
+    ///
+    /// The CKP/TDC/CYP assignment is derived from the ROM, not yet from the
+    /// board schematic: the timer-2 event chain counts RAM 12Ah from 0 to 23
+    /// and re-zeroes it on TRNSIT.0, while 0x0403 expects IRQH.7 once every
+    /// six of those events. See docs/P28_ARCHITECTURE.md, "Crank-angle inputs".
+    ///
+    /// Returns the IRQ bits raised. At most one distributor half-tooth is
+    /// emitted per call; callers invoke this after every instruction, which
+    /// is far finer than a half tooth at any realistic engine speed.
     pub fn check_distributor_pulses(
         &mut self,
         bus: &mut Bus,
         total_cycles: u64,
         cpu_freq_hz: u64,
     ) -> u16 {
+        let mut irq = self.check_vss_pulse(total_cycles, cpu_freq_hz);
         if self.rpm <= 0.0 {
-            return 0;
-        }
-
-        // Honda OBD1 distributors provide 24 CKP edges per cam revolution,
-        // i.e. 12 per crank revolution. TDC provides four edges per cam
-        // revolution, so one TDC edge follows every six CKP edges. CYP provides
-        // one edge per cam revolution (every 24 CKP) identifying cylinder #1;
-        // it is not an interrupt but a transition-detector input the ROM polls,
-        // so it is delivered by setting SFR_TRNS bit 0 rather than an IRQ.
-        let cycles_per_rev = (cpu_freq_hz as f64 * 60.0) / self.rpm;
-        let cycles_per_ckp = cycles_per_rev / 12.0;
-
-        let elapsed = total_cycles - self.last_int0_cycle;
-        if elapsed as f64 >= cycles_per_ckp {
-            self.last_int0_cycle = total_cycles;
-            self.ckp_pulse_count += 1;
-
-            let mut irq: u16 = 1 << IRQ_INT0;
-
-            if self.ckp_pulse_count % 6 == 0 {
-                self.tdc_pulse_count += 1;
-                irq |= 1 << IRQ_INT1;
-            }
-            // CYP marks cylinder #1 once per camshaft revolution, phased to the
-            // cylinder-1 TDC edge (every 24th CKP, which is also a TDC). The
-            // transition detector latches it; the TDC ISR reads and clears it.
-            if self.ckp_pulse_count % 24 == 0 {
-                bus.signal_cyp();
-            }
-
+            self.next_half_tooth_cycle = None;
             return irq;
         }
 
-        0
+        // 12 CKP teeth per crank revolution; the model steps in half teeth so
+        // TDC and CYP can sit between CKP edges like the separate reluctors
+        // they are, instead of racing a CKP edge in the same instant.
+        let cycles_per_half_tooth = (cpu_freq_hz as f64 * 60.0) / self.rpm / 24.0;
+        let now = total_cycles as f64;
+        let due = *self.next_half_tooth_cycle.get_or_insert(now + cycles_per_half_tooth);
+        if now < due {
+            return irq;
+        }
+        // Schedule from the edge's nominal time, not from `now`, so that
+        // instruction granularity does not stretch the period (issue #5). If
+        // the engine speed jumped far enough to leave the schedule behind,
+        // re-anchor rather than emit a burst.
+        let next = due + cycles_per_half_tooth;
+        self.next_half_tooth_cycle = Some(if next <= now { now + cycles_per_half_tooth } else { next });
+        self.last_int0_cycle = total_cycles;
+
+        let half = self.half_tooth_count;
+        self.half_tooth_count = (half + 1) % 48;
+        let tooth = half / 2;
+        if half % 2 == 0 {
+            self.ckp_pulse_count += 1;
+            irq |= bus.timer_capture_edge(P28_CKP_CAPTURE_TIMER);
+        } else {
+            if tooth % 6 == TDC_AFTER_TOOTH {
+                self.tdc_pulse_count += 1;
+                irq |= 1 << IRQ_INT1;
+            }
+            if tooth == CYP_AFTER_TOOTH {
+                bus.signal_cyp();
+            }
+        }
+        irq
+    }
+
+    /// Vehicle-speed sensor on INT0. The ROM's INT0 handler (0x01D3) measures
+    /// the edge period against TM2 with an overflow extension, which fits a
+    /// slow speed signal and not the 24-tooth crank signal.
+    fn check_vss_pulse(&mut self, total_cycles: u64, cpu_freq_hz: u64) -> u16 {
+        if self.speed_kmh <= 0.0 {
+            self.next_vss_cycle = None;
+            return 0;
+        }
+        let pulses_per_second = self.speed_kmh * VSS_PULSES_PER_KM / 3600.0;
+        let period = cpu_freq_hz as f64 / pulses_per_second;
+        let now = total_cycles as f64;
+        let due = *self.next_vss_cycle.get_or_insert(now + period);
+        if now < due {
+            return 0;
+        }
+        let next = due + period;
+        self.next_vss_cycle = Some(if next <= now { now + period } else { next });
+        1 << IRQ_INT0
     }
 }

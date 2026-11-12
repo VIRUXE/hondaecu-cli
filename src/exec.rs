@@ -210,7 +210,9 @@ impl<'a> Exec<'a> {
                     (b, false) => self.load(addr, b),
                 }
             }
-            Arg::Bit(inner, n) => (self.read(inner, byte, code) >> n) & 1,
+            // Bit operands are byte objects whatever DD says (manual p. 3-77),
+            // which matters for odd aliases such as ACCH (address 07h).
+            Arg::Bit(inner, n) => (self.read(inner, true, code) >> n) & 1,
             Arg::Addr16 => f.addr16,
             Arg::Rel8 => f.rel8 as u16,
             Arg::Lit(n) => *n as u16,
@@ -235,13 +237,14 @@ impl<'a> Exec<'a> {
                 self.store(addr, byte, v);
             }
             Arg::Bit(inner, n) => {
-                let cur = self.read(inner, byte, false);
+                // Byte-wide read-modify-write: see the read side.
+                let cur = self.read(inner, true, false);
                 let next = if v & 1 != 0 {
                     cur | (1 << n)
                 } else {
                     cur & !(1 << n)
                 };
-                self.write(inner, byte, next);
+                self.write(inner, true, next);
             }
             // Immediates and branch targets are never write destinations.
             _ => {}
@@ -292,7 +295,15 @@ impl<'a> Exec<'a> {
 
             // ---- data movement -------------------------------------------
             // L/LB load the accumulator; ST/STB store it; MOV/MOVB are general.
-            "L" | "MOV" => {
+            // L/LB set ZF from the loaded value (manual pp. 3-69, 3-70); MOV
+            // affects no flags (p. 3-96). The ROM branches directly off loads,
+            // e.g. `LB A, off(135h)` / `JNE` at 0x5C4F.
+            "L" => {
+                let v = self.read(&args[1], byte, false);
+                self.set_zf(v, byte);
+                self.write(&args[0], byte, v);
+            }
+            "MOV" => {
                 let v = self.read(&args[1], byte, false);
                 self.write(&args[0], byte, v);
             }
@@ -300,9 +311,11 @@ impl<'a> Exec<'a> {
                 let v = self.read(&args[0], byte, false);
                 self.write(&args[1], byte, v);
             }
-            // Load from code (ROM) space -- table lookups.
+            // Load from code (ROM) space -- table lookups. LC/LCB also set ZF
+            // from the loaded value (manual pp. 3-71..3-76).
             "LC" => {
                 let v = self.read(&args[1], byte, true);
+                self.set_zf(v, byte);
                 self.write(&args[0], byte, v);
             }
             "XCHG" => {
@@ -453,16 +466,24 @@ impl<'a> Exec<'a> {
                 let bits = if byte { 8 } else { 16 };
                 let msb = 1u32 << (bits - 1);
                 let v32 = v as u32 & (msb * 2 - 1);
+                let cin = self.cpu.cf as u32;
                 let (res, carry) = match base {
-                    "ROL" => (((v32 << 1) | (v32 >> (bits - 1))) & (msb * 2 - 1), v32 & msb != 0),
-                    "ROR" => (((v32 >> 1) | (v32 << (bits - 1))) & (msb * 2 - 1), v32 & 1 != 0),
+                    // ROL/ROR rotate through carry: the old CF enters the
+                    // vacated bit and the shifted-out bit becomes CF (manual
+                    // pp. 3-116..3-123). The ROM chains them after SLL/SRL to
+                    // shift 32-bit products, e.g. at 0x4FBF.
+                    "ROL" => (((v32 << 1) | cin) & (msb * 2 - 1), v32 & msb != 0),
+                    "ROR" => ((v32 >> 1) | (cin << (bits - 1)), v32 & 1 != 0),
                     "SLL" => ((v32 << 1) & (msb * 2 - 1), v32 & msb != 0),
                     "SRL" => (v32 >> 1, v32 & 1 != 0),
                     // Arithmetic right shift keeps the sign bit.
                     _ => ((v32 >> 1) | (v32 & msb), v32 & 1 != 0),
                 };
                 self.cpu.cf = carry;
-                self.set_zf(res as u16, byte);
+                // The rotates affect CF only.
+                if !matches!(base, "ROL" | "ROR") {
+                    self.set_zf(res as u16, byte);
+                }
                 self.write(&args[0], byte, res as u16);
             }
 
@@ -841,6 +862,116 @@ mod tests {
 
         assert!(cpu.cf);
         assert!(cpu.zf);
+    }
+
+    /// L/LB/LC/LCB set ZF from the loaded value (MSM66201 Instruction Manual
+    /// pp. 3-69..3-76). The P28 ROM branches straight off a load everywhere
+    /// (`LB A, off(135h)` / `JNE` at 0x5C4F decides whether the start-phase
+    /// countdown is finished), so a stale ZF keeps sequential injection off.
+    #[test]
+    fn accumulator_loads_set_zero_from_the_loaded_value() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.rom[0..2].copy_from_slice(&[0x77, 0x00]); // LB A, #000h
+        bus.rom[2..4].copy_from_slice(&[0x77, 0x05]); // LB A, #005h
+        bus.rom[4..7].copy_from_slice(&[0x67, 0x00, 0x00]); // L A, #00000h
+        bus.rom[7..10].copy_from_slice(&[0x67, 0x55, 0x55]); // L A, #05555h
+        bus.rom[10..14].copy_from_slice(&[0x90, 0x9D, 0x20, 0x00]); // LCB A, 00020h
+        bus.rom[14..18].copy_from_slice(&[0x90, 0x9D, 0x21, 0x00]); // LCB A, 00021h
+        bus.rom[0x20] = 0x00;
+        bus.rom[0x21] = 0x7F;
+
+        cpu.pc = 0;
+        for (expect_zero, what) in [
+            (true, "LB zero"),
+            (false, "LB nonzero"),
+            (true, "L zero"),
+            (false, "L nonzero"),
+            (true, "LCB zero"),
+            (false, "LCB nonzero"),
+        ] {
+            cpu.zf = !expect_zero;
+            step(&mut cpu, &mut bus).expect("load must execute");
+            assert_eq!(cpu.zf, expect_zero, "{what}");
+        }
+    }
+
+    /// ROL/ROR rotate *through* carry and affect only CF (manual pp.
+    /// 3-116..3-123). The ROM builds 32-bit shifts out of them: 0x4FB9 scales
+    /// every injector pulse width by 5/4 with `MUL; SRL er1; ROR A; SRL er1;
+    /// ROR A`, so a plain rotate leaks bit 0 of the product into bit 15.
+    #[test]
+    fn rotates_go_through_carry_and_leave_zero_alone() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.rom[0] = 0x43; // ROR A
+        bus.rom[1] = 0x43; // ROR A
+        bus.rom[2] = 0x33; // ROL A
+        bus.rom[3] = 0x43; // RORB A (DD = 0)
+
+        cpu.dd = true;
+        cpu.a = 0x2229;
+        cpu.cf = false;
+        cpu.zf = true;
+        step(&mut cpu, &mut bus).expect("ROR A");
+        assert_eq!(cpu.a, 0x1114, "carry-in 0 enters bit 15");
+        assert!(cpu.cf, "bit 0 leaves through carry");
+        assert!(cpu.zf, "ZF is not affected");
+
+        step(&mut cpu, &mut bus).expect("ROR A");
+        assert_eq!(cpu.a, 0x888A, "carry-in 1 enters bit 15");
+        assert!(!cpu.cf);
+
+        cpu.cf = true;
+        step(&mut cpu, &mut bus).expect("ROL A");
+        assert_eq!(cpu.a, 0x1115, "carry-in 1 enters bit 0");
+        assert!(cpu.cf, "bit 15 leaves through carry");
+
+        cpu.dd = false;
+        cpu.a = 0xAB01;
+        cpu.cf = false;
+        step(&mut cpu, &mut bus).expect("RORB A");
+        assert_eq!(cpu.a, 0xAB00, "byte rotate leaves ACCH alone");
+        assert!(cpu.cf);
+    }
+
+    /// Bit operands are byte objects regardless of DD (manual p. 3-77: "the
+    /// specified bit of the operand obj (byte long)"). In word mode the ROM's
+    /// saturating signed add at 0x4F7F tests the sign with `MB C, ACCH.7`;
+    /// reading the whole accumulator there tested bit 7 of ACCL instead and
+    /// zeroed the injector pulse width whenever a correction's low byte was
+    /// 80h or more.
+    #[test]
+    fn bit_operands_address_one_byte_in_word_mode() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.rom[0..3].copy_from_slice(&[0xC5, 0x07, 0x2F]); // MB C, ACCH.7
+        bus.rom[3..6].copy_from_slice(&[0xC5, 0x07, 0x2F]); // MB C, ACCH.7
+        bus.rom[6..9].copy_from_slice(&[0xC5, 0x07, 0x0F]); // RB ACCH.7
+
+        cpu.dd = true;
+        cpu.a = 0x00FD;
+        cpu.cf = true;
+        step(&mut cpu, &mut bus).expect("MB");
+        assert!(!cpu.cf, "ACCH.7 of 00FDh is clear");
+
+        cpu.a = 0x8001;
+        step(&mut cpu, &mut bus).expect("MB");
+        assert!(cpu.cf, "ACCH.7 of 8001h is set");
+
+        cpu.a = 0x80FF;
+        step(&mut cpu, &mut bus).expect("RB");
+        assert_eq!(cpu.a, 0x00FF, "only ACCH.7 is cleared");
+        assert!(!cpu.zf, "the previous bit was one");
+    }
+
+    /// MOV/MOVB leave ZF alone (manual p. 3-96 lists no affected flags).
+    #[test]
+    fn mov_does_not_modify_zero() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.rom[0..4].copy_from_slice(&[0xC5, 0xEB, 0x98, 0x00]); // MOVB 0EBh, #000h
+        cpu.zf = false;
+
+        step(&mut cpu, &mut bus).expect("MOVB must execute");
+
+        assert!(!cpu.zf);
     }
 
     /// Boot the OEM P28 ROM and require it to clear its own power-on CPU

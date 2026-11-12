@@ -125,7 +125,9 @@ impl ReplayEngine {
                 tps_pct: frame.tps_pct,
                 ect_celsius: frame.ect_celsius,
                 speed_kmh: frame.speed_kmh,
-                injector_pw_us: bus.injector_pulse_width_us,
+                // 0 while the ROM is cutting fuel, rather than the stale width
+                // of the last pulse before the cut.
+                injector_pw_us: bus.live_injector_pulse_width_us(frame.rpm),
                 iacv_duty_pct: bus.iacv_duty_cycle_pct,
                 vtec_active: bus.vtec_solenoid_active,
                 note: frame.note,
@@ -234,7 +236,7 @@ impl ReplayEngine {
     /// Boots the ROM to runtime, holds `rpm` with warm running sensors, warms
     /// up 0.5 s, then runs `secs` of engine-time emitting whitespace-delimited
     /// lines to stdout for the requested `mode`:
-    ///   ramwatch <a,a,..> : `RAMW pc addr old new` on each change (hex)
+    ///   ramwatch <a,a,..> : `RAMW pc addr old new cycle` on each change (hex; cycle decimal)
     ///   pcwatch  <p,p,..> : `PCW pc A LRB DP X1 cf` each time PC hits
     ///   pccount  <p,p,..> : `PCCNT pc count` at end
     ///   pchist   [n]      : `PCHIST pc count` top-n at end
@@ -334,8 +336,7 @@ impl ReplayEngine {
                 u8::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()?,
             ))
         });
-        let mut opens = [0u64; 4];
-        let mut prev_p2 = bus.ram[crate::bus::SFR_P2 as usize];
+        let opens_before = bus.injector_open_count;
 
         let end = cpu.cycles + (secs * hz as f64) as u64;
         while cpu.cycles < end && !cpu.halted {
@@ -362,25 +363,23 @@ impl ReplayEngine {
                 for (i, &a) in watch_ram.iter().enumerate() {
                     let now = bus.ram[a];
                     if now != prev_ram[i] {
-                        println!("RAMW {:04X} {:04X} {:02X} {:02X}", pc, a, prev_ram[i], now);
+                        println!("RAMW {:04X} {:04X} {:02X} {:02X} {}", pc, a, prev_ram[i], now, cpu.cycles);
                         prev_ram[i] = now;
                     }
                 }
-            }
-            if mode == "injcount" {
-                let p2 = bus.ram[crate::bus::SFR_P2 as usize];
-                for bit in 0..4 {
-                    let m = 1u8 << bit;
-                    if prev_p2 & m != 0 && p2 & m == 0 { opens[bit] += 1; }
-                }
-                prev_p2 = p2;
             }
         }
 
         match mode {
             "injcount" => {
+                // Counted on the latched injector outputs, not raw P2 writes.
+                let opens: Vec<u64> = (0..4)
+                    .map(|i| bus.injector_open_count[i] - opens_before[i])
+                    .collect();
                 let tot: u64 = opens.iter().sum();
                 println!("INJ {} {} {} {} total {}", opens[0], opens[1], opens[2], opens[3], tot);
+                let pw = bus.injector_last_pulse_us;
+                println!("INJPW_US {} {} {} {}", pw[0], pw[1], pw[2], pw[3]);
             }
             "pccount" => for pc in &watch_pc {
                 println!("PCCNT {:04X} {}", pc, pc_counts.get(pc).copied().unwrap_or(0));
@@ -1017,6 +1016,110 @@ mod tests {
             (bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_BOOT_CHECK_SELECT] >> 2) as u8;
         assert_eq!(bus.ram[0x03C6 + P28_U5_BOOT_CHECK_SELECT], boot_check_high);
         assert_ne!(bus.ram[0x00EB], 0x49, "boot fault 0x49 must not latch");
+    }
+
+    /// Boot the stock ROM, let it settle for half a second at `rpm`, then run
+    /// `engine_cycles` full engine cycles. Returns the injector outputs in
+    /// the order they opened, the last pulse width per output, and the bus.
+    fn run_stock_p28(rpm: f64, engine_cycles: u32) -> Option<(Vec<usize>, [u32; 4], Bus)> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let mut bus = Bus::new();
+        if bus.load_rom_file(path).is_err() {
+            eprintln!("stock P28 ROM not present at {path}; skipping");
+            return None;
+        }
+        let hz = crate::bus::CPU_HZ;
+        let mut engine = EngineState::new();
+        engine.rpm = rpm;
+        engine.map_kpa = 90.0;
+        engine.tps_pct = 65.0;
+        engine.ect_celsius = 88.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus).expect("stock P28 boots");
+
+        let settle = cpu.cycles + hz / 2;
+        let end = settle + (engine_cycles as f64 * hz as f64 * 120.0 / rpm) as u64;
+        let mut order = Vec::new();
+        let mut counted = bus.injector_open_count;
+        while cpu.cycles < end {
+            let before = cpu.cycles;
+            let instruction = Interpreter::step(&mut cpu, &mut bus);
+            assert!(
+                !cpu.halted,
+                "halted at {:#06X}: {}",
+                instruction.pc,
+                instruction.mnemonic
+            );
+            let irq = bus.tick_timers((cpu.cycles - before) as u32)
+                | engine.check_distributor_pulses(&mut bus, cpu.cycles, hz);
+            InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
+
+            if cpu.cycles < settle {
+                counted = bus.injector_open_count;
+                continue;
+            }
+            for (output, seen) in counted.iter_mut().enumerate() {
+                if bus.injector_open_count[output] != *seen {
+                    *seen = bus.injector_open_count[output];
+                    order.push(output);
+                }
+            }
+        }
+        let widths = bus.injector_last_pulse_us;
+        Some((order, widths, bus))
+    }
+
+    /// Issue #6: the stock ROM must inject once per cylinder per engine
+    /// cycle, in a fixed rotating order, from cranking speed to the top of
+    /// the rev range -- not a handful of prime pulses.
+    #[test]
+    fn stock_p28_sustains_sequential_injection() {
+        for rpm in [300.0, 800.0, 3000.0, 6500.0] {
+            let Some((order, widths, bus)) = run_stock_p28(rpm, 10) else {
+                return;
+            };
+
+            // Ten engine cycles give 40 openings; allow one cycle of phase
+            // slack at each end of the window.
+            assert!(
+                (36..=44).contains(&order.len()),
+                "{rpm} rpm: {} injector openings in ten engine cycles",
+                order.len()
+            );
+            for pair in order.windows(2) {
+                assert_eq!(
+                    pair[1],
+                    (pair[0] + 1) % 4,
+                    "{rpm} rpm: outputs must open in rotation, got {order:?}"
+                );
+            }
+            for (output, width) in widths.iter().enumerate() {
+                assert!(
+                    (1_000..=20_000).contains(width),
+                    "{rpm} rpm: output {output} pulse width {width} us"
+                );
+            }
+
+            // The ROM must be in its normal crank mode (IE shadow 2BABh: CKP
+            // through the timer-2 capture event), not the INT1-only mode
+            // (A9A3h) it falls back to when it sees no CKP teeth.
+            let ie_shadow = bus.ram[0x00F2] as u16 | ((bus.ram[0x00F3] as u16) << 8);
+            assert_eq!(ie_shadow, 0x2BAB, "{rpm} rpm: crank-signal mode");
+        }
+    }
+
+    #[test]
+    fn stock_p28_cuts_fuel_above_its_rev_limit() {
+        let Some((order, _, bus)) = run_stock_p28(7600.0, 10) else {
+            return;
+        };
+
+        assert!(order.is_empty(), "openings above the rev limit: {order:?}");
+        assert_eq!(bus.injector_outputs(), 0x0F, "all injectors closed");
+        assert_eq!(bus.live_injector_pulse_width_us(7600.0), 0);
     }
 
     #[test]

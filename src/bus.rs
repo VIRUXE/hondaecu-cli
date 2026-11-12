@@ -39,17 +39,15 @@ pub const SFR_EXION: u16= 0x1C;
 pub const IRQ_INT0: u16 = 0;
 pub const IRQ_SERIAL_RX: u16 = 1;
 // Per the MSM66207 user's manual Table 17-1, IRQ bit 3 is the serial
-// transmission-ready / baud-rate-generator overflow interrupt (RQSTGEN). The
-// P28 ROM does not use the UART during running, so it repurposes that spare
-// baud-rate-generator timer as an injection scheduler: bit 3's vector (0x03DC)
-// is a handler that advances the cylinder-sequence counter. The emulator does
-// not yet model the baud-rate-generator timer, so this interrupt never fires.
+// transmission-ready / baud-rate-generator overflow interrupt. The P28 ROM
+// uses it as a *software* interrupt: the timer-2 capture handler (CKP tooth,
+// 0x014D) ends with `ORB off(IRQ), #008h` at 0x7674, which requests bit 3 so
+// the heavier per-tooth crank-angle work at 0x03DC runs at lower priority.
+// No peripheral model is needed for it; the ROM's own write sets the flag.
 pub const IRQ_STGEN: u16 = 3;
 // Table 17-1 IRQ bit map. The four 16-bit timers each raise TWO interrupts: an
-// overflow (even bit) and an "event" (odd bit: capture-register match or
-// real-timer compare). The emulator currently only generates the event/compare
-// interrupts plus TM2 overflow; the TM0/TM1/TM3 overflow interrupts (bits
-// 4/6/10) are not yet produced.
+// overflow (even bit) and an "event" (odd bit: a capture-register edge or a
+// realtime-output compare match, depending on the timer's mode).
 pub const IRQ_TM0_OVF: u16 = 4;
 pub const IRQ_TM0: u16 = 5;
 pub const IRQ_TM1: u16 = 7;
@@ -109,21 +107,35 @@ pub const SFR_TMR2: u16 = 0x3A;
 pub const SFR_TM3: u16  = 0x3C;
 pub const SFR_TMR3: u16 = 0x3E;
 
+/// TCON bits 1..0 (MSM66207 user's manual Fig. 9-2).
+pub const TIMER_MODE_AUTO_RELOAD: u8 = 0b00;
+pub const TIMER_MODE_CLOCK_OUTPUT: u8 = 0b01;
+pub const TIMER_MODE_CAPTURE: u8 = 0b10;
+pub const TIMER_MODE_REALTIME_OUTPUT: u8 = 0b11;
+/// TCON bit 2: TROUT in realtime output mode, TCERR in capture mode.
+pub const TCON_TROUT: u8 = 1 << 2;
+/// TCON bit 4: the counter runs.
+pub const TCON_RUN: u8 = 1 << 4;
+
+/// Timer whose TMnIO pin (P3.6/TM2IO) receives the distributor's 24-tooth
+/// crank-angle (CKP) signal on the P28. The ROM sets P3IO = B1h (P3.6 input),
+/// P3SF = FFh and TCON2 = 82h (capture register mode), and its handler for the
+/// timer-2 event (0x014D) feeds the 0..23 tooth counter at RAM 12Ah.
+pub const P28_CKP_CAPTURE_TIMER: usize = 2;
+
 pub const SFR_TCON0: u16 = 0x40;
 pub const SFR_TCON1: u16 = 0x41;
 pub const SFR_TCON2: u16 = 0x42;
 pub const SFR_TCON3: u16 = 0x43;
 
-/// Transition-detector status register. The four transition detectors latch an
-/// edge on their P4.4..P4.7 (TRNS0..3) inputs into a status bit here; the ROM
-/// polls and read-clears it (there is no transition-detector interrupt -- see
-/// Table 17-1). On the P28 board the distributor's CYP (cylinder-position)
-/// signal drives TRNS0/P4.4, so bit 0 is the once-per-camshaft-revolution
-/// cylinder-#1 marker: the TDC ISR does `RB 046h.0` at 0x03B8 and, when it was
-/// set, resets its crank-angle counter (0x2A) to the cylinder-1 reference
-/// instead of advancing it. Without this flag the ROM completes its key-on
-/// prime pulse but never identifies cylinder 1, so per-cylinder injection never
-/// sequences.
+/// Transition-detector status register. The four transition detectors latch a
+/// falling edge on their P4.4..P4.7 (TRNS0..3) inputs into a status bit here;
+/// the ROM polls and read-clears it (there is no transition-detector interrupt
+/// -- see Table 17-1). The ROM treats bit 0 as the once-per-camshaft-revolution
+/// cylinder-#1 (CYP) marker: after each CKP tooth it does `RB TRNSIT.0` at
+/// 0x7678 and re-zeroes its 0..23 tooth counter (RAM 12Ah); the backup TDC
+/// handler does the same at 0x03B8. Without it the ROM never identifies
+/// cylinder 1 and injection never sequences.
 pub const SFR_TRNS: u16 = 0x46;
 
 pub const SFR_ADSCAN: u16 = 0x58;
@@ -172,26 +184,41 @@ pub struct Bus {
     pub p28_mux_inputs: [[u16; 8]; 2],
     
     // PWM output measurements
+    /// Width of the most recently completed injector pulse, any cylinder.
     pub injector_pulse_width_us: u32,
+    /// Width of the most recently completed pulse on each injector output.
+    pub injector_last_pulse_us: [u32; 4],
+    /// Number of times each injector output has opened.
+    pub injector_open_count: [u64; 4],
+    /// `elapsed_cycles` at the most recent injector opening, if any.
+    pub injector_last_open_cycle: Option<u64>,
     pub iacv_duty_cycle_pct: f32,
     pub elapsed_cycles: u64,
     injector_started_at: [Option<u64>; 4],
+    /// State of the four injector drivers, bit n = output n, active low
+    /// (0 = injector open). See `latch_injector_outputs`.
+    injector_outputs: u8,
 
-    // Physical Motherboard Output Driver Pins (Ports P2 & P3)
-    pub fuel_pump_active: bool,        // P2.0: Fuel Pump Relay Driver
-    pub mil_check_engine_light: bool,  // P2.1: Check Engine Light (MIL) Lamp Driver
-    pub vtec_solenoid_active: bool,    // VTEC solenoid (ASIC-driven A25, active-low): set from engine conditions, see EngineState::vtec_engaged
-    pub vtec_pressure_switch: bool,    // P2.3: VTEC Oil Pressure Switch Contact Input
-    pub ac_clutch_active: bool,        // P2.4: A/C Compressor Clutch Relay Driver
-    pub radiator_fan_active: bool,     // P2.5: Radiator Cooling Fan Relay Driver
-    pub purge_solenoid_active: bool,   // P2.6: EVAP Purge Control Solenoid Driver
-
+    // Board-output telemetry. None of these is pin-sensed from a verified
+    // P28 net: P2.0..P2.3 are the injector latch data and P2.5..P2.7 the
+    // analog mux selects, so the fields below are scenario-side state only.
+    pub fuel_pump_active: bool,
+    pub mil_check_engine_light: bool,
+    pub vtec_solenoid_active: bool,    // set from engine conditions, see EngineState::vtec_engaged
+    pub vtec_pressure_switch: bool,
+    pub ac_clutch_active: bool,
+    pub radiator_fan_active: bool,
+    pub purge_solenoid_active: bool,
 
     /// PWM0/PWM1 output pin state, surfaced on P4.2 / P4.3.
     pub pwm_out: [bool; 2],
 
     /// Fractional prescaler remainder for TM0..TM3.
     pub timer_accum: [u32; 4],
+
+    /// Capture-register mode only: TM has run a full lap past TMR since the
+    /// last capture event. Reported as TCERR (TCON bit 2) at the next event.
+    capture_lapped: [bool; 4],
 
     /// Remaining machine cycles in the current A/D conversion. `ADSCAN.4` starts
     /// continuous scan conversions; each completion raises IRQH.4, which the
@@ -218,6 +245,10 @@ impl Bus {
             // at mid-scale. EngineState replaces the modeled sensor slots.
             p28_mux_inputs: [[512; 8]; 2],
             injector_pulse_width_us: 0,
+            injector_last_pulse_us: [0; 4],
+            injector_open_count: [0; 4],
+            injector_last_open_cycle: None,
+            injector_outputs: 0x0F,
             iacv_duty_cycle_pct: 0.0,
             elapsed_cycles: 0,
             injector_started_at: [None; 4],
@@ -233,6 +264,7 @@ impl Bus {
             // ECU is powered and should run; high sends it to STOP mode.
             port_pins: [0; 5],
             timer_accum: [0; 4],
+            capture_lapped: [false; 4],
             adc_cycles_remaining: None,
             serial_rx_queue: Vec::new(),
             serial_tx_queue: Vec::new(),
@@ -392,38 +424,18 @@ impl Bus {
                 None
             };
         } else if addr == SFR_P2 || addr == SFR_P3 {
-            // P2.0..P2.3 are the four active-low injector drivers. PWMR0 is
-            // an on-chip PWM reload register used by the firmware's scheduler;
-            // it is not an injector pulse-width register. Measure the actual
-            // output transitions instead.
-            if addr == SFR_P2 {
-                for bit in 0..4 {
-                    let mask = 1u8 << bit;
-                    match (old & mask != 0, val & mask != 0) {
-                        (true, false) => {
-                            self.injector_started_at[bit] = Some(self.elapsed_cycles);
-                        }
-                        (false, true) => {
-                            if let Some(start) = self.injector_started_at[bit].take() {
-                                let clocks = self.elapsed_cycles.saturating_sub(start);
-                                self.injector_pulse_width_us = ((clocks
-                                    + CYCLES_PER_US / 2)
-                                    / CYCLES_PER_US)
-                                    .min(u32::MAX as u64)
-                                    as u32;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
+            // P2.0..P2.3 are only the *data* for the injector output latch;
+            // see `latch_injector_outputs`.
             let p2 = self.ram[SFR_P2 as usize];
             self.ac_clutch_active = (p2 & (1 << 4)) != 0;
             // P2.5..P2.7 are the shared A/B/C selects for U5 and U6, not fan
             // or purge outputs. Those board-output mappings remain unresolved.
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
+        } else if addr == SFR_TCON0 && old & TCON_TROUT == 0 && val & TCON_TROUT != 0 {
+            // Software strobe: the ROM sets TROUT by hand (0x4BD6, 0x4C03) to
+            // clock a new injector state out immediately.
+            self.latch_injector_outputs();
         }
     }
 
@@ -478,6 +490,109 @@ impl Bus {
         self.ram[SFR_TRNS as usize] |= 0x01;
     }
 
+    /// Injector output stage of the P28, as the stock ROM drives it.
+    ///
+    /// P2.0..P2.3 are not the injector pins. The ROM prepares the *next*
+    /// injector state on them (active low) and clocks it into the output
+    /// stage with a rising edge of timer 0's realtime output, TM0IO/P3.4:
+    ///
+    ///   * open now: `ANDB P2, A` then `ORB TCON0, #4` / `ANDB TCON0, #0FBh`
+    ///     at 0x4BCC..0x4BDF -- a hand-made TROUT pulse;
+    ///   * close at an exact time: write the end time to TMR0 and pre-load P2
+    ///     with the closed state (0x4CB5, 0x00C3). TRBUF is 1 (TCON0 = 8Bh),
+    ///     so the compare match itself raises TROUT and clocks the state out
+    ///     with no interrupt latency. The TM0 handler at 0x0086 only clears
+    ///     TROUT and stages the following state;
+    ///   * fuel cut: `ORB P2, #0Fh` then `SB TCON0.2` / `RB TCON0.2` at 0x4C00.
+    ///
+    /// Reading the raw P2 latch instead shows ~20 us "pulses", because the
+    /// closed state is staged right after the opening strobe. This is derived
+    /// from the ROM; the latch part itself has not been identified on the
+    /// schematic.
+    fn latch_injector_outputs(&mut self) {
+        // The strobe only reaches the pin when P3.4 is a TM0IO output.
+        if self.ram[SFR_P3SF as usize] & 0x10 == 0 || self.ram[SFR_P3IO as usize] & 0x10 == 0 {
+            return;
+        }
+        let old = self.injector_outputs;
+        let new = self.ram[SFR_P2 as usize] & 0x0F;
+        self.injector_outputs = new;
+        for bit in 0..4 {
+            let mask = 1u8 << bit;
+            match (old & mask != 0, new & mask != 0) {
+                (true, false) => {
+                    self.injector_started_at[bit] = Some(self.elapsed_cycles);
+                    self.injector_open_count[bit] += 1;
+                    self.injector_last_open_cycle = Some(self.elapsed_cycles);
+                }
+                (false, true) => {
+                    if let Some(start) = self.injector_started_at[bit].take() {
+                        let cycles = self.elapsed_cycles.saturating_sub(start);
+                        let us = ((cycles + CYCLES_PER_US / 2) / CYCLES_PER_US)
+                            .min(u32::MAX as u64) as u32;
+                        self.injector_last_pulse_us[bit] = us;
+                        self.injector_pulse_width_us = us;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Injector driver state, bit n = output n, active low (0 = open).
+    pub fn injector_outputs(&self) -> u8 {
+        self.injector_outputs
+    }
+
+    /// Width of the latest completed injector pulse, or 0 when no injector
+    /// has opened within the last full engine cycle (two crank revolutions)
+    /// at `rpm` -- i.e. the ROM is cutting fuel, so the last width is stale.
+    pub fn live_injector_pulse_width_us(&self, rpm: f64) -> u32 {
+        if rpm <= 0.0 {
+            return 0;
+        }
+        let engine_cycle = (CPU_HZ as f64 * 120.0 / rpm) as u64;
+        match self.injector_last_open_cycle {
+            Some(opened) if self.elapsed_cycles.saturating_sub(opened) <= engine_cycle => {
+                self.injector_pulse_width_us
+            }
+            _ => 0,
+        }
+    }
+
+    /// Falling edge on TMnIO (P3.4 + n). In capture register mode the timer
+    /// counter is loaded into the timer register and the timer's event
+    /// interrupt is requested; TCERR (TCON bit 2) reports whether the counter
+    /// ran a full lap since the previous event (user's manual p. 90). The pin
+    /// only reaches the timer when it is an input handed to the secondary
+    /// function. Returns the IRQ bits raised, for the interrupt controller.
+    pub fn timer_capture_edge(&mut self, timer: usize) -> u16 {
+        const EVENT_IRQ: [u16; 4] = [IRQ_TM0, IRQ_TM1, IRQ_TM2, IRQ_TM3];
+        let tcon_sfr = (SFR_TCON0 + timer as u16) as usize;
+        let tcon = self.ram[tcon_sfr];
+        let pin = 1u8 << (4 + timer);
+        let is_capture_input = self.ram[SFR_P3SF as usize] & pin != 0
+            && self.ram[SFR_P3IO as usize] & pin == 0;
+        if tcon & 0x03 != TIMER_MODE_CAPTURE || tcon & TCON_RUN == 0 || !is_capture_input {
+            return 0;
+        }
+
+        let tm_sfr = (SFR_TM0 + timer as u16 * 4) as usize;
+        self.ram[tm_sfr + 2] = self.ram[tm_sfr];
+        self.ram[tm_sfr + 3] = self.ram[tm_sfr + 1];
+        let tcerr = (self.capture_lapped[timer] as u8) << 2;
+        self.capture_lapped[timer] = false;
+        self.ram[tcon_sfr] = (tcon & !0x04) | tcerr;
+
+        let irq = 1u16 << EVENT_IRQ[timer];
+        let latched = self.ram[SFR_IRQ as usize] as u16
+            | ((self.ram[(SFR_IRQ + 1) as usize] as u16) << 8)
+            | irq;
+        self.ram[SFR_IRQ as usize] = latched as u8;
+        self.ram[(SFR_IRQ + 1) as usize] = (latched >> 8) as u8;
+        irq
+    }
+
     pub fn push_serial_rx_byte(&mut self, byte: u8) -> u16 {
         self.serial_rx_queue.push(byte);
         1 << IRQ_SERIAL_RX
@@ -496,6 +611,7 @@ impl Bus {
         ];
 
         let mut irq_flags: u16 = 0;
+        let mut strobe_injectors = false;
 
         // 16-bit PWM: the counter counts up, and on overflow reloads from the
         // PWM register and flips the output pin. PWMR is therefore a reload
@@ -540,31 +656,29 @@ impl Bus {
                 continue;
             }
 
-            // Prescaler. The datasheet summary does not break TCON down to
-            // bits, but the ROM's periodic timer-integrity check at
-            // 0x38D8..0x393F states the relationship outright: it samples
-            // TM0..TM3, samples again a few instructions later, and requires
-            // d1 ~= 4 * d2 and d0 ~= d2 (each within 2 counts), with every
-            // delta nonzero. The only TCON bits that differ between timer 1
-            // (053h) and timers 0/2/3 (093h/092h/093h) are 6..5 -- 01b for
-            // timer 1, 00b for the rest -- so those two bits are the clock
-            // select, and the field has to make timer 1 run exactly 4x faster.
-            // Only encodings 00b and 01b are attested by this ROM.
+            // TCON layout, MSM66207 user's manual Fig. 9-2 (p. 85):
+            //   bits 7..5  clock select: 1/2 CLK, then TBC taps
+            //   bit  4     RUN
+            //   bit  3     TRBUF (mode D)
+            //   bit  2     TROUT (mode D) / TCERR (mode C)
+            //   bits 1..0  mode: 00 auto reload, 01 clock output,
+            //              10 capture register, 11 realtime output
             //
-            // The absolute divisor (8 machine cycles for the base rate) is set
-            // by the launch ROM's absolute self-check at 0x342E..0x3470: it
-            // reads a free-running timer twice across a fixed six-instruction
-            // window that decoder::int_cycles scores at the manual-exact 36
-            // machine cycles, and faults unless the timer advanced 1..33 counts.
-            // At the fast (01b) rate that pins the base clock to 36/34 < c <= 36
-            // cycles per tick, i.e. two machine cycles; the base 00b rate is
-            // four times slower again. (The earlier divisors of 1 and 4 were
-            // fitted to the previous flat "two clocks per instruction" model,
-            // which undercounted this window roughly threefold.)
-            let div = match (tcon >> 5) & 0x03 {
-                0b00 => 8,
-                0b01 => 2,
-                other => 8 >> other.min(3), // unattested; keep monotonic
+            // The clock periods are given at 10 MHz as 200 ns, 400 ns, 800 ns,
+            // 1.6 us, 3.2 us, 12.8 us and 51.2 us; one machine cycle is 200 ns.
+            // The P28 runs TM0/TM2/TM3 at 3.2 us (TCON = 8xh) and TM1 at
+            // 800 ns (4Fh), which is the exact 4:1 ratio its timer-integrity
+            // check at 0x38D8 demands. External clocking (111b, timers 0 and 1
+            // only) is not modeled.
+            let div = match tcon >> 5 {
+                0b000 => 1,
+                0b001 => 2,
+                0b010 => 4,
+                0b011 => 8,
+                0b100 => 16,
+                0b101 => 64,
+                0b110 => 256,
+                _ => continue,
             };
             self.timer_accum[i] += cycles;
             let steps = self.timer_accum[i] / div;
@@ -575,29 +689,58 @@ impl Bus {
 
             let tm = self.read_data_u16(*tm_sfr);
             let tmr = self.read_data_u16(*tmr_sfr);
-            let (new_tm, overflow) = tm.overflowing_add(steps as u16);
-            // TMR is a compare register, not a reload value. TM remains a
-            // free-running 16-bit counter after a match. Subtracting TMR here
-            // made identically clocked TM2/TM3 drift apart, which the ROM's
-            // timer-integrity check at 0x38D8 detects.
+            let (mut new_tm, overflow) = tm.overflowing_add(steps as u16);
+            // Did TM become equal to TMR during these steps?
             let matched = if overflow {
                 tm < tmr || new_tm >= tmr
             } else {
                 tm < tmr && new_tm >= tmr
             };
+
+            match tcon & 0x03 {
+                // Modes A/B (pp. 87-89): on overflow TM is reloaded from TMR.
+                // There is no compare event.
+                TIMER_MODE_AUTO_RELOAD | TIMER_MODE_CLOCK_OUTPUT => {
+                    if overflow {
+                        new_tm = tmr.wrapping_add(new_tm);
+                    }
+                }
+                // Mode C (p. 90): TM free-runs and TMR is written only by a
+                // falling edge on TMnIO (`timer_capture_edge`). Remember a
+                // full counter lap between events for TCERR.
+                TIMER_MODE_CAPTURE => {
+                    if matched {
+                        self.capture_lapped[i] = true;
+                    }
+                }
+                // Mode D (p. 92): TM free-runs; when it equals TMR, TRBUF is
+                // loaded into TROUT (driven on TMnIO) and the event interrupt
+                // is requested. TMR is a compare value, never a reload --
+                // subtracting it made identically clocked TM2/TM3 drift apart,
+                // which the ROM's check at 0x38D8 detects.
+                _ => {
+                    if matched {
+                        irq_flags |= 1 << *irq_bit;
+                        let trout = (tcon >> 3) & 1;
+                        self.ram[*tcon_sfr as usize] = (tcon & !TCON_TROUT) | (trout << 2);
+                        if i == 0 && tcon & TCON_TROUT == 0 && trout != 0 {
+                            strobe_injectors = true;
+                        }
+                    }
+                }
+            }
             self.write_data_u16(*tm_sfr, new_tm);
 
-            if matched {
-                irq_flags |= 1 << *irq_bit;
-            }
-            // Every timer raises a counter-overflow interrupt on the even bit
-            // just below its event bit (Table 17-1): TM0->4, TM1->6, TM2->8,
-            // TM3->10. Previously only TM2's overflow was produced, so the
-            // injection scheduler -- which the P28 ROM drives partly off timer
-            // overflows -- was starved of TM0/TM1/TM3 overflow events.
+            // Every mode raises the counter-overflow interrupt on the even bit
+            // just below the timer's event bit (Table 17-1): TM0->4, TM1->6,
+            // TM2->8, TM3->10.
             if overflow {
                 irq_flags |= 1 << (*irq_bit - 1);
             }
+        }
+
+        if strobe_injectors {
+            self.latch_injector_outputs();
         }
 
         if irq_flags != 0 {
@@ -698,9 +841,10 @@ mod tests {
         bus.adc_inputs[2] = 0x0200;
         bus.write_data_u16(SFR_TM1, 0);
         bus.write_data_u16(SFR_TMR1, 1);
-        bus.write_data_u8(SFR_TCON1, 0x10);
+        // Compare events exist only in realtime output mode.
+        bus.write_data_u8(SFR_TCON1, TCON_RUN | TIMER_MODE_REALTIME_OUTPUT);
 
-        assert_ne!(bus.tick_timers(8) & (1 << IRQ_TM1), 0);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_TM1), 0);
         assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x0100 << 6);
     }
 
@@ -724,18 +868,96 @@ mod tests {
         assert!(bus.serial_rx_queue.is_empty());
     }
 
-    #[test]
-    fn injector_width_is_measured_from_active_low_p2_transitions() {
+    /// Put the ports and timer 0 in the state the P28 ROM's init leaves them.
+    fn bus_with_p28_injector_stage() -> Bus {
         let mut bus = Bus::new();
-        bus.write_data_u8(SFR_P2, 0xFF);
-        bus.write_data_u8(SFR_P2, 0xFE); // injector 0 driven low (active)
-        bus.tick_timers(120); // 120 machine cycles held low
-        bus.write_data_u8(SFR_P2, 0xFF); // released
-
-        // At the 5 MHz machine-cycle rate, 120 cycles is 120 / CYCLES_PER_US us.
-        assert_eq!(
-            bus.injector_pulse_width_us,
-            ((120 + CYCLES_PER_US / 2) / CYCLES_PER_US) as u32
-        );
+        bus.write_data_u8(SFR_P2IO, 0xFF);
+        bus.write_data_u8(SFR_P2, 0x1F);
+        bus.write_data_u8(SFR_P3IO, 0xB1);
+        bus.write_data_u8(SFR_P3SF, 0xFF);
+        bus.write_data_u8(SFR_TCON0, 0x8B | TCON_RUN);
+        bus
     }
+
+    #[test]
+    fn injector_state_is_clocked_out_by_the_timer_zero_realtime_output() {
+        let mut bus = bus_with_p28_injector_stage();
+        bus.write_data_u16(SFR_TM0, 0);
+        bus.write_data_u16(SFR_TMR0, 100);
+
+        // Open injector 0 the way 0x4BCC..0x4BDF does: stage, strobe by hand.
+        bus.write_data_u8(SFR_P2, 0x1E);
+        assert_eq!(bus.injector_outputs(), 0x0F, "P2 alone does not move the outputs");
+        bus.write_data_u8(SFR_TCON0, 0x9B | TCON_TROUT);
+        bus.write_data_u8(SFR_TCON0, 0x9B);
+        assert_eq!(bus.injector_outputs(), 0x0E);
+
+        // Stage the closed state; nothing happens until TM0 reaches TMR0.
+        bus.write_data_u8(SFR_P2, 0x1F);
+        bus.tick_timers(99 * 16);
+        assert_eq!(bus.injector_outputs(), 0x0E);
+        let irq = bus.tick_timers(16);
+        assert_ne!(irq & (1 << IRQ_TM0), 0, "the match also requests the TM0 event");
+        assert_eq!(bus.injector_outputs(), 0x0F);
+        assert_ne!(bus.ram[SFR_TCON0 as usize] & TCON_TROUT, 0, "TROUT <- TRBUF");
+
+        // 100 counts of 3.2 us.
+        assert_eq!(bus.injector_last_pulse_us[0], 320);
+        assert_eq!(bus.injector_pulse_width_us, 320);
+        assert_eq!(bus.injector_open_count, [1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn timer_clock_select_follows_the_manual() {
+        // (TCON clock field, machine cycles per count) -- Fig. 9-2.
+        for (ck, cycles) in [(0u8, 1u32), (1, 2), (2, 4), (3, 8), (4, 16), (5, 64), (6, 256)] {
+            let mut bus = Bus::new();
+            bus.write_data_u8(SFR_TCON1, (ck << 5) | TCON_RUN | 0x03);
+            bus.write_data_u16(SFR_TMR1, 0x8000);
+            bus.tick_timers(cycles * 10);
+            assert_eq!(bus.read_data_u16(SFR_TM1), 10, "clock select {ck}");
+        }
+    }
+
+    #[test]
+    fn auto_reload_mode_reloads_from_the_timer_register_on_overflow() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_TCON1, TCON_RUN | TIMER_MODE_AUTO_RELOAD);
+        bus.write_data_u16(SFR_TMR1, 0xFF00);
+        bus.write_data_u16(SFR_TM1, 0xFFFE);
+
+        let irq = bus.tick_timers(3);
+
+        assert_eq!(bus.read_data_u16(SFR_TM1), 0xFF01);
+        assert_ne!(irq & (1 << (IRQ_TM1 - 1)), 0, "overflow interrupt");
+        assert_eq!(irq & (1 << IRQ_TM1), 0, "no compare event in mode A");
+    }
+
+    #[test]
+    fn capture_mode_latches_the_counter_on_a_pin_edge_only() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P3IO, 0xB1);
+        bus.write_data_u8(SFR_P3SF, 0xFF);
+        bus.write_data_u8(SFR_TCON2, 0x82 | TCON_RUN);
+        bus.write_data_u16(SFR_TMR2, 5);
+
+        // Passing TMR2 is not an event in capture mode.
+        assert_eq!(bus.tick_timers(16 * 20) & (1 << IRQ_TM2), 0);
+        assert_eq!(bus.read_data_u16(SFR_TMR2), 5);
+
+        let irq = bus.timer_capture_edge(2);
+        assert_ne!(irq & (1 << IRQ_TM2), 0);
+        assert_eq!(bus.read_data_u16(SFR_TMR2), 20);
+        assert_ne!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_TM2), 0);
+        assert_ne!(bus.ram[SFR_TCON2 as usize] & TCON_TROUT, 0, "TCERR: lapped TMR2");
+
+        bus.tick_timers(16);
+        bus.timer_capture_edge(2);
+        assert_eq!(bus.ram[SFR_TCON2 as usize] & TCON_TROUT, 0, "TCERR clears");
+
+        // A timer in realtime output mode ignores its pin.
+        bus.write_data_u8(SFR_TCON3, 0x8F | TCON_RUN);
+        assert_eq!(bus.timer_capture_edge(3), 0);
+    }
+
 }

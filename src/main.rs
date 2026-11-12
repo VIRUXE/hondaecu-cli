@@ -39,7 +39,7 @@ fn print_usage() {
     println!("  hondaecu-cli run <rom.bin> [cycles] [rpm]                 Simulate ECU execution for N cycles");
     println!("  hondaecu-cli disasm <rom.bin> [addr] [count]              Disassemble ROM instructions from target address");
     println!("  hondaecu-cli trace <rom.bin> <mode> <rpm> <secs> [args]   Emit runtime trace for Python analysis");
-    println!("      modes: ramwatch <a,..> | pcwatch <p,..> | pccount <p,..> | pchist [n] | snap <lo> <hi> | exec <lo> <hi>");
+    println!("      modes: ramwatch <a,..> | pcwatch <p,..> | pccount <p,..> | pchist [n] | snap <lo> <hi> | exec <lo> <hi> | injcount");
     println!();
     println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, launch-control-2step, error-map-failure, error-ect-overheat, cold-start");
     println!();

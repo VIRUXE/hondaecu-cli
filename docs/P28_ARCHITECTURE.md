@@ -114,6 +114,36 @@ part of the analog mux and not a value that should be invented at `0x0320`.
 
 ---
 
+## Crank-angle inputs
+
+Derived from the stock ROM; not yet confirmed against the schematic.
+
+| signal | rate | MCU input | ROM consumer |
+|---|---|---|---|
+| CKP | 24 / cam rev | P3.6 / TM2IO (timer-2 capture, IRQ 9) | `0x014D`, then software IRQ 3 → `0x03DC`; tooth counter RAM `0x12A` = 0..23 |
+| TDC | 4 / cam rev | P3.3 / INT1 (IRQ 15) | polled as `IRQH.7`; vectored at `0x037B` only in the TDC-only fallback |
+| CYP | 1 / cam rev | P4.4 / TRNS0 | polled as `TRNSIT.0`; re-zeroes the tooth counter |
+| VSS | vehicle speed | P3.2 / INT0 (IRQ 0) | `0x01D3`, period capture against TM2 |
+
+The ROM has two crank modes, selected by the supervisor at `0x37BC` and visible
+in the IE shadow at RAM `0xF2`:
+
+| IE shadow | mode | entered when |
+|---|---|---|
+| `0x2BAB` | normal: CKP teeth through the timer-2 event and IRQ 3 | CKP activity counter `0x1A9` is being reloaded |
+| `0xA9A3` | fallback: INT1 (TDC) only | `0x1A9` runs down, or fault bit `0x212.3` is set |
+
+## Injector output stage
+
+P2.0–P2.3 are staged data, active low. A rising edge of timer 0's realtime
+output (`TROUT`, pin TM0IO / P3.4) clocks them to the injector drivers. The ROM
+makes that edge by hand to open an injector or cut fuel, and lets the timer-0
+compare match make it to close an injector at an exact time. Widths are in
+3.2 µs timer-0 counts; a width below `0xC0` is treated as no fuel. Details and
+addresses are in [`INJECTION.md`](INJECTION.md).
+
+---
+
 ## ⚡ Interrupt Vector Table
 
 | Vector Address | Priority | Trigger Source | ECU Function |
@@ -128,6 +158,23 @@ For P28-230, IRQ bit 0 points to handler `0x01D3` and bit 1 points to handler
 `0x01FD`. Those are targets stored in the vector table, not architectural
 vector addresses themselves. CYP is polled through transition-detector status
 `TRNS.0`; it is not represented as a second generic external interrupt.
+
+Stock P28-230 handlers:
+
+| IRQ bit | source | handler | P28 use |
+|---|---|---|---|
+| 0 | INT0 | `0x01D3` | speed-signal period |
+| 1 | serial receive | `0x01FD` | |
+| 3 | serial transmit / BRG | `0x03DC` | requested by software at `0x7674`: per-tooth crank-angle work |
+| 5 | TM0 event | `0x0086` | injector close queue |
+| 7 | TM1 event | `0x0114` | |
+| 8 | TM2 overflow | `0x02DD` | period-measurement extension |
+| 9 | TM2 event | `0x014D` | CKP tooth (capture) |
+| 11 | TM3 event | `0x02FB` | |
+| 13 | PWM | `0x031E` | |
+| 15 | INT1 | `0x037B` | TDC, fallback mode only |
+
+Unlisted bits point at the common stub `0x21CB`.
 
 ---
 
@@ -178,10 +225,12 @@ not apply generically to digital switches and solenoids.
 
 ## Known Fidelity Limits
 
-- PWM mode and multiple P28 board outputs remain approximate or unresolved.
-- Timer auto-reload and the external digital-input buffer at `0x4700` are not
-  modeled.
-- Sustained normal sequential injection has not been demonstrated.
+- PWM mode and the P28 board outputs other than the injectors remain
+  approximate or unresolved.
+- The external digital-input buffer at `0x4700` is not modeled.
+- The injector output stage and crank-signal pin assignment are ROM-derived
+  and await confirmation against the schematic; cylinder mapping and sensor
+  phasing are not established.
 - Stock-ROM tests require an external image; decoder ground truth is tracked,
   but mnemonic/length agreement does not certify execution or hardware.
 - TCP datalog compatibility and scenario/DTC conclusions remain experimental.

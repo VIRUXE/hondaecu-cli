@@ -178,8 +178,23 @@ The register-indirect forms carry *no* bit index in their encoding. The manual
 accumulator". The ROM makes this visible: `LB A, #002h` immediately before a
 loop polling `MBR C, off(P4)`.
 
+### Bit operands are always one byte
+
+A bit operand addresses a bit of a **byte** object whatever `DD` says (manual
+p. 3-77). That matters for odd addresses that alias a register half: under
+`DD = 1`, `MB C, ACCH.7` (address `07h`) must read the high accumulator byte.
+The executor used to read bit operands at the current data width, so the ROM's
+signed add at 0x4F7F tested bit 7 of ACCL instead. `exec.rs` now forces byte
+width on both the read and the read-modify-write side.
+
 ### Flag behaviour
 
+- `L` / `LB` / `LC` / `LCB` set ZF from the loaded value (manual pp. 3-69 …
+  3-76). `MOV` / `MOVB` and `ST` / `STB` affect no flags. The ROM branches
+  straight off loads, e.g. `LB A, off(135h)` / `JNE` at 0x5C4F.
+- `ROL` / `ROR` (and the byte forms) rotate **through carry** and affect CF
+  only (pp. 3-116 … 3-123). The ROM chains them after `SLL`/`SRL` to shift
+  32-bit values, e.g. the ×5/4 pulse-width scaler at 0x4FB9.
 - `SB` / `RB` / `SBR` / `RBR` / `TBR` are **test-and-modify**: ZF reports the
   bit's *previous* value. The ROM depends on this at 0x2340, where
   `RB off(IRQH).5` is followed by `JNE` to branch on whether that interrupt
@@ -236,6 +251,39 @@ fits the timeout budgets its own power-on check allows.
 This reload/toggle model is sufficient to explore the stock ROM's current boot
 path, but it is not a complete implementation of the manual's PWM modes. It
 must not be used to infer P28 duty cycle or board-output behavior.
+
+### Timers (user's manual ch. 9, pp. 84–93)
+
+`TCON0..3` share one layout (Fig. 9-2):
+
+| bits | field |
+|---|---|
+| 7–5 | clock: `000` ½CLK = 1 machine cycle, then 2, 4, 8, 16, 64, 256 cycles; `111` external (not modeled) |
+| 4 | RUN |
+| 3 | TRBUF |
+| 2 | TROUT (mode D) / TCERR (mode C) |
+| 1–0 | mode: `00` auto reload, `01` clock output, `10` capture register, `11` realtime output |
+
+- **Auto reload / clock output**: on overflow `TM ← TMR`; overflow interrupt
+  only.
+- **Capture register**: `TM` free-runs; a falling edge on `TMnIO` loads
+  `TMR ← TM` and requests the event interrupt. TCERR reports a full counter
+  lap since the previous event. `Bus::timer_capture_edge` is the pin.
+- **Realtime output**: `TM` free-runs; when `TM == TMR`, `TROUT ← TRBUF`, the
+  level appears on `TMnIO`, and the event interrupt is requested.
+
+Every mode raises the overflow interrupt on the even IRQ bit below the event
+bit. The stock P28 runs TM0/TM2/TM3 at 3.2 µs and TM1 at 800 ns; TM2 is in
+capture mode with P3.6 an input, the others in realtime output mode. An
+earlier revision decoded only bits 6–5 as the clock and ran every timer twice
+too fast with a compare event in all modes.
+
+### Injector output stage and crank inputs
+
+P2.0–P2.3 hold the next injector state, clocked to the outputs by a rising
+edge of timer 0's TROUT (`TM0IO`, P3.4). CKP is the timer-2 capture input, TDC
+is INT1, CYP is TRNS0, and INT0 carries the speed signal. These are derived
+from the ROM; see [`INJECTION.md`](INJECTION.md) for the evidence.
 
 ### P28 external analog mux
 
@@ -319,6 +367,11 @@ cargo test --release
 | `decoder::decodes_reset_sequence` | pins the exact reset path that broke before |
 | `operand::every_pattern_parses` | all 2623 patterns parse |
 | `exec::oem_rom_passes_its_cpu_self_test` | when the external stock ROM is present, observes it reaching the modeled Port-4 check |
+| `exec::accumulator_loads_set_zero_from_the_loaded_value`, `exec::rotates_go_through_carry_and_leave_zero_alone`, `exec::bit_operands_address_one_byte_in_word_mode` | the three manual-specified semantics the injection path depends on |
+| `bus::timer_clock_select_follows_the_manual`, `bus::auto_reload_mode_…`, `bus::capture_mode_…` | timer clock select and modes per ch. 9 |
+| `bus::injector_state_is_clocked_out_by_the_timer_zero_realtime_output` | the injector output stage |
+| `replay::stock_p28_sustains_sequential_injection` | with the stock ROM present: one opening per output per engine cycle, in rotation, at 300 / 800 / 3000 / 6500 rpm |
+| `replay::stock_p28_cuts_fuel_above_its_rev_limit` | with the stock ROM present: no openings at 7600 rpm |
 | `replay::stock_p28_boots_with_live_sensor_inputs_through_the_mux` | when the stock ROM is present, checks the mux sampler and absence of boot marker `0x49` |
 
 The tracked ground-truth fixture `tests/fixtures/p28_dasm662.tsv` is
@@ -351,32 +404,36 @@ shares a 5 MHz machine-cycle clock. A few documented pointer-indirect
 surcharges remain optimistic, so this is a substantially improved timing model,
 not a claim of cycle-perfect hardware emulation.
 
-All four timer event/compare and counter-overflow IRQ paths are delivered. The
-crank-angle generator supplies CKP/TDC interrupts and latches CYP on the
-transition detector. The stock-P28 mux is selected by P2.5--P2.7, conversion
+The four timers follow the user's manual: 3-bit clock select and the auto
+reload, clock output, capture register and realtime output modes. The
+crank-angle generator delivers CKP as a timer-2 capture edge, TDC on INT1 and
+CYP on the transition detector, and the stock ROM sustains sequential
+injection through the modeled injector output stage (see
+[`INJECTION.md`](INJECTION.md)). The stock-P28 mux is selected by P2.5--P2.7, conversion
 completes after 64 us (320 machine cycles / 640 oscillator clocks), and ADCR
 results are latched and read-only.
 
 The CLI includes boot and runtime trace modes. `bootpc` and `bootram` expose
 the raw power-on path; runtime `ramwatch`, `pcwatch`, `pccount`, `pchist`,
-`snap`, `exec`, and `injcount` run with configured warm sensor inputs. Trace
+`snap`, `exec`, and `injcount` run with configured warm sensor inputs.
+`injcount` reports openings and the last pulse width per injector output. Trace
 addresses are absolute data-space addresses: an `off N8` operand resolves
 through the active LRB page, not plain address `N8`.
 
 **Known gaps.**
 
-1. PWM remains a reload/toggle approximation, and board-output mappings are
-   incomplete. P2.0--P2.3 transition capture is an emulator assumption; P2.0
-   also has an unresolved fuel-pump/injector conflict.
-2. Timer auto-reload mode is not modeled. The distributor generator can emit at
-   most one edge per call and slightly stretch a period when a step crosses
-   multiple edges.
+1. PWM remains a reload/toggle approximation, and board-output mappings other
+   than the injectors are incomplete (fuel pump, MIL, VTEC, IACV …).
+2. The injector output latch and the CKP/TDC/CYP/VSS pin assignment are derived
+   from the ROM, not read off the schematic. Output-to-cylinder mapping and
+   real sensor phasing are not established. External timer clocking (`111b`)
+   is not modeled.
 3. The P28 external digital input at DATA[`0x4700`] is not modeled separately;
    the 4 KiB backing array aliases it to `0x0700`. This is distinct from the
-   analog mux.
-4. Sustained normal sequential injection has not been demonstrated. Occasional
-   key-on prime or batch transitions are not evidence of normal running fuel
-   control.
+   analog mux and does not block injection.
+4. Executor flag semantics have only been checked against the manual for the
+   instructions the boot and injection paths exposed. A full audit against the
+   summary tables (manual pp. 3-179 onward) is outstanding.
 5. The IAT analog endpoint and several U5/U6 positions remain unresolved. ADC
    scan-mode details beyond the stock sampler's observed behavior are
    simplified.
@@ -396,6 +453,12 @@ The saved bit at `0x9F.0` instead comes from external data: `0x220E` selects
 and restored at `0x2426`. Modeling DATA[`0x4700`].0 is a separate digital
 board-input task; it must not be replaced with an invented value in `0x0320`.
 
+`0x9F.0` is not an injection enable. It selects a full-width, all-cylinder
+first pulse and forces the start countdown, and the ROM consumes it on the
+first running-fuel pass (0x1508). Sequential injection is armed by RAM
+`0x120.2` once the start countdown at `0x135` reaches zero; see
+[`INJECTION.md`](INJECTION.md) §3.
+
 ---
 ## 10. Sources
 
@@ -403,6 +466,7 @@ board-input task; it must not be replaced with an invented value in `0x0320`.
 |---|---|
 | **OKI MSM66201 Instruction Manual** (266 pp) | CPU architecture, PSW/SCB/DD, bit addressing, per-instruction flags & cycles |
 | **OKI MSM66207 datasheet** (20 pp) | pin functions, Port 4 map, SFR list |
+| **OKI MSM66207 user's manual** (incomplete scan), ch. 9 pp. 84–93 | timer control register layout, clock select, the four timer modes |
 | **P28 board schematic** — *Engine Control Computer for Honda/Acura, 37820-P28-A51*, Bomarc, 8 sheets | board wiring; sheet 6 is the MCU sheet |
 | `asm662/src/66207.op` | authoritative opcode table (RCS archive — `co -p` it) |
 | `asm662/bin/dasm662` | reference disassembler, ground truth for decoding |

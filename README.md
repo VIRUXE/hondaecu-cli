@@ -13,6 +13,7 @@ peripheral/board model.
 
 - 📖 [**Scripted Stimulus & Fault-Injection Guide (`docs/SCENARIOS.md`)**](docs/SCENARIOS.md): Preset and CSV inputs, plus the boundary between an injected condition and an observed ROM response.
 - 🧠 [**OKI MSM66207 CPU Core — Findings & Implementation Notes (`docs/CPU_CORE.md`)**](docs/CPU_CORE.md): Instruction decoding/execution, machine-cycle timing, register and memory models, peripherals, stock-P28 observations, trace tooling, and known gaps.
+- 💉 [**Stock P28 Injection (`docs/INJECTION.md`)**](docs/INJECTION.md): How the ROM schedules and drives the injectors, the six defects that kept the emulator from sustaining injection, and how each was verified.
 - 📐 [**Honda P28 ECU Architecture Notes (`docs/P28_ARCHITECTURE.md`)**](docs/P28_ARCHITECTURE.md): MSM66207 memory mapping, the P28 analog front end, boot traces, interrupt vectors, and clearly labelled control-strategy hypotheses.
 
 ---
@@ -28,7 +29,7 @@ flowchart TD
         Interp["Instruction Interpreter & Decoder<br/>Line-by-line Byte Execution"]
         Bus["Memory Bus & SFR Space<br/>Code Space (0..32KB)<br/>Data Space (0..4KB SFRs/RAM)"]
         Timers["Hardware Timers (TM0..TM3)<br/>& ADC Hardware (ADCR0..ADCR7)"]
-        ISRs["ISR Interrupt Dispatcher<br/>(INT0 CKP, INT1 TDC, TM0..3, Serial RX)"]
+        ISRs["ISR Interrupt Dispatcher<br/>(TM2 capture CKP, INT1 TDC, INT0 VSS, TM0..3, Serial RX)"]
     end
     
     subgraph EngineSim ["Virtual Engine Peripheral Simulation"]
@@ -67,13 +68,18 @@ flowchart TD
   share P2.5/P2.6/P2.7 as A/B/C. Direct inputs include optional EGR on AI3,
   MAP on AI6, and TPS on AI7. Conversion takes 64 us: 320 modeled machine
   cycles, equal to 640 oscillator clocks.
-- **Timer and distributor plumbing**: All four timer compare/event and overflow
-  IRQ paths are delivered, with CKP/TDC interrupt generation and the CYP
-  transition-detector latch. Timer auto-reload mode is still missing.
+- **Timers per the MSM66207 manual**: The 3-bit clock select and all four
+  modes (auto reload, clock output, capture register, realtime output) follow
+  chapter 9 of the user's manual. CKP arrives as a timer-2 capture edge, TDC on
+  INT1, CYP on the transition detector, and VSS on INT0.
+- **Sequential injection on the stock ROM**: The injector output stage is
+  modeled as the ROM drives it -- P2.0-P2.3 staged, then clocked out by timer
+  0's realtime output -- giving one pulse per cylinder per engine cycle from
+  cranking speed to the ROM's own rev limit. See `docs/INJECTION.md`.
 - **Inspection tools**: Linear disassembly, an interactive shell, replay, an
   experimental TCP datalog server, and boot/runtime `trace` modes for PC/RAM
-  watches, histograms, snapshots, execution ranges, and injector-transition
-  counts.
+  watches, histograms, snapshots, execution ranges, and per-output injector
+  opening counts and pulse widths.
 - **Tracked decoder ground truth**: `tests/fixtures/p28_dasm662.tsv` exercises
   mnemonic and length agreement for 10,914 stock-P28 instruction windows. It
   does not certify every execution semantic, peripheral, or board connection.
@@ -95,16 +101,21 @@ path with live mux inputs, but it is not a physical-ECU validator.
 - The stock sampler at `0x52DE..0x52F7` stores ADCR0 high bytes at
   `0x03BE[index]` and ADCR1 high bytes at `0x03C6[index]` while advancing the
   shared selector.
-- Board-output wiring is incomplete. Active-low P2.0–P2.3 transition capture is
-  an emulator assumption, and P2.0 is also labelled as the fuel-pump driver.
-  VTEC/IACV and other output telemetry must not be treated as verified harness
-  behavior.
-- PWM mode is still a reload/toggle approximation; timer auto-reload is not
-  modeled; the distributor generator can stretch periods slightly when a call
-  spans more than one edge; and external data addresses above the 4 KiB backing
-  store currently alias.
-- The stock run does not yet sustain normal sequential injection. Occasional
-  prime/batch transitions are not proof of runtime fueling.
+- The stock ROM sustains sequential injection: one opening per injector output
+  per engine cycle, in rotation, from 300 rpm to its fuel cut between 7000 and
+  7500 rpm. Pulse widths come from the ROM's own tables acting on modeled
+  sensor voltages; they are plausible, not validated against a datalog.
+- The injector output stage (P2.0–P2.3 clocked by TM0IO) and the crank-signal
+  pin assignment (CKP on TM2IO, TDC on INT1, CYP on TRNS0, VSS on INT0) are
+  derived from the ROM, not yet read off the schematic. The output-to-cylinder
+  mapping and the real sensor phasing are not established.
+- Other board-output wiring is incomplete. Fuel-pump, MIL, VTEC, IACV and
+  similar telemetry must not be treated as verified harness behavior.
+- PWM mode is still a reload/toggle approximation, and external data addresses
+  above the 4 KiB backing store currently alias (including the digital input
+  port at `0x4700`).
+- Three executor flag bugs were found that the decoder ground-truth test cannot
+  see. The remaining mnemonics have not been audited against the manual.
 - Replay presets are scripted stimuli. They do not by themselves prove a DTC,
   limiter, failsafe, fuel strategy, or physical output. The TCP datalog protocol
   is experimental.
@@ -227,7 +238,12 @@ The `trace` command emits machine-readable PC/RAM observations. Runtime modes
 include `ramwatch`, `pcwatch`, `pccount`, `pchist`, `snap`, `exec`, and
 `injcount`; `bootpc` and `bootram` inspect the raw power-on path.
 
+`injcount` prints `INJ o0 o1 o2 o3 total n` (openings per injector output in
+the window) and `INJPW_US w0 w1 w2 w3` (last completed pulse width per output,
+in microseconds). `ramwatch` lines end with the machine-cycle count.
+
 ```bash
+./hondaecu-cli trace P28-230.bin injcount 3000 1.0
 ./hondaecu-cli trace P28-230.bin pchist 5500 1.0 25
 ./hondaecu-cli trace P28-230.bin bootpc 0 0 0x220E,0x2211,0x2213,0x2426
 ```
@@ -287,7 +303,7 @@ hondaecu-cli/
     ├── bus.rs          # Memory Bus (32KB ROM / 4KB RAM), Timers, SFRs, ADC, PWM
     ├── engine.rs       # Virtual Engine Simulator, Sensor Signals, Distributor Pulses
     ├── interpreter.rs  # Machine Code Opcode Decoder & Interpreter
-    ├── interrupts.rs   # ISR Vector Dispatcher (INT0, INT1, TM0-TM3, Serial RX)
+    ├── interrupts.rs   # ISR Vector Dispatcher (TM0-TM3, INT0, INT1, Serial RX)
     ├── dtc.rs          # Honda OBD1 DTC metadata and selected synthetic checks
     ├── suite.rs        # Observable ROM and hardware sanity checks
     └── interactive.rs  # Interactive Debugging REPL Shell

@@ -16,8 +16,9 @@ expectation.
 The stock-P28 analog path currently supports MAP on direct AI6, TPS on AI7,
 ECT on U5/X2→ADCR1, and primary HEGO on U6/X0→ADCR0. The IAT endpoint is
 unresolved, so changing `iat_celsius` does not currently prove a hardware input
-or ROM response. `vtec_active`, IACV duty, and P2.0–P2.3 injector telemetry also
-depend on emulator-side or unresolved board mappings.
+or ROM response. `vtec_active` and IACV duty depend on emulator-side or unresolved board
+mappings. Injector telemetry is measured on the modeled output stage described
+in [`INJECTION.md`](INJECTION.md).
 
 ---
 
@@ -150,11 +151,13 @@ error instead of reporting a false pass.
 .\hondaecu-cli.exe replay P28-230.bin launch-control-2step launch_2step_results.csv
 ```
 
-The CSV includes scripted `speed_kmh` and an injector-duration field derived
-from active-low P2.0–P2.3 transitions. A meaningful assertion must compare
-independently observed transitions between phases, not the scripted RPM input.
-Treating those pins as physical injector outputs still depends on verified P28
-board wiring.
+The CSV includes scripted `speed_kmh` and an injector-duration field: the
+width of the last completed pulse on the modeled injector outputs (P2.0–P2.3
+clocked out by TM0IO, see [`INJECTION.md`](INJECTION.md)), or 0 when no
+injector opened during the last full engine cycle, i.e. the ROM is cutting
+fuel. A meaningful assertion must compare independently observed pulses
+between phases, not the scripted RPM input. The output stage is derived from
+the ROM and still awaits confirmation against the P28 schematic.
 
 ---
 
