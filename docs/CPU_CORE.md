@@ -639,16 +639,22 @@ through the active LRB page, not plain address `N8`.
    the 82C55 at `0x0F00..0x3F00` -- are modeled. Their signal names come from
    the pgmfi wiki and from ROM behaviour, not the schematic; three input bits
    are unnamed, only the VTEC solenoid feedback is closed-loop, and address
-   mirrors are not decoded. At 800 rpm and light load the ROM sets a fault bit
-   (`212h` bit 10) and lights the MIL within a second; which input it is
-   unhappy with has not been traced.
-4. Executor flag semantics have only been checked against the manual for the
+   mirrors are not decoded.
+4. At 800 rpm and light load the ROM raises a fault within a second and
+   lights the MIL. The flag is `99h.3`, set at 0x3C71, which the pgmfi wiki's
+   P30 map calls the IAC error (its patch at 0x3C6E disables it). The check at
+   0x3C52..0x3C6E looks up two limits from RAM `C3h` (tables at `6B24h` and
+   `6B2Ah`) and faults when `25Ah` lies between them. `C3h` is the sample
+   stored at `3C5h`, i.e. analog mux U6 input X7, which `engine.rs` does not
+   drive, so it sits at the mid-scale default. What that input is on the board
+   is not established; the wiki labels `C3h` "IACV".
+5. Executor flag semantics have only been checked against the manual for the
    instructions the boot and injection paths exposed. A full audit against the
    summary tables (manual pp. 3-179 onward) is outstanding.
-5. The IAT analog endpoint and several U5/U6 positions remain unresolved. ADC
+6. The IAT analog endpoint and several U5/U6 positions remain unresolved. ADC
    scan-mode details beyond the stock sampler's observed behavior are
    simplified.
-6. Scenario names, DTC metadata, and synthetic evaluators are research aids,
+7. Scenario names, DTC metadata, and synthetic evaluators are research aids,
    not firmware-level proof of a DTC, failsafe, calibration strategy, or
    physical output. TCP datalog compatibility remains experimental.
 

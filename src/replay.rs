@@ -1335,9 +1335,10 @@ mod tests {
 
     /// Port C bit 4 is the MIL and port A bit 7 the service check connector:
     /// the lamp is lit for the bulb check at reset, and with the connector
-    /// grounded the ROM blinks it. (This operating point leaves a fault bit
-    /// set in `212h`, which is what gives the ROM a code to blink; without
-    /// the jumper the lamp is simply on.)
+    /// grounded the ROM blinks it. (This operating point raises the IAC fault
+    /// `99h.3` because analog mux input U6/X7 is not modeled -- see
+    /// docs/CPU_CORE.md, known limits -- which is what gives the ROM a code
+    /// to blink; without the jumper the lamp is simply on.)
     #[test]
     fn stock_p28_blinks_the_mil_with_the_service_connector_grounded() {
         let mil_edges = |jumper: bool| {
