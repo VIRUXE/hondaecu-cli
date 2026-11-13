@@ -662,7 +662,8 @@ something plausible. That is deliberate, and it caught three real bugs:
 ## 8. Verification
 
 ```bash
-cargo test --release
+cargo test --release        # no ROM image needed
+cargo test-rom              # plus the ROM-backed tests (README, Testing)
 ```
 
 | test | what it proves |
@@ -670,24 +671,26 @@ cargo test --release
 | `decoder::matches_dasm662_ground_truth` | **10914 / 10914** instructions match `dasm662` on mnemonic *and* length |
 | `decoder::decodes_reset_sequence` | pins the exact reset path that broke before |
 | `operand::every_pattern_parses` | all 2628 patterns parse |
-| `exec::oem_rom_passes_its_cpu_self_test` | when the external stock ROM is present, observes it reaching the modeled Port-4 check |
+| `exec::oem_rom_passes_its_cpu_self_test` | `p28-rom`: the stock ROM reaches the modeled Port-4 check |
 | `exec::accumulator_loads_set_zero_from_the_loaded_value`, `exec::rotates_go_through_carry_and_leave_zero_alone`, `exec::bit_operands_address_one_byte_in_word_mode` | the three manual-specified semantics the injection path depends on |
 | `bus::timer_clock_select_follows_the_manual`, `bus::auto_reload_mode_…`, `bus::capture_mode_…` | timer clock select and modes per ch. 9 |
 | `bus::injector_state_is_clocked_out_by_the_timer_zero_realtime_output` | the injector output stage |
-| `replay::stock_p28_sustains_sequential_injection` | with the stock ROM present: one opening per output per engine cycle, in rotation, at 300 / 800 / 3000 / 6500 rpm |
-| `replay::stock_p28_cuts_fuel_above_its_rev_limit` | with the stock ROM present: no openings at 7600 rpm |
-| `replay::stock_p28_boots_with_live_sensor_inputs_through_the_mux` | when the stock ROM is present, checks the mux sampler and absence of boot marker `0x49` |
+| `replay::stock_p28_sustains_sequential_injection` | `p28-rom`: one opening per output per engine cycle, in rotation, at 300 / 800 / 3000 / 6500 rpm |
+| `replay::stock_p28_cuts_fuel_above_its_rev_limit` | `p28-rom`: no openings at 7600 rpm |
+| `replay::stock_p28_boots_with_live_sensor_inputs_through_the_mux` | `p28-rom`: the mux sampler, and no boot marker `0x49` |
 
 The tracked ground-truth fixture `tests/fixtures/p28_dasm662.tsv` is
 self-contained: it carries a six-byte decode window and DD state per
 instruction, so that decoder test needs no ROM image. Mnemonic/length agreement
 does not validate every execution semantic or cycle count.
 
-The ROM-backed tests look for non-distributable images outside this repository
-and currently return early when an image is absent. A green test run is
-ROM-backed evidence only when the required image was actually present. Even
-then, reaching the observed checkpoints does not certify every peripheral or
-physical board connection.
+The ROM-backed tests need non-distributable images and are opt-in: features
+`p28-rom` and `launch-rom`, with the image paths in `HONDAECU_P28_ROM` and
+`HONDAECU_LAUNCH_ROM` (`src/fixtures.rs`). Without the feature a test is
+reported as ignored; with it, a missing image fails the test. A run that
+shows them passing is therefore ROM-backed evidence. Even then, reaching the
+observed checkpoints does not certify every peripheral or physical board
+connection.
 
 ### Regenerating the fixture
 

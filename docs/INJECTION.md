@@ -262,7 +262,7 @@ described in [`CPU_CORE.md`](CPU_CORE.md), "P28 external data bus".
 ## 4. Verification
 
 ```bash
-cargo test --release
+cargo test-rom
 ./target/release/hondaecu-cli trace ../P28-230.bin injcount 3000 1
 ```
 
@@ -279,8 +279,9 @@ cargo test --release
 | `replay::stock_p28_sustains_sequential_injection` | one opening per output per engine cycle, in rotation, 1–20 ms, at 300 / 800 / 3000 / 6500 rpm, in normal crank mode |
 | `replay::stock_p28_cuts_fuel_above_its_rev_limit` | no openings at 7600 rpm |
 
-The two `replay::stock_p28_*` tests need the non-distributable ROM at
-`../P28-230.bin` and return early without it.
+The two `replay::stock_p28_*` tests need the non-distributable ROM: they run
+under feature `p28-rom` with `HONDAECU_P28_ROM` naming the image (by default
+`../P28-230.bin`) and are reported as ignored otherwise.
 
 `trace … injcount` now prints the opening count per output and the last pulse
 width per output (`INJPW_US`), both measured on the latched outputs.

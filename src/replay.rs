@@ -1034,24 +1034,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn finds_p28_runtime_entry_after_the_hardware_checks() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
-        let Ok(rom) = std::fs::read(path) else {
-            return;
-        };
+        let path = crate::fixtures::p28_rom_path();
+        let rom = std::fs::read(&path).expect("ROM fixture reads");
 
         assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3946));
         assert!(ReplayEngine::is_stock_p28_230(&rom[..32_768]));
     }
 
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_boots_with_live_sensor_inputs_through_the_mux() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let path = crate::fixtures::p28_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("stock P28 ROM not present at {path}; skipping");
-            return;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
 
         let mut engine = EngineState::new();
         engine.map_kpa = 100.0;
@@ -1074,7 +1071,7 @@ mod tests {
     /// Boot the stock ROM, let it settle for half a second at `rpm`, then run
     /// `engine_cycles` full engine cycles. Returns the injector outputs in
     /// the order they opened, the last pulse width per output, and the bus.
-    fn run_stock_p28(rpm: f64, engine_cycles: u32) -> Option<(Vec<usize>, [u32; 4], Bus)> {
+    fn run_stock_p28(rpm: f64, engine_cycles: u32) -> (Vec<usize>, [u32; 4], Bus) {
         run_stock_p28_with(rpm, engine_cycles, |_| {})
     }
 
@@ -1083,13 +1080,10 @@ mod tests {
         rpm: f64,
         engine_cycles: u32,
         board: impl FnOnce(&mut Bus),
-    ) -> Option<(Vec<usize>, [u32; 4], Bus)> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+    ) -> (Vec<usize>, [u32; 4], Bus) {
+        let path = crate::fixtures::p28_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("stock P28 ROM not present at {path}; skipping");
-            return None;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
         board(&mut bus);
         let hz = crate::bus::CPU_HZ;
         let mut engine = EngineState::new();
@@ -1132,18 +1126,17 @@ mod tests {
             }
         }
         let widths = bus.injector_last_pulse_us;
-        Some((order, widths, bus))
+        (order, widths, bus)
     }
 
     /// Issue #6: the stock ROM must inject once per cylinder per engine
     /// cycle, in a fixed rotating order, from cranking speed to the top of
     /// the rev range -- not a handful of prime pulses.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_sustains_sequential_injection() {
         for rpm in [300.0, 800.0, 3000.0, 6500.0] {
-            let Some((order, widths, bus)) = run_stock_p28(rpm, 10) else {
-                return;
-            };
+            let (order, widths, bus) = run_stock_p28(rpm, 10);
 
             // Ten engine cycles give 40 openings; allow one cycle of phase
             // slack at each end of the window.
@@ -1177,10 +1170,9 @@ mod tests {
     /// Issue #11: every external data access the stock ROM makes lands on a
     /// modeled device, and the ROM's own bookkeeping agrees with the board.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_external_bus_is_fully_decoded() {
-        let Some((_, _, bus)) = run_stock_p28(800.0, 4) else {
-            return;
-        };
+        let (_, _, bus) = run_stock_p28(800.0, 4);
 
         assert_eq!(
             (bus.external_unmapped_reads, bus.external_unmapped_writes),
@@ -1205,14 +1197,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_samples_both_digital_input_bytes() {
-        let Some((_, _, bus)) = run_stock_p28_with(800.0, 4, |bus| {
+        let (_, _, bus) = run_stock_p28_with(800.0, 4, |bus| {
             bus.p28_input_port = 0xC4;
             // Bit 5 is driven by the VTEC feedback model: high, driver off.
             bus.ppi.pins[crate::ppi82c55::PORT_A as usize] = 0xA1;
-        }) else {
-            return;
-        };
+        });
 
         assert_eq!(bus.ram[0x0211], 0xC4 ^ P28_INPUT_ACTIVE_LOW);
         // Bits 4..6 are driver feedback, set by the board model.
@@ -1228,13 +1219,10 @@ mod tests {
         seconds: f64,
         board: impl FnOnce(&mut Bus),
         mut observe: impl FnMut(&mut Bus, f64),
-    ) -> Option<Bus> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+    ) -> Bus {
+        let path = crate::fixtures::p28_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("stock P28 ROM not present at {path}; skipping");
-            return None;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
         board(&mut bus);
         let hz = crate::bus::CPU_HZ;
         let mut engine = EngineState::new();
@@ -1266,7 +1254,7 @@ mod tests {
             InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
             observe(&mut bus, (cpu.cycles - start) as f64 / hz as f64);
         }
-        Some(bus)
+        bus
     }
 
     /// Append `(t, level)` when `level` differs from the last recorded one.
@@ -1284,9 +1272,10 @@ mod tests {
     /// key on and the engine stopped the ROM runs the pump and lights the lamp
     /// for two seconds, then drops both and leaves them off.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_primes_the_fuel_pump_for_two_seconds() {
         let (mut pump, mut mil) = (Vec::new(), Vec::new());
-        let Some(bus) = observe_stock_p28(0.0, 8.0, |_| {}, |bus, t| {
+        let bus = observe_stock_p28(0.0, 8.0, |_| {}, |bus, t| {
             let out = bus.p28_outputs();
             record_edges(&mut pump, out.map(|out| out.fuel_pump), t);
             // Skip the microseconds between the 82C55 mode word and the
@@ -1294,9 +1283,7 @@ mod tests {
             if t > 0.01 {
                 record_edges(&mut mil, out.map(|out| out.mil), t);
             }
-        }) else {
-            return;
-        };
+        });
 
         for (what, edges) in [("pump", &pump), ("MIL", &mil)] {
             assert_eq!(edges.len(), 2, "{what} edges: {edges:?}");
@@ -1310,13 +1297,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_keeps_the_fuel_pump_on_while_the_engine_turns() {
         let mut edges = Vec::new();
-        let Some(bus) = observe_stock_p28(800.0, 3.0, |_| {}, |bus, t| {
+        let bus = observe_stock_p28(800.0, 3.0, |_| {}, |bus, t| {
             record_edges(&mut edges, bus.p28_outputs().map(|out| out.fuel_pump), t);
-        }) else {
-            return;
-        };
+        });
 
         assert_eq!(edges.len(), 1, "pump edges: {edges:?}");
         assert!(bus.fuel_pump_active);
@@ -1326,9 +1312,10 @@ mod tests {
     /// all-cylinder cranking pulse (`9Fh.0`), and while it stays set every
     /// injection opens all four injectors together instead of sequencing.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_injects_on_all_cylinders_while_the_starter_is_engaged() {
         let mut states = Vec::new();
-        let Some(_) = observe_stock_p28(
+        let _ = observe_stock_p28(
             300.0,
             0.6,
             |bus| bus.p28_input_port |= P28_IN_STARTER,
@@ -1338,9 +1325,7 @@ mod tests {
                     states.push(outputs);
                 }
             },
-        ) else {
-            return;
-        };
+        );
 
         let openings = states.iter().filter(|&&s| s != 0x0F).count();
         assert!(openings >= 4, "injector states: {states:02X?}");
@@ -1352,16 +1337,15 @@ mod tests {
 
     /// `4700h` bit 2 is the A/C switch and port B bit 0 the A/C clutch relay.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_engages_the_ac_clutch_after_the_switch_closes() {
         let mut edges = Vec::new();
-        let Some(bus) = observe_stock_p28(800.0, 3.5, |_| {}, |bus, t| {
+        let bus = observe_stock_p28(800.0, 3.5, |_| {}, |bus, t| {
             if t > 1.0 {
                 bus.p28_input_port |= P28_IN_AC_SWITCH;
             }
             record_edges(&mut edges, bus.p28_outputs().map(|out| out.ac_clutch), t);
-        }) else {
-            return;
-        };
+        });
 
         // Between the 82C55 mode word (which clears port B, i.e. every
         // active-low driver on) and the ROM's first port write there are a
@@ -1375,19 +1359,18 @@ mod tests {
     /// `4700h` bit 1 is the VTEC oil-pressure switch. With VTEC off the ROM
     /// expects it closed and flags `9Ah.1` when it is open (0x3D34).
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_flags_an_open_vtec_pressure_switch() {
         let fault = |closed: bool| {
-            observe_stock_p28(
+            let bus = observe_stock_p28(
                 800.0,
                 1.0,
                 |bus| bus.set_vtec_pressure_switch_closed(closed),
                 |_, _| {},
-            )
-            .map(|bus| bus.ram[0x009A] & 0x02 != 0)
+            );
+            bus.ram[0x009A] & 0x02 != 0
         };
-        let (Some(open), Some(closed)) = (fault(false), fault(true)) else {
-            return;
-        };
+        let (open, closed) = (fault(false), fault(true));
 
         assert!(open, "open switch with VTEC off must set 9Ah.1");
         assert!(!closed, "closed switch must not");
@@ -1403,13 +1386,12 @@ mod tests {
     /// check, pump running, fuel flowing, and the ROM's IACV current loop
     /// settled on its target inside its on-time limits.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_idles_without_faults() {
         let mut mil = Vec::new();
-        let Some(bus) = observe_stock_p28(800.0, 6.0, |_| {}, |bus, t| {
+        let bus = observe_stock_p28(800.0, 6.0, |_| {}, |bus, t| {
             record_edges(&mut mil, bus.p28_outputs().map(|out| out.mil), t);
-        }) else {
-            return;
-        };
+        });
 
         assert_eq!(latched_faults(&bus), 0, "latched fault bits");
         let late: Vec<_> = mil.iter().filter(|&&(t, _)| t > 0.5).collect();
@@ -1435,15 +1417,14 @@ mod tests {
 
     /// Mid scale on the gearbox configuration input is an automatic.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_reads_the_gearbox_configuration_input() {
-        let Some(bus) = observe_stock_p28(
+        let bus = observe_stock_p28(
             800.0,
             0.5,
             |bus| bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = 650,
             |_, _| {},
-        ) else {
-            return;
-        };
+        );
 
         assert_ne!(bus.ram[0x0216] & 0x08, 0);
     }
@@ -1451,6 +1432,7 @@ mod tests {
     /// Each load the ROM monitors, unplugged in turn, latches its own fault
     /// and lights the MIL. Code 15 also stops injection.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_latches_a_fault_for_each_unplugged_load() {
         type Unplug = fn(&mut Bus);
         let cases: [(&str, Unplug, u32, bool); 4] = [
@@ -1461,13 +1443,11 @@ mod tests {
         ];
         for (what, unplug, code, keeps_injecting) in cases {
             let mut opens_at_4s = [0u64; 4];
-            let Some(bus) = observe_stock_p28(800.0, 6.5, unplug, |bus, t| {
+            let bus = observe_stock_p28(800.0, 6.5, unplug, |bus, t| {
                 if t < 4.0 {
                     opens_at_4s = bus.injector_open_count;
                 }
-            }) else {
-                return;
-            };
+            });
 
             assert_eq!(latched_faults(&bus), 1 << (code - 1), "{what}: fault bits");
             assert!(bus.mil_check_engine_light, "{what}: MIL");
@@ -1483,6 +1463,7 @@ mod tests {
     /// with a fault stored the lamp is on steadily, and with the connector
     /// grounded the ROM blinks the code out instead.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_blinks_the_mil_with_the_service_connector_grounded() {
         let mil_edges = |jumper: bool| {
             let mut edges = Vec::new();
@@ -1496,12 +1477,10 @@ mod tests {
                     }
                 },
                 |bus, t| record_edges(&mut edges, bus.p28_outputs().map(|out| out.mil), t),
-            )
-            .map(|_| edges)
+            );
+            edges
         };
-        let (Some(steady), Some(blinking)) = (mil_edges(false), mil_edges(true)) else {
-            return;
-        };
+        let (steady, blinking) = (mil_edges(false), mil_edges(true));
 
         // The IACV fault latches a little after five seconds.
         let after = |edges: &[(f64, bool)]| edges.iter().filter(|&&(t, _)| t > 5.0).count();
@@ -1513,16 +1492,15 @@ mod tests {
     /// Without the TRNS3 heartbeat the ROM lights the MIL after about five
     /// seconds without storing a fault.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_lights_the_mil_when_the_heartbeat_stops() {
         let mut mil = Vec::new();
-        let Some(bus) = observe_stock_p28(
+        let bus = observe_stock_p28(
             800.0,
             7.0,
             |bus| bus.heartbeat_present = false,
             |bus, t| record_edges(&mut mil, bus.p28_outputs().map(|out| out.mil), t),
-        ) else {
-            return;
-        };
+        );
 
         let (t, lit) = *mil.last().unwrap();
         assert!(lit && (4.0..=6.5).contains(&t), "MIL edges: {mil:?}");
@@ -1530,10 +1508,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_cuts_fuel_above_its_rev_limit() {
-        let Some((order, _, bus)) = run_stock_p28(7600.0, 10) else {
-            return;
-        };
+        let (order, _, bus) = run_stock_p28(7600.0, 10);
 
         assert!(order.is_empty(), "openings above the rev limit: {order:?}");
         assert_eq!(bus.injector_outputs(), 0x0F, "all injectors closed");
@@ -1541,14 +1518,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "launch-rom"), ignore = "needs the launch ROM: enable feature launch-rom")]
     fn finds_launch_rom_runtime_entry_after_the_hardware_checks() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../test-roms/lyonnel-2.0-launch-ok.bin"
-        );
-        let Ok(rom) = std::fs::read(path) else {
-            return;
-        };
+        let path = crate::fixtures::launch_rom_path();
+        let rom = std::fs::read(&path).expect("ROM fixture reads");
 
         assert_eq!(ReplayEngine::runtime_ready_pc(&rom), Some(0x3475));
     }
@@ -1595,16 +1568,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(feature = "launch-rom"), ignore = "needs the launch ROM: enable feature launch-rom")]
     fn launch_rom_reaches_runtime_and_drives_an_injector() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../test-roms/lyonnel-2.0-launch-ok.bin"
-        );
+        let path = crate::fixtures::launch_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("launch ROM not present at {path}; skipping");
-            return;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0);
         let mut engine = EngineState::new();

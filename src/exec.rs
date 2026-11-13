@@ -1534,13 +1534,11 @@ mod tests {
     /// reaching it means the executor agrees with the silicon on the parts of
     /// the machine the ROM itself knows how to verify.
     #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn oem_rom_passes_its_cpu_self_test() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let path = crate::fixtures::p28_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("ROM not present at {path}; skipping");
-            return;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
 
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
@@ -1589,12 +1587,9 @@ mod tests {
     #[test]
     #[ignore]
     fn boot_trace() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let path = crate::fixtures::p28_rom_path();
         let mut bus = Bus::new();
-        if bus.load_rom_file(path).is_err() {
-            eprintln!("ROM not present at {path}; skipping");
-            return;
-        }
+        bus.load_rom_file(&path).expect("ROM fixture loads");
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
 

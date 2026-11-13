@@ -17,6 +17,8 @@ mod suite;
 mod interactive;
 mod replay;
 mod datalog_server;
+#[cfg(test)]
+mod fixtures;
 
 use std::env;
 use std::process;

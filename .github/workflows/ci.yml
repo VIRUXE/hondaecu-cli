@@ -29,3 +29,77 @@ jobs:
 
       - name: Build Release Binary
         run: cargo build --release --verbose
+
+  # ROM-backed integration tests. The images are not distributable, so they
+  # come from repository secrets: each one gzip-compressed, then base64.
+  #
+  #   gzip -9c P28-230.bin | base64 -w0 | gh secret set P28_230_ROM_GZ_B64
+  #   gzip -9c lyonnel-2.0-launch-ok.bin | base64 -w0 | gh secret set LAUNCH_ROM_GZ_B64
+  #
+  # Without the secrets (forks, pull requests from forks) the job says so and
+  # runs nothing. With them, a wrong image or a missing file fails the job.
+  rom-fixtures:
+    name: ROM-backed integration tests
+    runs-on: ubuntu-latest
+    env:
+      P28_ROM_GZ_B64: ${{ secrets.P28_230_ROM_GZ_B64 }}
+      LAUNCH_ROM_GZ_B64: ${{ secrets.LAUNCH_ROM_GZ_B64 }}
+      # SHA-256 of the first 32768 bytes of each image.
+      P28_ROM_SHA256: 20b99338774dc41034229f6afd4c4a6ae8ac22339be26e5474b33ac3388c0d5a
+      LAUNCH_ROM_SHA256: f7c7aac6250af2ee4ae2a9f26b9b0fe68fd02ef668dd524f2d369c9a78482c8e
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Obtain ROM fixtures
+        id: fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=""
+          mkdir -p "$RUNNER_TEMP/roms"
+
+          fixture() { # feature, variable, file name, secret, expected digest
+            local feature="$1" variable="$2" path="$RUNNER_TEMP/roms/$3" secret="$4" want="$5"
+            if [ -z "$secret" ]; then
+              echo "::notice title=ROM fixture not configured::$3 is not configured; tests behind feature '$feature' are SKIPPED."
+              return 0
+            fi
+            printf '%s' "$secret" | base64 -d | gunzip > "$path"
+            local got
+            got="$(head -c 32768 "$path" | sha256sum | cut -d' ' -f1)"
+            if [ "$got" != "$want" ]; then
+              echo "::error title=Wrong ROM fixture::$3 has SHA-256 $got, expected $want"
+              exit 1
+            fi
+            echo "$variable=$path" >> "$GITHUB_ENV"
+            features="${features:+$features,}$feature"
+          }
+
+          fixture p28-rom HONDAECU_P28_ROM P28-230.bin "$P28_ROM_GZ_B64" "$P28_ROM_SHA256"
+          fixture launch-rom HONDAECU_LAUNCH_ROM launch.bin "$LAUNCH_ROM_GZ_B64" "$LAUNCH_ROM_SHA256"
+          echo "features=$features" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust toolchain
+        if: steps.fixtures.outputs.features != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run ROM-backed tests
+        if: steps.fixtures.outputs.features != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --features "${{ steps.fixtures.outputs.features }}" 2>&1 | tee test.log
+
+          # The tests this job exists for must have run, not been ignored.
+          ran() { grep -Eq "^test $1 \.\.\. ok$" test.log || { echo "::error::$1 did not run"; exit 1; }; }
+          case ",${{ steps.fixtures.outputs.features }}," in *,p28-rom,*)
+            ran exec::tests::oem_rom_passes_its_cpu_self_test
+            ran replay::tests::finds_p28_runtime_entry_after_the_hardware_checks
+            ran replay::tests::stock_p28_boots_with_live_sensor_inputs_through_the_mux
+          esac
+          case ",${{ steps.fixtures.outputs.features }}," in *,launch-rom,*)
+            ran replay::tests::finds_launch_rom_runtime_entry_after_the_hardware_checks
+            ran replay::tests::launch_rom_reaches_runtime_and_drives_an_injector
+          esac
