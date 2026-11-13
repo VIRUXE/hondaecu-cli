@@ -58,6 +58,14 @@ pub struct RunResult {
     /// the end of `key on`. `mil_first_lit_after_bulb_check` is then the end
     /// of `key on`.
     pub mil_never_went_out: bool,
+    /// The lamp was lit at the end of the drive: the end of the last stage
+    /// before `code read-out`. False when the run did not get that far.
+    pub mil_lit_at_end_of_drive: bool,
+    /// Each lit interval that starts after the bulb check and before `code
+    /// read-out` (or the stop), from the board log. One still open at the
+    /// start of the read-out (or at the stop) ends there. With
+    /// `mil_never_went_out` the first starts at the end of `key on`.
+    pub mil_lit_spans: Vec<(f64, f64)>,
     pub lamp: Lamp,
     pub seconds: f64,
     /// Car values the board model could not represent, with the reason
@@ -207,6 +215,14 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
     let search_to = read_out.map_or(end, |r| r.0);
     let (mil_first_lit_after_bulb_check, mil_never_went_out) =
         mil_lit_after_bulb_check(&edges, key_on_end, search_to, end);
+    let (mil_lit_spans, mil_lit_at_end_of_drive) = lamp_after_bulb_check(
+        &edges,
+        key_on_end,
+        search_to,
+        end,
+        mil_never_went_out,
+        read_out.map(|r| r.0),
+    );
     let lamp = read_out_lamp(&edges, read_out, end);
 
     RunResult {
@@ -222,6 +238,8 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
         ppi_unsupported_mode: bench.bus.ppi.unsupported_mode,
         mil_first_lit_after_bulb_check,
         mil_never_went_out,
+        mil_lit_at_end_of_drive,
+        mil_lit_spans,
         lamp,
         seconds: end,
         unmodelled,
@@ -254,6 +272,52 @@ fn mil_lit_after_bulb_check(
         .find(|w| !w[0].1 && w[1].1 && w[1].0 > bulb_check_end && w[1].0 < search_to)
         .map(|w| w[1].0);
     (lit, false)
+}
+
+/// The lamp's lit intervals after the bulb check, and whether it is lit at
+/// the end of the drive. A span starts at a dark-to-lit edge after the bulb
+/// check (as in `mil_lit_after_bulb_check`) and before `search_to` (the
+/// start of the read-out, or the end of a run that never got there), and
+/// ends at the next dark edge; one still open at `search_to` ends there. A
+/// lamp that `never_went_out` has one span from `key_on_end`, the moment
+/// `mil_lit_after_bulb_check` counts it lit. `read_out_start` is `None` when
+/// the run did not reach the read-out: the drive did not end, so the lamp
+/// is not lit at its end.
+fn lamp_after_bulb_check(
+    edges: &[(f64, bool)],
+    key_on_end: f64,
+    search_to: f64,
+    end: f64,
+    never_went_out: bool,
+    read_out_start: Option<f64>,
+) -> (Vec<(f64, f64)>, bool) {
+    let lit_at = |t: f64| edges.iter().rev().find(|e| e.0 <= t).is_some_and(|e| e.1);
+    let bulb_check_end = edges
+        .windows(2)
+        .find(|w| w[0].1 && !w[1].1 && w[1].0 <= key_on_end)
+        .map_or(key_on_end, |w| w[1].0);
+    let mut starts: Vec<f64> = Vec::new();
+    if never_went_out && key_on_end < end {
+        starts.push(key_on_end);
+    }
+    starts.extend(
+        edges
+            .windows(2)
+            .filter(|w| !w[0].1 && w[1].1 && w[1].0 > bulb_check_end && w[1].0 < search_to)
+            .map(|w| w[1].0),
+    );
+    let spans = starts
+        .into_iter()
+        .map(|from| {
+            let to = edges
+                .iter()
+                .find(|e| e.0 > from && !e.1)
+                .map_or(search_to, |e| e.0.min(search_to));
+            (from, to)
+        })
+        .collect();
+    let lit_at_end_of_drive = read_out_start.is_some_and(lit_at);
+    (spans, lit_at_end_of_drive)
 }
 
 /// Port B and C levels at `t` from `log.board`, or `None` before the ROM
@@ -441,6 +505,74 @@ mod tests {
         assert_eq!(mil_lit_after_bulb_check(&later[..2], 6.0, 70.0, 110.0), (None, false));
         // The run stopped inside key on: nothing to say yet.
         assert_eq!(mil_lit_after_bulb_check(&held, 3.0, 3.0, 3.0), (None, false));
+    }
+
+    // Stage boundaries of the stock script: key on ends at 6.0, full
+    // throttle is 26.5..40.5, lift off 40.5..62.5, the read-out starts at
+    // 70.5 and the run ends at 110.5.
+    const KEY_ON_END: f64 = 6.0;
+    const READ_OUT: f64 = 70.5;
+    const END: f64 = 110.5;
+
+    fn lamp_after(edges: &[(f64, bool)]) -> (Vec<(f64, f64)>, bool) {
+        let never = mil_lit_after_bulb_check(edges, KEY_ON_END, READ_OUT, END).1;
+        lamp_after_bulb_check(edges, KEY_ON_END, READ_OUT, END, never, Some(READ_OUT))
+    }
+
+    #[test]
+    fn four_short_pulses_after_the_bulb_check_are_four_spans_and_dark_at_the_end() {
+        // The lyonnel ROM's key-on display, then the steady read-out lamp.
+        let edges = [
+            (0.04, true),
+            (2.6, false),
+            (2.7, true),
+            (3.0, false),
+            (3.1, true),
+            (3.4, false),
+            (3.5, true),
+            (3.8, false),
+            (3.9, true),
+            (4.2, false),
+            (70.6, true),
+        ];
+        assert_eq!(
+            lamp_after(&edges),
+            (vec![(2.7, 3.0), (3.1, 3.4), (3.5, 3.8), (3.9, 4.2)], false)
+        );
+    }
+
+    #[test]
+    fn a_pulse_in_full_throttle_that_ends_before_lift_off_is_one_span() {
+        let edges = [(0.04, true), (2.1, false), (39.4, true), (40.4, false), (70.6, true)];
+        assert_eq!(lamp_after(&edges), (vec![(39.4, 40.4)], false));
+    }
+
+    #[test]
+    fn a_lamp_that_lights_in_lift_off_and_stays_lit_is_open_to_the_read_out() {
+        let edges = [(0.04, true), (2.1, false), (57.9, true)];
+        assert_eq!(lamp_after(&edges), (vec![(57.9, READ_OUT)], true));
+    }
+
+    #[test]
+    fn a_lamp_that_never_went_out_is_one_span_from_the_end_of_key_on() {
+        let edges = [(0.04, false), (0.05, true)];
+        assert_eq!(lamp_after(&edges), (vec![(KEY_ON_END, READ_OUT)], true));
+    }
+
+    #[test]
+    fn a_run_that_stops_before_the_read_out_has_no_end_of_drive() {
+        // Lit at 25 s and still lit when the run stopped at 30 s: the span
+        // ends at the stop, and the drive never ended.
+        let edges = [(0.04, true), (2.1, false), (25.0, true)];
+        assert_eq!(
+            lamp_after_bulb_check(&edges, KEY_ON_END, 30.0, 30.0, false, None),
+            (vec![(25.0, 30.0)], false)
+        );
+        // Nothing after the bulb check.
+        assert_eq!(
+            lamp_after_bulb_check(&edges[..2], KEY_ON_END, 30.0, 30.0, false, None),
+            (vec![], false)
+        );
     }
 
     #[test]

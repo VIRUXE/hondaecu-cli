@@ -171,8 +171,8 @@ could-not-tell if any line is, else ok. The rules below are those of
 | warm idle | at least 10 engine cycles; each output opened within 2 of the cycle count; ignitions at least 3 per cycle | an output opened 0 times or more than 2 away from the cycle count; too few ignitions | fewer than 10 engine cycles in the stage (`MIN_IDLE_ENGINE_CYCLES`), or the run stopped before it |
 | idle, A/C on | the clutch was engaged (the line exists only with `ac = yes`) | it never was | (not applicable) |
 | full throttle sweep | always ok when the stage ran; it reports where fuel stopped and where VTEC switched on. Only injector openings are watched: with no fuel stop it reads "fuel never stopped below 9000 rpm (a limiter that cuts only spark is not looked for)" | never | the run stopped before the stage |
-| check-engine light | never lit after the bulb check and the read-out was reached | lit at any time between the bulb check and the read-out ("lit at t s"), or never out after power-on ("never went out after power-on (still lit at 6.0 s)") | not lit, but the run stopped before the read-out |
-| codes | nothing blinked (lamp off, or steady with the connector grounded) and the check-engine light was not lit after the bulb check: "none blinked" | one or more codes blinked, each shown with its name from the catalogue in `dtc.rs`; or nothing blinked although the check-engine light was lit after the bulb check ("the ROM is showing a fault it does not blink") | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
+| check-engine light | the read-out was reached and the lamp is dark at the end of the drive: "never lit after the bulb check" when it never lit, otherwise what was seen, counted by the stage each lit span started in ("off at the end of the drive; it lit 4 times during key on and once during full throttle (a start-up flash or a shift light looks like this)") | the read-out was reached and the lamp is lit at the end of the drive: "never went out after power-on (still lit at 6.0 s)", or "on at the end of the drive (lit since t s)" with t the start of the last lit span; or the run stopped while the lamp was lit after the bulb check ("lit at t s and still lit when the run stopped at u s") | the run stopped before the read-out, with the lamp dark at the stop |
+| codes | nothing blinked (lamp off, or steady with the connector grounded) and the check-engine light was dark at the end of the drive: "none blinked" | one or more codes blinked, each shown with its name from the catalogue in `dtc.rs`; or nothing blinked although the check-engine light was lit at the end of the drive ("the ROM is showing a fault it does not blink") | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
 
 The bulb check is the lamp lit from power-on until the first lit-to-dark edge
 in `key on`. A lamp that is still lit at the end of `key on` without having
@@ -184,14 +184,30 @@ power-on and the line read "never lit": the stock P28 with `vtec = no` (code
 21 stored at 1.2 s) and on an automatic board in a manual car (code 19 at
 0.9 s) were judged do-not-burn on their codes only. Both now fail on this
 line. (The P30 image on a P28 box does not depend on the rule: its lamp goes
-out at 2.11 s and lights again at 2.21 s, "lit at 2.2 s".)
+out at 2.11 s and lights again at 2.21 s, "on at the end of the drive (lit
+since 2.2 s)".)
+
+**The end of the drive** is the end of the last stage before `code
+read-out`. The lamp's lit spans after the bulb check (`RunResult::
+mil_lit_spans`, from the board log; a span still open at the read-out ends
+there) and its state at the end of the drive (`mil_lit_at_end_of_drive`)
+come from `script::lamp_after_bulb_check`. A stored fault keeps the lamp
+lit: every fault seen so far (codes 14, 17, 19, 21, 23, 24, 41) holds it lit
+to the end of the drive, and code 20 does not light it at all but is
+blinked. A ROM's own lamp display goes dark again, so a lamp that lit and
+went out is reported but is not a problem. Until 2026-11 any lit edge after
+the bulb check was a problem ("lit at t s, after the bulb check"); that read
+the lyonnel ROM's start-up flashes and shift light as a fault ("The three
+do-not-burn results, traced"). Residual risk: a ROM that stores a fault,
+lights the lamp, and then puts it out again without blinking the code would
+now pass this line; none has been seen.
 
 A steady lamp at the read-out is not proof that nothing is stored. The stock
 P28 and P30 ROMs show it when nothing is stored (0x36C9, below), and the P30
 ROM also shows it with code 24 stored: with `214h.7` set the read-out routine
 skips the blink sequence (0x3634) and holds the lamp lit. So the `codes` line
-says only "none blinked", and when the check-engine light was lit after the
-bulb check a quiet read-out is a problem: "none blinked, although the
+says only "none blinked", and when the check-engine light is lit at the end
+of the drive a quiet read-out is a problem: "none blinked, although the
 check-engine light is on (the ROM is showing a fault it does not blink)".
 
 Lamp reading (`blink.rs`): with the connector grounded the ROM flashes each
@@ -790,18 +806,18 @@ Every 32 KB image in the workspace through `check --no-prompt`, release
 build of the commit that adds this section, paths relative to
 `hondaecu-cli`. The P30 images were run on both boxes, the others on the
 default P28 box with `stock-p28-manual`. Recorded, not acted on: none of
-these runs changed the model or the verdict rules.
+these runs changed the model or the verdict rules. The lamp rule changed afterwards ("The end of the drive" under "The lines"); the rows whose text it changed show the current text.
 
 | command | exit | verdict line | first problem or could-not-tell line |
 |---|---|---|---|
 | `check ../P28-230.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4875 rpm) |
 | `check ../../ecu/bins/p30_203.bin --ecu p30` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 8305 rpm, VTEC at 5685 rpm) |
-| `check ../../ecu/bins/p30_203.bin --ecu p28` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check` |
+| `check ../../ecu/bins/p30_203.bin --ecu p28` | 1 | `VERDICT: DO NOT BURN - check-engine light: on at the end of the drive (lit since 2.2 s)` | `check-engine light ....... on at the end of the drive (lit since 2.2 s)` |
 | `check ../../ecu/bins/p30_usdm_203.bin --ecu p30` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7505 rpm, VTEC at 5315 rpm) |
 | `check ../../ecu/bins/p30_usdm_203.bin --ecu p28` | 0 | `VERDICT: WORTH BURNING` | none (same figures as on the P30 box) |
-| `check ../../ecu/bins/p72.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check`. True for a P28 box: knock enabled, no knock board, code 24 ("The three do-not-burn results, traced", P72) |
+| `check ../../ecu/bins/p72.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: on at the end of the drive (lit since 2.2 s)` | `check-engine light ....... on at the end of the drive (lit since 2.2 s)`. True for a P28 box: knock enabled, no knock board, code 24 ("The three do-not-burn results, traced", P72) |
 | `check ../test-roms/P28-ERMbaseline.bin` | 1 | `VERDICT: DO NOT BURN - settles after power-on: resets at 5.3 s, 10.6 s, ... 105.8 s (program address 237Dh)` (20 resets, every 5.3 s) | `settles after power-on ... resets at 5.3 s, ...`. True: the ROM's own checksum fails (sum F9h, debug byte 547Eh = 00h); behind it, the P72 code's knock check, as for `p72.bin` (same section, ERM baseline) |
-| `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` | `check-engine light ....... lit at 2.7 s, after the bulb check`. **Wrong**: no fault is stored; the lamp is a key-on pulse display and a shift light that the lamp rule reads as a fault (same section, lyonnel) |
+| `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 0 | `VERDICT: WORTH BURNING` | none. `check-engine light ....... off at the end of the drive; it lit 4 times during key on and once during full throttle (a start-up flash or a shift light looks like this)`. No fault is stored; the lamp is a key-on flash display and a shift light. Until the lamp rule changed this was `DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` (same section, lyonnel). Same result with `--ecu p30` |
 | `check ../hts_D16Z6Baserom.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4755 rpm) |
 | `check ../../ecu/bins/p06.bin` | 2 | (refused) `cannot use ROM ../../ecu/bins/p06.bin: expected a 32768-byte ROM image (optionally followed by one 00 byte), got 32769 bytes` | n/a |
 | `check ../../ecu/bins/p1j.bin` | 2 | (refused) `... got 32860 bytes` | n/a |
@@ -834,14 +850,14 @@ listings, checked against `hondaecu-cli disasm`. Acceptance cases:
 `erm_baseline_resets_on_its_own_checksum`,
 `erm_baseline_with_a_good_checksum_needs_a_knock_board` (feature `erm-rom`),
 `p72_needs_a_knock_board` (`p72-rom`) and
-`lyonnel_lamp_shows_two_displays_and_no_fault` (`launch-rom`). No model or
+`lyonnel_flashes_the_lamp_and_uses_it_as_a_shift_light_and_is_worth_burning` (`launch-rom`). No model or
 emulator file changed.
 
 | image | `check` said | what the ROM does | verdict for the setup run |
 |---|---|---|---|
 | `P28-ERMbaseline.bin` | resets every 5.3 s | its own checksum fails and it resets itself; behind that, the knock check of `p72.bin` | **true** for the file as distributed, on any box |
 | `p72.bin` | lamp lit at 2.2 s, nothing blinked | knock control enabled; no knock board on a P28 box, code 24 stored | **true** for a P28 box; worth burning on a box with a knock board |
-| `lyonnel-2.0-launch-ok.bin` | lamp lit at 2.7 s, nothing blinked | stores no fault; the lamp gives four pulses after the bulb check and is a shift light above 8408 rpm | **wrong**: the lamp rule takes a display for a fault |
+| `lyonnel-2.0-launch-ok.bin` | lamp lit at 2.7 s, nothing blinked | stores no fault; the lamp gives four pulses after the bulb check and is a shift light above 8408 rpm | **was wrong**: the old lamp rule took a display for a fault. With the rule changed (lamp judged at the end of the drive) it is worth burning |
 
 ### ERM baseline: its own checksum
 
@@ -882,11 +898,22 @@ follows within a millisecond, and no other path into the reset code runs;
 then the same after every pass, 20 times in the script, 5.29 s apart. The
 path depends on nothing the board model supplies: the ROM reads its own
 code memory with `LC` and adds bytes. A real MSM66207 executing this image
-sums the same bytes and resets on the same schedule, so **"do not burn" is
-true of this file as distributed**. Nothing in the workspace says why the
-distributed file is in this state; a likely reading, not checked, is that it
-is meant to be opened in UberData, which would write a correct checksum (or
-set `547Eh`) when it saves. Burned as downloaded, it resets every 5.3 s.
+sums the same bytes and resets once per full checksum pass (5.3 s on the
+model; the period on a car depends on its main-loop rate, which was not
+measured), so **"do not burn" is true of this file as distributed**.
+
+The control for the emulator's summation: `p72.bin`, the same checksum code,
+sums to 0 and settles with no reset (`p72_needs_a_knock_board`), and
+correcting one byte of the ERM image (below) stops its resets
+(`erm_baseline_with_a_good_checksum_needs_a_knock_board`). So the emulated
+sum is the image's byte sum, and the reset follows from it alone.
+
+Nothing in the workspace says why the distributed file is in this state; a
+likely reading, not checked, is that it is meant to be opened in UberData,
+which would write a correct checksum when it saves. Setting `547Eh` instead
+is not an equivalent fix: the byte is also read at 0x3539, 0x35BA, 0x408B,
+0x4279 and 0x53A7, which were not traced. Burned as downloaded, it resets
+once per checksum pass.
 
 The `idle, A/C on` problem in the same run is a side effect: a reset fell in
 that stage. With the sum corrected (one byte of the erased fill, 0x7000, from
@@ -934,10 +961,9 @@ into `227h.6` at 0x4EFE, is 00h, so no knock check) stores **no fault**: `212h..
 are 0 at the end of every run, and the read-out shows the steady no-code
 lamp. Its lamp is driven by 0x3DE1..0x3E0B, which computes the lamp request
 into `222h.3`, and 0x5D91..0x5DC9, which copies it to P1.4 unless a shift
-light overrides it. (So `222h.3` in HTS code is the lamp request; the "HTS
-base ROM" section's reading of it, "set from power-on while the crank is
-still", describes the bulb check.) Two things in it are not in the stock
-ROM, and `check` sees both:
+light overrides it. (So `222h.3` in HTS code is the lamp request; the same
+bit is an input of the HTS launch routine, "HTS base ROM".) Two things in
+it are not in the stock ROM, and `check` sees both:
 
 - **Key-on pulses.** The bulb check is the counter `2C6h`, counted down every
   0.1 s (0x4C04), lamp lit while it is non-zero. When it reaches 0 with
@@ -953,20 +979,27 @@ ROM, and `check` sees both:
   from 39.36 s to 40.53 s, the top of `full throttle`, and on a bench at
   8600 and 8900 rpm, never at 8300.
 
-`check` takes the first lit edge after the bulb check as a fault: "lit at
-2.7 s", and then calls the quiet read-out "the ROM is showing a fault it
-does not blink". With `6020h` set to 00h the verdict becomes "lit at 39.4 s"
-(the shift light); with `6142h` also 00h it is **worth burning**, with every
-line ok. So the emulator and the board model are not at fault, and a real
-P28 box would show the same lamp; **the verdict is wrong** for this ROM: the
-lamp rule in "The lines" assumes that a lamp lit after the bulb check means
-a stored fault, and this ROM uses the lamp for other things. Nothing an
-observer outside the box sees distinguishes these displays from a fault in
-general (both are the same lamp); telling them apart would take a rule
-about the lamp's shape (pulses that end during `key on`, a lamp lit only
-above a fixed rpm), which is a design change to the lamp rule and has not
-been made. The acceptance case pins the current reading so that such a
-change shows up there.
+**What `check` said, and why it changed.** The lamp rule at the time took
+the first lit edge after the bulb check as a fault: "DO NOT BURN -
+check-engine light: lit at 2.7 s, after the bulb check", and then called the
+quiet read-out "the ROM is showing a fault it does not blink". With `6020h`
+set to 00h the verdict became "lit at 39.4 s" (the shift light); with
+`6142h` also 00h it was **worth burning**, with every line ok. So the
+emulator and the board model were not at fault, and a real P28 box would
+show the same lamp; the verdict was wrong for this ROM, because the rule
+assumed that any lamp lit after the bulb check means a stored fault.
+
+The rule now judges the lamp at the end of the drive ("The end of the
+drive" under "The lines"): a stored fault keeps the lamp lit, and both of
+these displays go dark again. Today: `check lyonnel-2.0-launch-ok.bin`
+exits 0, **WORTH BURNING**, with `check-engine light ....... off at the end
+of the drive; it lit 4 times during key on and once during full throttle (a
+start-up flash or a shift light looks like this)` and `codes ...... none
+blinked (lamp steady with the connector grounded)`; the same on the P30 box
+(`--ecu p30`, knock sensor fitted: the knock option is off, so the board is
+not consulted). The acceptance case asserts that report, the four flashes
+in `key on`, and the shift light lighting at 8408 to 8460 rpm on the sweep
+and going dark again within 0.2 s of the start of `lift off`.
 
 Two other lyonnel observations: the fuel pump prime is 2.6 s (2.1 s on the
 others), the same length as its bulb check (lamp dark at 2.60 s), not traced

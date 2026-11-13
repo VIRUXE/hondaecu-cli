@@ -102,7 +102,7 @@ fn case_6_one_wire_o2_sensor_stores_the_heater_code() {
     let (result, report, bench) = one_change("o2_sensor", "one-wire");
     // Observed: the MIL lights at 8.8 s, in `cold idle`.
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     assert_eq!(result.lamp, Lamp::Codes(vec![41]));
@@ -134,7 +134,7 @@ fn case_6_no_speed_sensor_stores_code_17() {
     // blinked. VTEC never engages without a speed signal.
     let (result, report, bench) = one_change("speed_sensor", "no");
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     let lift = stage(&result, "lift off");
@@ -266,7 +266,7 @@ fn stock_p30_without_its_knock_sensor_stores_code_23() {
     // the read-out blinks 23. Matches Honda practice.
     let (result, report, bench) = p30_check(&[("knock_sensor", "no")]);
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     assert_eq!(result.lamp, Lamp::Codes(vec![23]));
@@ -289,7 +289,7 @@ fn stock_p30_on_a_p28_box_holds_the_lamp_lit_and_blinks_nothing() {
     // problem on the codes line too.
     let (result, report, bench) = p30_check(&[("ecu", "p28")]);
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     // Observed: the bulb check ends at 2.11 s and the lamp lights again at
@@ -567,14 +567,17 @@ fn erm_baseline_with_a_good_checksum_needs_a_knock_board() {
     // left is the P72 code's knock check: option byte 5467h = FFh (the
     // wiki's P72 page: "Knock Sensor", enable=FF) sets 227h.6 (0x535E), and
     // 0x29A5..0x29D2 then wants the knock board's heartbeat on port A bit 2,
-    // as the P30 does at 0x27F7. On a P28 box it never comes: B2h.3 is set,
-    // fault bit 23 (214h.7) stored at about 2.2 s, and the read-out skips
-    // the blink (0x3529 `JBS 214h.7`, the P30's 0x3634) and holds the lamp
-    // lit. On the P30 box (P28 board plus knock board) it is worth burning.
+    // as the P30 does at 0x27F7. On a P28 box it never comes: the countdown
+    // 2FCh runs out (0 at the end), fault bit 23 (214h.7) is stored (the
+    // check bit B2h.3 on the way, and the time of storing, are shown in
+    // `p72_needs_a_knock_board`), the lamp lights again 0.1 s after the bulb
+    // check ends and stays lit, and the read-out skips the blink (0x3529
+    // `JBS 214h.7`, the P30's 0x3634) and holds the lamp lit. On the P30 box
+    // (P28 board plus knock board) it is worth burning.
     let image = erm_with_good_checksum();
     let (result, report, bench) = check_bench(Bench::new(&image), &preset("stock-p28-manual"));
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     assert!(matches!(result.settling, crate::bench::Settling::Settled { .. }), "{:?}", result.settling);
@@ -585,6 +588,7 @@ fn erm_baseline_with_a_good_checksum_needs_a_knock_board() {
     assert_eq!(result.lamp, Lamp::Steady);
     assert_eq!(stored_codes(&bench), vec![24]);
     assert_ne!(bench.bus.ram[0x227] & 0x40, 0, "227h.6");
+    assert_eq!(bench.bus.ram[0x2FC], 0, "2FCh");
 
     let (_, report, bench) = check_bench(Bench::new(&image), &preset("stock-p30"));
     assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
@@ -598,19 +602,52 @@ fn p72_rom() -> String {
 #[test]
 #[cfg_attr(not(feature = "p72-rom"), ignore = "needs the P72 ROM: enable feature p72-rom")]
 fn p72_needs_a_knock_board() {
-    // The ERM baseline is this code (1579 bytes differ, calibration and
-    // options); the P72 image sums to 0 and does not reset. Knock option
-    // 5467h = FFh, so on a P28 box: the heartbeat check at 0x29A5..0x29D2
-    // fails, fault bit 23 (214h.7) stored at about 2.2 s, no blink
-    // (0x3529), lamp held lit. The P72 (Integra GS-R) is a knock-board box;
-    // the model's P30 box carries the same board: worth burning with the
-    // sensor, code 23 without (the board's frame bit 8, as for the P30).
+    // The ERM baseline is this code (1579 bytes differ, mostly tables and
+    // options). The P72 image sums to 0 and settles with no reset: the
+    // control for the ERM finding, the same checksum code on a good sum.
+    // Knock option 5467h = FFh, so on a P28 box the heartbeat check at
+    // 0x29A5..0x29D2 fails: the countdown 2FCh runs out, B2h.3 is raised,
+    // fault bit 23 (214h.7) is stored inside the bulb check (observed 1.6 s
+    // with the engine still), the lamp lights again 0.1 s after the bulb
+    // check ends (2.2 s) and stays lit, no blink (0x3529). The P72 (Integra GS-R) is a knock-board box; the
+    // model's P30 box carries the same board: worth burning with the sensor,
+    // code 23 without (the board's frame bit 8, as for the P30).
     let rom = p72_rom();
     let image = std::fs::read(&rom).unwrap();
     assert_eq!(image[0x5467], 0xFF, "5467h");
+    assert_eq!(image[..32768].iter().fold(0u8, |s, &b| s.wrapping_add(b)), 0, "byte sum");
+
+    // B2h.3 is raised before the fault is stored, and cleared again once
+    // 214h.7 closes the check (0x29A8), so it is watched, not read at the end.
+    let mut bench = Bench::from_file(&rom).unwrap();
+    let setup = preset("stock-p28-manual");
+    crate::wiring::apply_static(&mut bench.bus, &setup);
+    crate::wiring::apply_engine(&mut bench.engine, &setup);
+    bench.engine.sync_sensors_to_bus(&mut bench.bus);
+    let (mut raised, mut stored) = (None, None);
+    assert!(bench.run_observed(3.0, |b| {
+        // The first 50 ms are skipped: the boot's RAM test writes 55h and
+        // AAh over every byte.
+        if b.seconds() < 0.05 {
+            return;
+        }
+        let r = &b.bus.ram;
+        if raised.is_none() && r[0xB2] & 0x08 != 0 {
+            raised = Some(b.seconds());
+        }
+        if stored.is_none() && r[0x214] & 0x80 != 0 {
+            stored = Some(b.seconds());
+        }
+    }));
+    let (raised, stored) = (raised.expect("B2h.3 never set"), stored.expect("214h.7 never set"));
+    // Observed: B2h.3 at 0.16 s, 214h.7 at 1.62 s.
+    assert!(raised < stored && stored < 2.0, "B2h.3 at {raised} s, 214h.7 at {stored} s");
+
     let (result, report, bench) = check_rom_bench(&rom, &preset("stock-p28-manual"));
+    assert!(matches!(result.settling, crate::bench::Settling::Settled { .. }), "{:?}", result.settling);
+    assert_eq!(bench.bus.ram[0x2FC], 0, "2FCh");
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: on at the end of the drive (lit since")),
         "{report:#?}"
     );
     let lit = result.mil_first_lit_after_bulb_check.unwrap();
@@ -641,44 +678,58 @@ fn launch_rom() -> String {
 
 #[test]
 #[cfg_attr(not(feature = "launch-rom"), ignore = "needs the launch-control ROM: enable feature launch-rom")]
-fn lyonnel_lamp_shows_two_displays_and_no_fault() {
+fn lyonnel_flashes_the_lamp_and_uses_it_as_a_shift_light_and_is_worth_burning() {
     // The lyonnel ROM stores no fault. Its lamp (HTS code: 0x3DE1..0x3E0B
     // computes the lamp request into 222h.3, 0x5D91..0x5DC9 drives P1.4)
     // does two things the stock ROM does not:
     // - after the bulb check (2C6h counted down every 0.1 s, 0x4C04), while
     //   217h.5 is set (engine not running), 0x5A71..0x5A8B reloads 2C6h
     //   with 4 as many times as option byte 6020h says (04h here, 00h in the
-    //   HTS base ROM): four 0.3 s pulses from 2.7 s;
+    //   HTS base ROM): four 0.3 s flashes from 2.7 s;
     // - with option byte 6142h non-zero (FFh) and 6143h zero the lamp is a
     //   shift light: lit while the period C4h is below the word at 6144h
-    //   (00DFh, 8408 rpm), observed lit from 39.4 s, the top of `full
-    //   throttle`.
-    // `check` reads the first as a fault ("lit at 2.7 s"), which is wrong for
-    // this ROM: the verdict below is the tool's current reading, pinned so
-    // that a change to the lamp rule shows up here (docs/CHECK.md).
+    //   (00DFh, 1875000 / 223 = 8408 rpm).
+    // Both go dark again, so the lamp rule does not read them as a fault
+    // (docs/CHECK.md, "The lines").
     let rom = launch_rom();
     let image = std::fs::read(&rom).unwrap();
     assert_eq!((image[0x6020], image[0x6142], image[0x6143]), (0x04, 0xFF, 0x00));
+    assert_eq!((image[0x6144], image[0x6145]), (0xDF, 0x00));
     let (result, report, bench) = check_rom_bench(&rom, &preset("stock-p28-manual"));
-    assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at 2.7 s")),
-        "{report:#?}"
-    );
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
     assert_eq!(stored_codes(&bench), Vec::<u8>::new());
     assert_eq!(result.lamp, Lamp::Steady);
+    let lamp = report.runs.lines.iter().find(|l| l.label == "check-engine light").unwrap();
+    assert_eq!(lamp.state, State::Ok);
+    assert_eq!(
+        lamp.text,
+        "off at the end of the drive; it lit 4 times during key on and once during full throttle \
+         (a start-up flash or a shift light looks like this)"
+    );
+    assert!(!result.mil_lit_at_end_of_drive);
+
+    // The four flashes, inside `key on` after the bulb check.
     let edges = bench.mil_edges();
     let key_on = stage(&result, "key on");
     let lit_in_key_on = edges.iter().filter(|e| e.1 && e.0 > 1.0 && e.0 < key_on.to).count();
     assert_eq!(lit_in_key_on, 4, "{edges:?}");
+    // The shift light: lit when the sweep (linear in time, 2000 to 9000 rpm)
+    // passes 8408 rpm, give or take one 10 ms input step and a pass of the
+    // ROM, and dark again once the revs fall at the start of `lift off`.
     let full = stage(&result, "full throttle");
-    let shift = edges.iter().find(|e| e.1 && e.0 > key_on.to).unwrap().0;
-    assert!(shift > full.from + 12.0 && shift < full.to, "{edges:?}");
+    let (on, _) = *edges.iter().find(|e| e.1 && e.0 > key_on.to).unwrap();
+    let rpm_at = |t: f64| 2000.0 + 7000.0 * (t - full.from) / (full.to - full.from);
+    assert!((8408.0..8460.0).contains(&rpm_at(on)), "lit at {on} s, {} rpm", rpm_at(on));
+    let (off, _) = *edges.iter().find(|e| !e.1 && e.0 > on).unwrap();
+    assert!(off > full.to && off < full.to + 0.2, "dark again at {off} s; {edges:?}");
+    assert_eq!(result.mil_lit_spans.len(), 5, "{:?}", result.mil_lit_spans);
 
-    // Both options off: nothing else lights the lamp, worth burning.
+    // Both options off: the lamp never lights after the bulb check.
     let mut patched = image[..32768].to_vec();
     patched[0x6020] = 0x00;
     patched[0x6142] = 0x00;
     let (result, report, _) = check_bench(Bench::new(&patched), &preset("stock-p28-manual"));
     assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
     assert_eq!(result.mil_first_lit_after_bulb_check, None);
+    assert!(result.mil_lit_spans.is_empty());
 }

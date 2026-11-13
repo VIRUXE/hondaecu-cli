@@ -256,15 +256,66 @@ fn sweep(result: &RunResult) -> Line {
     })
 }
 
+/// A stored fault keeps the lamp lit; a ROM's own display (a start-up
+/// flash, a shift light) goes dark again. So the lamp is a problem only when
+/// it is lit at the end of the drive, or lit when a run that never got there
+/// stopped (docs/CHECK.md, "The lines").
 fn check_engine_light(result: &RunResult) -> Line {
-    match result.mil_first_lit_after_bulb_check {
-        Some(t) if result.mil_never_went_out => problem(
-            "check-engine light",
-            format!("never went out after power-on (still lit at {t:.1} s)"),
+    const L: &str = "check-engine light";
+    let last = result.mil_lit_spans.last();
+    // A run that stopped inside the read-out still had a whole drive.
+    if !reached_read_out(result) && !result.mil_lit_at_end_of_drive {
+        // A span still open at the stop ends at the end of the run.
+        return match last {
+            Some(&(from, to)) if to >= result.seconds => problem(
+                L,
+                format!("lit at {from:.1} s and still lit when the run stopped at {:.1} s", result.seconds),
+            ),
+            _ => could_not_tell(L, "the run stopped before this"),
+        };
+    }
+    if result.mil_lit_at_end_of_drive {
+        if result.mil_never_went_out {
+            let t = result.mil_first_lit_after_bulb_check.or(last.map(|s| s.0)).unwrap_or(0.0);
+            return problem(L, format!("never went out after power-on (still lit at {t:.1} s)"));
+        }
+        return match last {
+            Some(&(from, _)) => problem(L, format!("on at the end of the drive (lit since {from:.1} s)")),
+            None => problem(L, "on at the end of the drive"),
+        };
+    }
+    if result.mil_lit_spans.is_empty() {
+        return ok(L, "never lit after the bulb check");
+    }
+    ok(
+        L,
+        format!(
+            "off at the end of the drive; it lit {} (a start-up flash or a shift light looks like this)",
+            lit_where(result)
         ),
-        Some(t) => problem("check-engine light", format!("lit at {t:.1} s, after the bulb check")),
-        None if !reached_read_out(result) => could_not_tell("check-engine light", "the run stopped before this"),
-        None => ok("check-engine light", "never lit after the bulb check"),
+    )
+}
+
+/// "4 times during key on and once during full throttle": the lit spans
+/// counted by the stage they start in, in stage order; a span outside every
+/// stage is named by its time.
+fn lit_where(result: &RunResult) -> String {
+    let times = |n: usize| if n == 1 { "once".to_string() } else { format!("{n} times") };
+    let mut groups: Vec<(String, usize)> = Vec::new();
+    for &(from, _) in &result.mil_lit_spans {
+        let place = match result.stages.iter().find(|s| from >= s.from && from < s.to) {
+            Some(s) => format!("during {}", s.name),
+            None => format!("at {from:.1} s"),
+        };
+        match groups.iter_mut().find(|g| g.0 == place) {
+            Some(g) => g.1 += 1,
+            None => groups.push((place, 1)),
+        }
+    }
+    let parts: Vec<String> = groups.iter().map(|(place, n)| format!("{} {place}", times(*n))).collect();
+    match parts.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => parts.join(""),
     }
 }
 
@@ -278,9 +329,9 @@ fn codes(result: &RunResult) -> Line {
         }
         // A steady lamp is the stock ROMs' no-code display, but the P30 ROM
         // shows it too with code 24 stored (214h.7 skips the blink sequence
-        // at 0x3634). With the lamp lit while running, "none blinked" does
-        // not mean "no fault".
-        Lamp::Off | Lamp::Steady if result.mil_first_lit_after_bulb_check.is_some() => problem(
+        // at 0x3634). With the lamp lit at the end of the drive, "none
+        // blinked" does not mean "no fault".
+        Lamp::Off | Lamp::Steady if result.mil_lit_at_end_of_drive => problem(
             "codes",
             "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)",
         ),
@@ -387,6 +438,8 @@ mod tests {
             ppi_unsupported_mode: false,
             mil_first_lit_after_bulb_check: None,
             mil_never_went_out: false,
+            mil_lit_at_end_of_drive: false,
+            mil_lit_spans: Vec::new(),
             lamp: Lamp::Off,
             seconds: 90.0,
             unmodelled: Vec::new(),
@@ -652,12 +705,20 @@ mod tests {
         assert_eq!(r.exit_status(), 0);
     }
 
+    /// `clean()` with the lamp relit at `from` and lit to the end of the drive.
+    fn lit_to_the_end(from: f64) -> RunResult {
+        let mut c = clean();
+        c.mil_first_lit_after_bulb_check = Some(from);
+        c.mil_lit_spans = vec![(from, 50.0)];
+        c.mil_lit_at_end_of_drive = true;
+        c
+    }
+
     #[test]
-    fn a_lamp_lit_while_running_makes_a_quiet_read_out_a_problem() {
+    fn a_lamp_lit_at_the_end_of_the_drive_makes_a_quiet_read_out_a_problem() {
         for lamp in [Lamp::Off, Lamp::Steady] {
-            let mut c = clean();
+            let mut c = lit_to_the_end(2.2);
             c.lamp = lamp.clone();
-            c.mil_first_lit_after_bulb_check = Some(2.2);
             let r = judge(&c, &setup());
             let l = find(&r, "codes");
             assert_eq!(l.state, State::Problem, "{lamp:?}");
@@ -672,8 +733,7 @@ mod tests {
 
     #[test]
     fn a_lamp_that_never_went_out_says_so() {
-        let mut c = clean();
-        c.mil_first_lit_after_bulb_check = Some(6.0);
+        let mut c = lit_to_the_end(6.0);
         c.mil_never_went_out = true;
         let r = judge(&c, &setup());
         let l = find(&r, "check-engine light");
@@ -682,13 +742,53 @@ mod tests {
     }
 
     #[test]
-    fn check_engine_light() {
-        let mut c = clean();
-        c.mil_first_lit_after_bulb_check = Some(12.5);
+    fn a_lamp_on_at_the_end_of_the_drive_is_a_problem_named_by_its_last_span() {
+        let mut c = lit_to_the_end(12.5);
+        c.mil_first_lit_after_bulb_check = Some(3.0);
+        c.mil_lit_spans = vec![(3.0, 3.4), (12.5, 50.0)];
         let r = judge(&c, &setup());
-        assert_eq!(find(&r, "check-engine light").state, State::Problem);
-        assert!(find(&r, "check-engine light").text.contains("12.5"));
+        let l = find(&r, "check-engine light");
+        assert_eq!(l.state, State::Problem);
+        assert_eq!(l.text, "on at the end of the drive (lit since 12.5 s)");
+        assert!(matches!(&r.verdict, Verdict::DoNotBurn(why) if why == "check-engine light: on at the end of the drive (lit since 12.5 s)"));
         assert_eq!(r.exit_status(), 1);
+    }
+
+    #[test]
+    fn a_lamp_that_went_dark_again_is_ok_and_says_what_was_seen() {
+        // The lyonnel ROM: four flashes after the bulb check, a shift light
+        // at the top of full throttle, dark at the end of the drive and the
+        // steady no-code lamp at the read-out.
+        let mut c = clean();
+        c.mil_first_lit_after_bulb_check = Some(2.7);
+        c.mil_lit_spans = vec![(2.7, 3.0), (3.1, 3.4), (3.5, 3.8), (3.9, 4.2), (39.4, 40.0)];
+        c.lamp = Lamp::Steady;
+        let r = judge(&c, &setup());
+        let l = find(&r, "check-engine light");
+        assert_eq!(l.state, State::Ok);
+        assert_eq!(
+            l.text,
+            "off at the end of the drive; it lit 4 times during key on and once during full throttle \
+             (a start-up flash or a shift light looks like this)"
+        );
+        assert_eq!(find(&r, "codes").state, State::Ok);
+        assert_eq!(r.verdict, Verdict::WorthBurning);
+
+        // A span outside every stage is named by its time.
+        let mut c = clean();
+        c.mil_lit_spans = vec![(8.0, 8.5)];
+        let l = find(&judge(&c, &setup()), "check-engine light").clone();
+        assert_eq!(
+            l.text,
+            "off at the end of the drive; it lit once at 8.0 s (a start-up flash or a shift light looks like this)"
+        );
+    }
+
+    #[test]
+    fn a_lamp_never_relit_is_ok() {
+        let r = judge(&clean(), &setup());
+        let l = find(&r, "check-engine light");
+        assert_eq!((l.state, l.text.as_str()), (State::Ok, "never lit after the bulb check"));
     }
 
     #[test]
@@ -786,10 +886,28 @@ mod tests {
         }
         assert_ne!(r.exit_status(), 0);
 
+        // Lit at 12 s and still lit when the run stopped at 20 s.
+        c.seconds = 20.0;
         c.mil_first_lit_after_bulb_check = Some(12.0);
+        c.mil_lit_spans = vec![(12.0, 20.0)];
         let r = judge(&c, &setup());
-        assert_eq!(find(&r, "check-engine light").state, State::Problem);
+        let l = find(&r, "check-engine light");
+        assert_eq!(l.state, State::Problem);
+        assert_eq!(l.text, "lit at 12.0 s and still lit when the run stopped at 20.0 s");
         assert_eq!(r.exit_status(), 1);
+
+        // Lit and dark again before the stop: nothing to judge.
+        c.mil_lit_spans = vec![(12.0, 13.0)];
+        let r = judge(&c, &setup());
+        let l = find(&r, "check-engine light");
+        assert_eq!((l.state, l.text.as_str()), (State::CouldNotTell, "the run stopped before this"));
+
+        // Stopped inside the read-out with the lamp lit at the end of the
+        // drive: the drive was whole, and the lamp was on at its end.
+        let mut c = lit_to_the_end(12.5);
+        c.stop = Some((60.0, Stop::Unimplemented { pc: 0x1234, mnemonic: "DAA" }));
+        let l = find(&judge(&c, &setup()), "check-engine light").clone();
+        assert_eq!((l.state, l.text.as_str()), (State::Problem, "on at the end of the drive (lit since 12.5 s)"));
     }
 
     #[test]
