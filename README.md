@@ -160,10 +160,10 @@ with `HONDAECU_HTS_ROM`, `HONDAECU_ERM_ROM` and `HONDAECU_P72_ROM` defaulting to
 `../../ecu/bins/p72.bin`. Without a feature its tests are listed as
 `ignored, needs the ... ROM`, never as passed. With it, a variable that is
 unset or does not name a file fails every test that needs the image, so a
-green run means the ROM was there. `.cargo/config.toml` defaults the three
-variables to `../P28-230.bin`, `../../ecu/bins/p30_203.bin` and
-`../test-roms/lyonnel-2.0-launch-ok.bin`, relative to the checkout; set them
-to use other paths:
+green run means the ROM was there. `.cargo/config.toml` defaults all six
+variables, the first three to `../P28-230.bin`, `../../ecu/bins/p30_203.bin`
+and `../test-roms/lyonnel-2.0-launch-ok.bin` and the local-only three as
+above, relative to the checkout; set them to use other paths:
 
 ```bash
 HONDAECU_P28_ROM=/roms/P28-230.bin cargo test --release --features p28-rom

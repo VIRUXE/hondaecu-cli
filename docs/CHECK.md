@@ -716,11 +716,24 @@ is the launch flag, written at 0x5BBB..0x5BFB:
   (00h in lyonnel, which installs its own launch routine at 0x5F14 instead,
   called from 0x1879);
 - with `615Dh` non-zero (FFh here) it is set whenever the routine runs with
-  `222h.3` set. `222h.3` (written at 0x3E0B) is set from power-on and stays
-  set while the crank is still (observed: still set after 1 s at 0 rpm); it
-  cleared 0.09 s after power-on with the engine turning at 3000 rpm, and was
-  clear after 2 s of idle. The flag was not set during 1 s at 0 rpm, and was
-  set on the first pass after the engine began to turn (0.0065 s later);
+  `222h.3` set, with no rpm or throttle gate (0x5BC9). `222h.3` is written
+  at 0x3E0B by 0x3DE2..0x3E0B (skipped while `40Eh.4` and `221h.6` are both
+  set). It is set in three cases:
+  - `218h.6` set (0x3DEC). 0x4532..0x4541 computes it, reached from 0x451E
+    only when `218h.7` is set (a stored fault in `212h..215h`, or `2EDh.3` /
+    `2EEh.4`), as `(212h & FFFDh) != 0 || (214h & 14F5h) != 0`; 0x4520
+    clears it otherwise. So some stored faults set it.
+  - `230h.6` set (0x3DF9). It is written at 0x2978 from a countdown at
+    `397h` that `TRNSIT.3` reloads (0x2967..0x297B); what `TRNSIT.3`
+    detects was not traced.
+  - otherwise, `2C6h` non-zero (0x3E06).
+
+  Observed, on a fault-free run: `222h.3` set from power-on and still set
+  after 1 s at 0 rpm; cleared 0.09 s after power-on with the engine turning
+  at 3000 rpm; clear after 2 s of idle. The flag was not set during 1 s at
+  0 rpm, and was set on the first pass after the engine began to turn
+  (0.0065 s later). Which of the three cases held `222h.3` there was not
+  traced;
 - otherwise it is cleared when the period is above 3A9h (below 2001 rpm) or
   throttle `D1h` is below 60h (D1h read 56h at 30 % and 9Eh at 65 % TPS on
   the model), kept if already set, and else set only when `BBh` reaches
@@ -729,15 +742,22 @@ is the launch flag, written at 0x5BBB..0x5BFB:
   are FFh in this ROM, so that second way in is closed on an unboosted
   engine: the tuning tool's values to fill in.
 
-So in this base ROM launch control arms only as the engine first turns, and
-holds the engine at 2000 rpm, by fuel and spark cut, until the revs fall
-below 2000 or the throttle closes below the D1h gate. Observed on the bench
+So in this base ROM, on a fault-free run, launch control was seen to arm
+only as the engine first turns; it then holds the engine at 2000 rpm, by
+fuel and spark cut, until the revs fall below 2000 or the throttle closes
+below the D1h gate. That this is the only way in is not established.
+Whenever `222h.3` is set the flag is set at any rpm, and `222h.3` also
+follows `218h.6` (a stored fault in the bitmaps above) and `230h.6` (whose
+trigger was not traced). A running car with such a fault would then likely
+meet the 2001 rpm fuel-and-spark limit while driving. That was not run.
+Observed on the bench
 (acceptance `hts_base_rom_launch_control_cuts_fuel_above_2000_rpm_from_a_standstill`,
 90 kPa, 88 C, standing still, from power-on unless said):
 
 | bench | openings per output in 2 s | `409h.3` |
 |---|---|---|
 | 3000 rpm, 65 % TPS | 1 (the flag is first set 0.06 s after power-on) | set |
+| 2100 rpm, 65 % TPS | 1 | set |
 | 1900 rpm, 65 % TPS | at least 25 | clear |
 | 3000 rpm, 30 % TPS | at least 40 | clear |
 | 2 s at 800 rpm, then 3000 rpm, 65 % TPS | at least 40 | clear |
@@ -757,7 +777,10 @@ script cranks at 300 rpm and idles before it goes above 2000 rpm, so
 launch control never meets a stage, and nothing in the report claims it
 was checked. `check` does not exercise launch control at all (a standing
 start with the throttle held above 2000 rpm is not in the script); that is
-one of the things the `NOT JUDGED` line covers only in general. Anyone
+one of the things the `NOT JUDGED` line covers only in general. Nor would
+it reveal a launch limit triggered by a stored fault (`218h.6`, above): the
+script stores none on this ROM, so a car with a fault in those bitmaps could
+meet a 2001 rpm limit that `check` never shows. Anyone
 using `trace` on a ROM with launch control should idle the engine first,
 or read a dead output at speed as possibly the launch limiter.
 
@@ -794,10 +817,12 @@ explains yet:
   traced in the next section.
 - **`lyonnel-2.0-launch-ok.bin`**'s `full throttle sweep` line read "fuel
   never stopped below 9000 rpm": true, but its limiter does not cut fuel
-  (`6126h` = FFh, see "HTS base ROM"), and a `trace` snapshot at 7500 rpm
-  found the spark-cut flag `E6h.0` set. A tuner could have read that line as
-  "no rev limiter". The line now says that a spark-only limiter is not
-  looked for.
+  (`6126h` = FFh, see "HTS base ROM"). A `trace` snapshot found the
+  spark-cut flag `E6h.0` set at 7500 rpm but clear at 8500 rpm, and lyonnel
+  replaces the call at 0x1879 with its own routine at 0x5F14, so where (or
+  whether) its limiter cuts spark is not traced. A tuner could have read
+  that line as "no rev limiter", which is not established either way. The
+  line now says that a spark-only limiter is not looked for.
 
 ## The three do-not-burn results, traced
 
