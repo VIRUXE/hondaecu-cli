@@ -117,7 +117,7 @@ fn staged(
 
 fn executes(result: &RunResult) -> Line {
     match &result.stop {
-        None => ok("executes", "every instruction it reached is a defined one"),
+        None => ok("executes", "ran without hitting an invalid instruction"),
         Some((t, s @ Stop::UndefinedOpcode { .. })) => problem("executes", format!("{s} at {t:.1} s")),
         Some((t, s @ Stop::Unimplemented { .. })) => {
             could_not_tell("executes", format!("{s} at {t:.1} s: the emulator cannot go on"))
@@ -128,15 +128,16 @@ fn executes(result: &RunResult) -> Line {
 fn settles(result: &RunResult) -> Line {
     const L: &str = "settles after power-on";
     match &result.settling {
-        Settling::Settled { boot_breaks } => ok(L, format!("settled after {boot_breaks} boot BRKs")),
+        Settling::Settled { boot_breaks: 0 } => ok(L, "settled, no resets"),
+        Settling::Settled { boot_breaks } => ok(L, format!("settled after {boot_breaks} resets during start-up")),
         Settling::NeverSettles { breaks, last_pc } => {
-            problem(L, format!("never settles: {breaks} BRKs in the boot window (last PC {last_pc:X}h)"))
+            problem(L, format!("never settles: {breaks} resets in the first second (last at program address {last_pc:X}h)"))
         }
         Settling::ResetsLater { times, pc } => {
             let at: Vec<String> = times.iter().map(|t| format!("{t:.1} s")).collect();
-            problem(L, format!("resets at {} (PC {pc:X}h)", at.join(", ")))
+            problem(L, format!("resets at {} (program address {pc:X}h)", at.join(", ")))
         }
-        Settling::Hung { since } => problem(L, format!("hung: watchdog not served since {since:.1} s")),
+        Settling::Hung { since } => problem(L, format!("stopped responding at {since:.1} s (watchdog not serviced)")),
         Settling::Stopped => could_not_tell(L, "the run stopped before this could be judged"),
     }
 }
@@ -182,11 +183,22 @@ fn cranking(result: &RunResult) -> Line {
             .map(|(i, _)| (i + 1).to_string())
             .collect();
         if silent.is_empty() {
-            ok("cranking", format!("every output opened ({:?} times)", s.injector_opens))
+            ok("cranking", format!("all four injectors fired ({} openings)", counts(&s.injector_opens)))
         } else {
-            problem("cranking", format!("output {} never opened while cranking", silent.join(", ")))
+            problem("cranking", format!("{} never fired while cranking", injectors(&silent)))
         }
     })
+}
+
+/// "4, 4, 4, 4".
+fn counts(opens: &[u64]) -> String {
+    opens.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// "injector 2" or "injectors 2, 3" from 1-based numbers.
+fn injectors(numbers: &[String]) -> String {
+    let word = if numbers.len() == 1 { "injector" } else { "injectors" };
+    format!("{word} {}", numbers.join(", "))
 }
 
 fn warm_idle(result: &RunResult) -> Line {
@@ -199,19 +211,19 @@ fn warm_idle(result: &RunResult) -> Line {
             if *n == 0 || (*n as f64 - cycles).abs() > OPENINGS_TOLERANCE {
                 return problem(
                     "warm idle",
-                    format!("output {} opened {n} times in {cycles:.1} engine cycles", i + 1),
+                    format!("injector {} opened {n} times in {cycles:.1} engine cycles", i + 1),
                 );
             }
         }
         if s.ignitions == 0 || (s.ignitions as f64) < IGNITIONS_PER_CYCLE * cycles {
             return problem(
                 "warm idle",
-                format!("{} ignitions in {cycles:.1} engine cycles (wanted at least {IGNITIONS_PER_CYCLE} per cycle)", s.ignitions),
+                format!("{} sparks in {cycles:.1} engine cycles (wanted at least {IGNITIONS_PER_CYCLE} per cycle)", s.ignitions),
             );
         }
         ok(
             "warm idle",
-            format!("outputs opened {:?} times and {} ignitions in {cycles:.1} engine cycles", s.injector_opens, s.ignitions),
+            format!("injectors opened {} times and {} sparks in {cycles:.1} engine cycles", counts(&s.injector_opens), s.ignitions),
         )
     })
 }
@@ -424,7 +436,7 @@ mod tests {
         let mut c = clean();
         c.settling = Settling::ResetsLater { times: vec![5.3, 10.6], pc: 0x21DF };
         let r = judge(&c, &setup());
-        assert_eq!(find(&r, "settles after power-on").text, "resets at 5.3 s, 10.6 s (PC 21DFh)");
+        assert_eq!(find(&r, "settles after power-on").text, "resets at 5.3 s, 10.6 s (program address 21DFh)");
 
         let mut c = clean();
         c.settling = Settling::Stopped;
@@ -468,13 +480,33 @@ mod tests {
     }
 
     #[test]
+    fn the_ok_texts_are_plain_words_with_every_number() {
+        let r = judge(&clean(), &setup());
+        assert_eq!(find(&r, "executes").text, "ran without hitting an invalid instruction");
+        assert_eq!(find(&r, "settles after power-on").text, "settled, no resets");
+        assert_eq!(find(&r, "cranking").text, "all four injectors fired (3, 3, 3, 3 openings)");
+        assert_eq!(
+            find(&r, "warm idle").text,
+            "injectors opened 53, 54, 53, 52 times and 213 sparks in 53.3 engine cycles"
+        );
+        let mut c = clean();
+        c.settling = Settling::Settled { boot_breaks: 2 };
+        assert_eq!(find(&judge(&c, &setup()), "settles after power-on").text, "settled after 2 resets during start-up");
+        c.settling = Settling::Hung { since: 3.2 };
+        assert_eq!(
+            find(&judge(&c, &setup()), "settles after power-on").text,
+            "stopped responding at 3.2 s (watchdog not serviced)"
+        );
+    }
+
+    #[test]
     fn cranking_needs_every_output() {
         let mut c = clean();
         stage_mut(&mut c, "cranking").injector_opens = [3, 0, 3, 3];
         let r = judge(&c, &setup());
         let l = find(&r, "cranking");
         assert_eq!(l.state, State::Problem);
-        assert!(l.text.contains("output 2"));
+        assert!(l.text.contains("injector 2"));
         assert_eq!(r.runs.state, State::Problem);
         assert_eq!(r.exit_status(), 1);
     }
@@ -485,7 +517,7 @@ mod tests {
         stage_mut(&mut c, "warm idle").injector_opens = [53, 0, 53, 53];
         let r = judge(&c, &setup());
         assert_eq!(find(&r, "warm idle").state, State::Problem);
-        assert_eq!(find(&r, "warm idle").text, "output 2 opened 0 times in 53.3 engine cycles");
+        assert_eq!(find(&r, "warm idle").text, "injector 2 opened 0 times in 53.3 engine cycles");
 
         let mut c = clean();
         stage_mut(&mut c, "warm idle").ignitions = 100;
@@ -628,7 +660,7 @@ mod tests {
         stage_mut(&mut c, "warm idle").injector_opens = [53, 53, 0, 53];
         let r = judge(&c, &setup());
         assert_eq!(find(&r, "warm idle").state, State::Problem);
-        assert!(find(&r, "warm idle").text.contains("output 3 opened 0 times"));
+        assert!(find(&r, "warm idle").text.contains("injector 3 opened 0 times"));
 
         let mut c = clean();
         stage_mut(&mut c, "warm idle").ignitions = 0;

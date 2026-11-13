@@ -165,7 +165,8 @@ fn prompt(
 
 /// Ask for every key not yet given. EOF or an empty line takes the default; an
 /// invalid answer is asked again, at most three times, then takes the default.
-pub fn ask(setup: &mut Setup, input: &mut impl BufRead, out: &mut impl Write) {
+/// Returns true when the input ended before every question was answered.
+pub fn ask(setup: &mut Setup, input: &mut impl BufRead, out: &mut impl Write) -> bool {
     // The board's gearbox is asked last, after the car's, and defaults to it.
     let order = KEYS.iter().copied().filter(|k| *k != "board_gearbox").chain(["board_gearbox"]);
     for key in order {
@@ -185,19 +186,22 @@ pub fn ask(setup: &mut Setup, input: &mut impl BufRead, out: &mut impl Write) {
             Reply::Default => {}
             Reply::EndOfInput => {
                 let _ = writeln!(out, "Input ended; the remaining answers take their defaults.");
-                return;
+                return true;
             }
         }
     }
+    false
 }
 
-fn ask_preset(args: &Args, input: &mut impl BufRead, out: &mut impl Write) -> Option<&'static str> {
+/// The preset chosen, if any, and whether the input ended.
+fn ask_preset(args: &Args, input: &mut impl BufRead, out: &mut impl Write) -> (Option<&'static str>, bool) {
     let default = default_preset(args);
     let text = format!("Start from which car? ({})", PRESETS.join("/"));
     let check = |v: &str| Setup::preset(v).map(|_| ());
     match prompt(input, out, &text, default, &check) {
-        Reply::Answer(v) => PRESETS.iter().copied().find(|p| p.eq_ignore_ascii_case(&v)),
-        _ => None,
+        Reply::Answer(v) => (PRESETS.iter().copied().find(|p| p.eq_ignore_ascii_case(&v)), false),
+        Reply::Default => (None, false),
+        Reply::EndOfInput => (None, true),
     }
 }
 
@@ -236,7 +240,14 @@ pub fn run(
     };
     let interactive = interactive && !args.no_prompt;
 
-    let chosen = if interactive && args.car.is_none() { ask_preset(&args, input, out) } else { None };
+    let mut ended = false;
+    let chosen = if interactive && args.car.is_none() {
+        let (chosen, eof) = ask_preset(&args, input, out);
+        ended = eof;
+        chosen
+    } else {
+        None
+    };
     let mut setup = match build_setup(&args, chosen) {
         Ok(s) => s,
         Err(e) => {
@@ -245,16 +256,22 @@ pub fn run(
         }
     };
     let mut status = 0;
-    if interactive {
-        ask(&mut setup, input, out);
+    if interactive && ended {
+        let _ = writeln!(out, "Input ended; the remaining answers take their defaults.");
+    } else if interactive {
+        ended = ask(&mut setup, input, out);
     }
     settle_board_gearbox(&mut setup);
     if interactive {
         let check = |_: &str| Ok(());
-        if let Reply::Answer(path) =
+        // Nothing more is offered once the input has ended.
+        let offer = if ended {
+            Reply::EndOfInput
+        } else {
             prompt(input, out, "Save these answers to a file? [path, or Enter to skip]", "", &check)
-        {
-            match std::fs::write(&path, setup.to_file_text()) {
+        };
+        if let Reply::Answer(path) = offer {
+            match std::fs::write(&path, setup.to_saved_file_text()) {
                 Ok(()) => {
                     let _ = writeln!(out, "Saved to {path}. Use it again with --car {path}");
                 }
@@ -350,6 +367,12 @@ mod tests {
         let (status, out, _) = drive(&["check", &path], "stock-p28-manual\nno\n", true);
         assert_eq!(status, 1);
         assert!(out.contains("Input ended") && out.contains("defaulted:") && out.contains("VERDICT: DO NOT BURN"));
+        assert!(!out.contains("Save these answers"), "no save offer once the input has ended: {out}");
+        assert!(out.contains("Input ended; the remaining answers take their defaults.\nRunning"), "{out}");
+
+        // Ended right at the preset question: same.
+        let (_, out, _) = drive(&["check", &path], "", true);
+        assert!(!out.contains("Save these answers") && out.contains("Input ended"), "{out}");
     }
 
     #[test]
@@ -546,17 +569,20 @@ mod tests {
         let mut back = Setup::preset("stock-p28-manual").unwrap();
         back.apply_file(&std::fs::read_to_string(&saved).unwrap()).unwrap();
         assert_eq!(back.gearbox, Gearbox::Automatic);
-        assert_eq!(back.board_gearbox, Gearbox::Automatic);
+        // board_gearbox is a comment in the file; a run settles it from the gearbox.
+        assert_eq!(back.value_text("board_gearbox"), "manual");
         assert!(!back.vtec && back.knock_sensor && back.egr);
         assert!(!back.eld && !back.speed_sensor && !back.ac && !back.power_steering_switch);
         assert_eq!(back.o2_sensor, O2Sensor::OneWire);
         assert_eq!(back.iacv, Iacv::Ohms(9.5));
-        assert!(back.defaulted().is_empty(), "a saved file states every key");
+        assert_eq!(back.defaulted(), ["board_gearbox"], "a saved file keeps defaulted keys as comments");
 
         // The file runs the same check without questions.
         let (status2, out2, _) = drive(&["check", &rom, "--car", &saved, "--no-prompt"], "", false);
         assert_eq!(status2, 1);
-        assert!(out2.contains("VERDICT: DO NOT BURN") && !out2.contains("defaulted:"));
+        assert!(out2.contains("VERDICT: DO NOT BURN"));
+        let header = |s: &str| s.lines().find(|l| l.starts_with("ROM:")).unwrap().split_once("(defaulted").unwrap().1.to_string();
+        assert_eq!(header(&out2), header(&out), "the re-run reports the same defaulted list");
     }
 
     #[test]

@@ -128,6 +128,23 @@ impl Setup {
         out
     }
 
+    /// A car file for saving: each given key as `key = value`, each defaulted key
+    /// as a comment, so a re-run reports the same defaulted list.
+    pub fn to_saved_file_text(&self) -> String {
+        let mut out = format!("# car file, started from preset {}
+", self.preset);
+        for key in KEYS {
+            if self.given.contains(key) {
+                out.push_str(&format!("{key} = {}
+", self.value_text(key)));
+            } else {
+                out.push_str(&format!("# {key} = {}   (preset default)
+", self.value_text(key)));
+            }
+        }
+        out
+    }
+
     /// KEYS not supplied by the user, in KEYS order.
     pub fn defaulted(&self) -> Vec<&'static str> {
         KEYS.iter().copied().filter(|k| !self.given.contains(k)).collect()
@@ -182,6 +199,20 @@ mod tests {
         a.set("iacv", "none").unwrap();
         let mut b = Setup::preset("stock-p28-manual").unwrap();
         b.apply_file(&a.to_file_text()).unwrap();
+        for key in KEYS { assert_eq!(a.value_text(key), b.value_text(key), "{key}"); }
+    }
+    #[test] fn a_saved_file_keeps_defaulted_keys_as_comments() {
+        let mut a = Setup::preset("stock-p30").unwrap();
+        a.set("iacv", "none").unwrap();
+        a.set("vtec", "no").unwrap();
+        let text = a.to_saved_file_text();
+        assert!(text.starts_with("# car file, started from preset stock-p30"));
+        assert!(text.contains("iacv = none") && text.contains("vtec = no"));
+        assert!(text.contains("# ecu = p30   (preset default)"));
+        let mut b = Setup::preset("stock-p30").unwrap();
+        b.apply_file(&text).unwrap();
+        assert_eq!(b.defaulted(), a.defaulted());
+        assert_eq!(b.given, a.given);
         for key in KEYS { assert_eq!(a.value_text(key), b.value_text(key), "{key}"); }
     }
     #[test] fn an_unknown_preset_is_an_error_naming_the_known_ones() {

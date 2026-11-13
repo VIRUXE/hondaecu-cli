@@ -211,7 +211,9 @@ The car comes from, in order: a preset (`stock-p28-manual`,
 (`--car <file>`), `--set key=value` and the shorthands `--ecu` and
 `--board-gearbox`, then questions when run in a terminal (skip them with
 `--no-prompt`). Anything you did not give is listed as `defaulted` in the
-report. The questions can save your answers to a file for `--car`.
+report. The questions can save your answers to a file for `--car`; keys you
+took the default for are saved as comments, so they stay defaulted when it is
+used again.
 
 There are three verdicts:
 

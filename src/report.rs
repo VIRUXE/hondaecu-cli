@@ -47,7 +47,9 @@ pub fn text(report: &Report, setup: &Setup, rom_name: &str) -> String {
         setup.preset
     );
     let defaulted = setup.defaulted();
-    if !defaulted.is_empty() {
+    if defaulted.len() == KEYS.len() {
+        out.push_str(" (defaulted: all values, from the preset)");
+    } else if !defaulted.is_empty() {
         out.push_str(&format!(" (defaulted: {})", defaulted.join(", ")));
     }
     out.push_str("\n\n");
@@ -208,6 +210,13 @@ mod tests {
         };
         let header = text(&report(), &none_defaulted, "r.bin").lines().next().unwrap().to_string();
         assert!(!header.contains("defaulted"), "{header}");
+    }
+
+    #[test]
+    fn all_values_defaulted_is_one_phrase() {
+        let header = text(&report(), &setup(), "r.bin").lines().next().unwrap().to_string();
+        assert!(header.ends_with("(defaulted: all values, from the preset)"), "{header}");
+        assert!(!header.contains("egr"), "{header}");
     }
 
     #[test]

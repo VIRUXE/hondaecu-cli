@@ -62,18 +62,24 @@ earlier one:
    `Knock sensor fitted? (yes/no) [no]: `. Enter takes the default; so does
    the end of input. A wrong answer is asked again, three times in all, then
    takes the default. Afterwards it offers `Save these answers to a file?
-   [path, or Enter to skip]`; the file reads back with `--car`.
+   [path, or Enter to skip]` (not offered once the input has ended). The
+   file keeps every key you answered as `key = value` and every key you took
+   the default for as a comment, `# key = value   (preset default)`, so
+   running it again with `--car` reports the same defaulted list.
 
 A value the user did not supply is **defaulted**, and the report heading lists
-those keys: `(defaulted: ...)`. Taking a default does not make a value given.
+those keys: `(defaulted: ...)`, or `(defaulted: all values, from the preset)`
+when none was given. Taking a default does not make a value given.
 `board_gearbox`, when not given, is set to the car's `gearbox` after all inputs
 are applied; it stays in the defaulted list.
 
-**Which values change the run today.** Only `board_gearbox` (the gearbox strap
-input), `vtec` (solenoid and pressure switch connected), `o2_sensor` (heater
-connected only when `heated`), `iacv` (`stock` or `none`; an ohms value is
-recorded but changes nothing) and `ac` (leaves out the A/C stage and the A/C
-switch) reach the board model (`wiring.rs`, `script.rs`). `ecu`, `gearbox`,
+**Which values change the run today** (`wiring.rs`, `script.rs`). `board_gearbox`
+sets the gearbox strap input. `gearbox`, when `automatic`, drives the A/T
+position inputs (park/neutral out of gear, D4 in gear; see "The automatic
+gearbox" below). `vtec` `no` unplugs the solenoid and opens the pressure
+switch. `o2_sensor` plugs the heater only when `heated`. `iacv` `stock` or
+`none` plugs or unplugs the valve; an ohms value is recorded but changes
+nothing. `ac` `no` leaves out the A/C stage and the A/C switch. `ecu`,
 `knock_sensor`, `egr`, `eld`, `speed_sensor` and `power_steering_switch` are
 recorded in the report and the saved file but are not wired to anything yet,
 so changing them does not change the verdict.
@@ -178,8 +184,9 @@ Numbers chosen here rather than measured on a car or taken from a document:
   2 of the engine cycles, 3 ignitions per cycle, 10 engine cycles minimum for
   `warm idle` (`verdict.rs`). Fuel stop: an opening followed by two engine
   cycles with none (`script.rs`).
-- **Static wiring.** Only the five values listed under "Which values change the
-  run today" are applied to the board; the rest of a car is not modelled.
+- **Static wiring.** Only the values listed under "Which values change the run
+  today" are applied to the board, and the A/T position inputs are a model of
+  the switch, not a measured one; the rest of a car is not modelled.
 - **Coolant at 88 C.** Every stage but `cold idle`; see the VTEC finding below
   for why the curve matters.
 
