@@ -1145,7 +1145,9 @@ mod tests {
     #[test]
     #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_external_bus_is_fully_decoded() {
-        let (_, _, bus) = run_stock_p28(800.0, 4);
+        // Lock-up solenoids fitted, as on an automatic car: with none, the
+        // lock-up B feedback (4700h bit 3) reads "powered" and 211h.3 is 1.
+        let (_, _, bus) = run_stock_p28_with(800.0, 4, |bus| bus.lockup_solenoids_connected = true);
 
         assert_eq!(
             (bus.external_unmapped_reads, bus.external_unmapped_writes),
@@ -1174,6 +1176,8 @@ mod tests {
     fn stock_p28_samples_both_digital_input_bytes() {
         let (_, _, bus) = run_stock_p28_with(800.0, 4, |bus| {
             bus.p28_input_port = 0xC4;
+            // Lock-up solenoids fitted, so bit 3 follows the driver (off).
+            bus.lockup_solenoids_connected = true;
             // Bit 5 is driven by the VTEC feedback model: high, driver off.
             bus.ppi.pins[crate::ppi82c55::PORT_A as usize] = 0xA1;
         });

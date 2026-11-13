@@ -601,7 +601,8 @@ impl Bus {
             mil_check_engine_light: false,
             vtec_solenoid_active: false,
             vtec_solenoid_connected: true,
-            lockup_solenoids_connected: true,
+            // The stock car is a manual: no lock-up solenoids.
+            lockup_solenoids_connected: false,
             egr_fitted: false,
             ac_clutch_active: false,
             radiator_fan_active: false,
@@ -809,16 +810,19 @@ impl Bus {
     /// drivers, and the ROM checks each against its command, so leaving them
     /// static faults as soon as the ROM switches the load:
     ///
-    /// * bit 5, VTEC solenoid line: low while port C bit 0 powers a connected
-    ///   solenoid (checked at 0x3D0C..0x3D21);
+    /// * bit 5, VTEC solenoid line: low while port C bit 0 drives the
+    ///   solenoid, and always low with no solenoid connected (checked at
+    ///   0x3D0C..0x3D21);
     /// * bit 6, O2 heater: high while port C bit 2 (active low) powers a
     ///   connected heater (0x2094..0x20CB wants 0 with the heater off and 1
     ///   with it on);
-    /// * bit 4, lock-up solenoid driver: the inverse of port B bit 4
-    ///   (0x3C98..0x3CA5, automatic gearbox only).
+    /// * bit 4, lock-up solenoid A: low while port B bit 4 drives it, and
+    ///   always low with no solenoids connected (0x3C98..0x3CA5, automatic
+    ///   gearbox only).
     ///
-    /// The polarities of bits 4 and 6 are read from those checks, not from
-    /// the board.
+    /// The polarity of bit 6 is read from its check, not from the board. The
+    /// polarities of bits 4 and 5, first read from their checks, agree with
+    /// the board:
     ///
     /// Bomarc sheet 8 shows how bits 4 and 5 (and `4700h` bit 3) sense their
     /// loads: each driver's output pin (U15 lock-up A, U14 VTEC, U16 lock-up
@@ -1565,6 +1569,8 @@ mod tests {
     #[test]
     fn external_addresses_do_not_alias_on_chip_ram() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         bus.p28_input_port = 0x5A;
         // The old 4 KiB mask folded 4700h onto 0700h and 5480h onto 0480h.
         bus.write_data_u8(0x047F, 0x11);
@@ -1583,6 +1589,8 @@ mod tests {
     #[test]
     fn p28_input_port_is_read_only_and_resets_to_nothing_asserted() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
 
         assert_eq!(bus.read_data_u8(P28_INPUT_PORT) ^ P28_INPUT_ACTIVE_LOW, 0);
         bus.write_data_u8(P28_INPUT_PORT, 0xFF);
@@ -1593,6 +1601,8 @@ mod tests {
     #[test]
     fn p28_ppi_answers_wherever_a14_is_low() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         // Bits 4..6 are driver feedback: with these outputs the lock-up and
         // VTEC drivers are off (1, 1) and so is the O2 heater (0).
         bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xB3;
@@ -1675,6 +1685,8 @@ mod tests {
     #[test]
     fn without_lockup_solenoids_both_feedbacks_read_powered() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         bus.write_data_u8(0x3F00, 0x90);
         bus.write_data_u8(SFR_P4IO, 0x0D);
         bus.write_data_u8(SFR_P4SF, 0xF4);
@@ -1704,6 +1716,8 @@ mod tests {
     #[test]
     fn vtec_pressure_switch_reads_open_while_the_solenoid_is_powered() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         bus.write_data_u8(0x3F00, 0x90);
         let rest = bus.p28_input_port;
 
@@ -1768,6 +1782,8 @@ mod tests {
     #[test]
     fn driver_feedback_bits_follow_the_82c55_outputs() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         bus.write_data_u8(0x3F00, 0x90);
         let port_a = |bus: &mut Bus| bus.read_data_u8(0x0F00);
 
@@ -1788,6 +1804,8 @@ mod tests {
     #[test]
     fn lockup_b_feedback_reads_low_while_p4_3_is_driven_high() {
         let mut bus = Bus::new();
+        // An automatic car: the lock-up solenoids are on their drivers.
+        bus.lockup_solenoids_connected = true;
         let bit3 = |bus: &mut Bus| bus.read_data_u8(P28_INPUT_PORT) & P28_IN_LOCKUP_B_FEEDBACK;
         // P4.3 an input (reset): the feedback rests high.
         assert_ne!(bit3(&mut bus), 0);

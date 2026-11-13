@@ -38,10 +38,11 @@ pub const STEADY_MIN_SECONDS: f64 = 10.0;
 /// `edges`: (seconds, lit) changes; `from`..`to` is the read window, opened when
 /// the service connector was grounded. Codes are distinct, ascending.
 ///
-/// A run counts only if its first blink rises inside the window and the dark
-/// stretch before that rise lasted at least `CODE_GAP_MIN_SECONDS`. That
-/// stretch may have begun before `from` (dark since power-on counts as long
-/// enough). So a lamp lit at `from` (a bulb check, or a blink cut by `from`)
+/// A run counts only if its first blink rises inside the window and the lamp
+/// was dark for at least `CODE_GAP_MIN_SECONDS` before that rise, counted
+/// from `from` at the earliest: dark before the window says nothing about
+/// where the ROM's blink sequence is, so a first blink less than a gap after
+/// `from` is never the start of a run. So a lamp lit at `from` (a bulb check, or a blink cut by `from`)
 /// is never a blink, and blinks after a too-short dark stretch are skipped
 /// until a qualifying gap appears. At `to`, a lit stretch still open is never
 /// counted, and a run counts only if the dark stretch after it has lasted a
@@ -73,7 +74,13 @@ pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
     for &&(t, now_lit) in &inside {
         if now_lit && !lit {
             saw_rise = true;
-            let qualifies = t - dark_since >= CODE_GAP_MIN_SECONDS;
+            // The gap is measured from `from` at the earliest: before the
+            // connector was grounded the lamp was not showing codes, so a
+            // dark lamp then says nothing about where the ROM's blink
+            // sequence is. Observed: with ELD unplugged the stock ROM lit the
+            // lamp 0.09 s after grounding for 0.61 s, a cut long blink, which
+            // dark-since-power-on would have read as a code 1.
+            let qualifies = t - dark_since.max(from) >= CODE_GAP_MIN_SECONDS;
             if counting && qualifies && tens + ones > 0 {
                 codes.push(tens * 10 + ones);
             }
@@ -263,6 +270,27 @@ mod tests {
         let (edges, end) = lamp_showing(&[(1, 4), (1, 4)]);
         let from = edges[3].0 + SHORT / 2.0;
         assert_eq!(decode(&edges, from, end), Lamp::Codes(vec![14]));
+    }
+
+    #[test]
+    fn a_cut_blink_just_after_the_window_opens_is_not_a_code() {
+        // Observed with ELD unplugged: dark since the bulb check, grounded at
+        // 70.506 s, lit 70.596..71.209 (a cut long blink), then code 20.
+        let edges = [
+            (0.0, true),
+            (2.0, false),
+            (70.596, true),
+            (71.209, false),
+            (74.796, true),
+            (76.121, false),
+            (76.534, true),
+            (77.865, false),
+            (81.453, true),
+            (82.784, false),
+            (83.190, true),
+            (84.521, false),
+        ];
+        assert_eq!(decode(&edges, 70.506, 88.0), Lamp::Codes(vec![20]));
     }
 
     #[test]

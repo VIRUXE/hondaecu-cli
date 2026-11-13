@@ -366,6 +366,7 @@ mod tests {
             let mut s = stock();
             s.set("board_gearbox", board).unwrap();
             let mut bus = Bus::new();
+            bus.lockup_solenoids_connected = true;
             assert_eq!(apply_static(&mut bus, &s), Vec::new(), "{board}");
             assert!(!bus.lockup_solenoids_connected, "{board}");
         }
@@ -381,7 +382,6 @@ mod tests {
             s.set("gearbox", "automatic").unwrap();
             s.set("board_gearbox", board).unwrap();
             let mut bus = Bus::new();
-            bus.lockup_solenoids_connected = false;
             assert_eq!(apply_static(&mut bus, &s), Vec::new(), "{board}");
             assert!(bus.lockup_solenoids_connected, "{board}");
         }
@@ -430,6 +430,8 @@ mod tests {
         assert_eq!(bus.iacv_connected, fresh.iacv_connected);
         assert_eq!(bus.o2_heater_connected, fresh.o2_heater_connected);
         assert_eq!(bus.vtec_solenoid_connected, fresh.vtec_solenoid_connected);
+        assert_eq!(bus.lockup_solenoids_connected, fresh.lockup_solenoids_connected);
+        assert_eq!(bus.egr_fitted, fresh.egr_fitted);
         assert_eq!(bus.vtec_pressure_switch_closed(), fresh.vtec_pressure_switch_closed());
     }
 }

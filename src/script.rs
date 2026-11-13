@@ -148,10 +148,21 @@ pub fn stages(setup: &Setup) -> Vec<Stage> {
             speed_kmh: 100.0,
             ..still("full throttle", 14.0, 0.0, 98.0, in_gear.clone())
         },
+        // Long enough for the stock ROM's speed-sensor check to store its
+        // code. 0x3C74..0x3C8B sets 99h.4 (code 17) only while no VSS period
+        // has been measured (231h.3), deceleration fuel cut is on (21Ch.4,
+        // copied from 11Ch.4 set at 0x18BD), the rpm code 236h is below B0h
+        // (0x3C7B; about 3300 rpm, observed) and the battery C3h is above 44h.
+        // Its debounce count is 2Dh (6C68h index 13, loaded into 2C1h at
+        // 0x49D3), observed to step down once every 0.10 s, and a hold at
+        // 3000 rpm stored code 17 5.1 s after entering the window. Fuel cut
+        // was observed on throughout 6000..1000 rpm at closed throttle. A
+        // linear 6000 -> 1500 rpm ramp spends 1750 / 4500 of its length
+        // below 3250 rpm: 8.6 s of 22 s, about 1.7 times the 5.1 s.
         Stage {
             rpm: (6000.0, 1500.0),
             speed_kmh: 80.0,
-            ..still("lift off", 4.0, 0.0, 25.0, in_gear)
+            ..still("lift off", 22.0, 0.0, 25.0, in_gear)
         },
         still("warm idle again", 8.0, 800.0, 35.0, none),
         still(

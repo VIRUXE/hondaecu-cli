@@ -3,7 +3,7 @@
 `hondaecu-cli check <rom.bin>` answers one question for a tuner: is this ROM
 image worth burning to a chip and putting in the car? It runs the ROM on the
 modelled P28 box, wired to the car described in a "car" setup, drives the box
-through one fixed script of conditions (about 92 s of ECU time, roughly 20 s of
+through one fixed script of conditions (about 110 s of ECU time, roughly 25 s of
 wall time), looks only at what an observer outside the box could see, and
 prints one of three verdicts. `test` is an alias that runs exactly the same.
 
@@ -136,7 +136,7 @@ and scripting ends.
 | idle, A/C on (only when `ac = yes`) | 4.0 | 800 | 40 | 0 | 0 | A/C |
 | cruise | 4.0 | 2500 | 45 | 15 | 60 | in gear |
 | full throttle | 14.0 | 2000 to 9000 | 98 | 100 | 100 | in gear |
-| lift off | 4.0 | 6000 to 1500 | 25 | 0 | 80 | in gear |
+| lift off | 22.0 | 6000 to 1500 | 25 | 0 | 80 | in gear |
 | warm idle again | 8.0 | 800 | 35 | 0 | 0 | none |
 | code read-out | 40.0 | 800 | 35 | 0 | 0 | service connector grounded |
 
@@ -221,7 +221,7 @@ Numbers chosen here rather than measured on a car or taken from a document:
 ## Findings while building the script
 
 Measured on the stock P28-230 ROM, `stock-p28-manual` setup, one run of
-`script::run` (92.5 s of ECU time).
+`script::run` (92.5 s of ECU time, with the 4 s `lift off` the script had then; the times below are from that run).
 
 ### With no fault stored, the grounded connector holds the MIL lit
 
@@ -452,9 +452,11 @@ its output down; its data sheet was not found.
 `Bus::lockup_solenoids_connected` (set to `gearbox = automatic` by
 `wiring::apply_static`) applies this; `Bus::vtec_solenoid_connected` now
 follows the same circuit, so an unplugged VTEC solenoid reads "powered" too
-(it read "not powered" before). Observed with `vtec = no` after the change:
-do not burn, code 21 (a development run, not an acceptance case; the run
-before the change was not recorded).
+(it read "not powered" before). Observed with `vtec = no` (acceptance case
+`case_6_no_vtec_stores_code_21`): do not burn, code 21 blinked and stored.
+The feedback, port A bit 5, reads "powered" while the ROM keeps PC0 low, and
+0x3D0C..0x3D21 (behind the VTEC option flag `216h.4`, 0x3D06) sets `9Ah.0`;
+VTEC never switches on. The run before the change was not recorded.
 
 ## Where the preset values come from
 
@@ -495,10 +497,10 @@ original Bomarc scan (37820-P28-A51), not the restored images.
 | `o2_sensor = one-wire` | heater unplugged (`o2_heater_connected = false`); sensor input as before | nothing new | do not burn: MIL lit at 8.8 s, code **41** blinked; the stored fault bit is 27 (`9Bh.2` from 0x2094..0x20CB, table 6C99h index 27 = 1Bh), so the ROM blinks stored bit 27 as 41 | matches (code 41, O2 heater) |
 | `o2_sensor = none` | heater unplugged as above; the sensor input is **unmodelled** | sheet 3: D16 goes through R4 (10 kohm) to the + input of U22a (NJM2904), a voltage follower into U6/X0 through 1 kohm; only C2 and C3 sit on that node, nothing biases it. With no sensor the level is set by the op-amp's input bias current, which no source here gives | code 41 from the heater (it outranks the car line) | n/a |
 | `iacv = <ohms>` | **unmodelled** | no stock coil resistance was found: not in the eCtune source, not on the pgmfi wiki's IACV page. See below | n/a | n/a |
-| `egr = no` (stock) | AI3 = the U6/X7 battery level | sheet 3: D17 reaches AI3 (MCU pin 57, P5.3) through 100 kohm in RM2 and is tied by another RM2 resistor to RM2 pin 6, the battery divider node that feeds U6/X7 through R51 (10 kohm). With D17 open, AI3 sits at that node | unchanged from before: worth burning (case 1). The stock ROM reads AI3 at 0x29A1 into `2F5h` and `r0`; its lift check is closed (`226h.7` is the carry of `CMPB off(236h), #0` at 0x29AA, always 0, so 0x2A02 skips it and `99h.0` stays clear), and the only other readers compare against FFh (0x0A4A, 0x2129) or copy the byte out (0x5501) | matches (no EGR code on a car without EGR) |
+| `egr = no` (stock) | AI3 = the U6/X7 battery level | sheet 3: D17 reaches AI3 (MCU pin 57, P5.3) through 100 kohm in RM2 and is tied by another RM2 resistor to RM2 pin 6, the battery divider node that feeds U6/X7 through R51 (10 kohm). With D17 open, AI3 sits at that node | unchanged from before: worth burning (case 1). See "What the stock ROM does with AI3" below | matches (no EGR code on a car without EGR) |
 | `egr = yes` | **unmodelled** | the lift sensor's resting voltage has no source here | n/a | n/a |
 | `eld = no` | U5/X0 = 930 counts, 4.55 V (E8h) | sheet 3: D18 has R136 (1 kohm, 1 %) to +5 V and R138 (10 kohm) to ground, then R137 (100 kohm) into U5/X0; open, 5 x 10/11 = 4.55 V. Caveat: R136's value is typed on the scan, not hand-lettered like the rest, so someone added it later; with R136 above about 1.6 kohm the open level would be inside the ROM's range and no code would be stored | do not burn: code **20**, no MIL. 0x3CE2..0x3D02 (gated by option flag `219h.1`, `217h.6`, `214h.3` clear and battery `C3h` at least 69h) sets `99h.7` when `3C6h` is above DCh or below 0Eh | matches (code 20, ELD) |
-| `speed_sensor = no` | no INT0 pulses (`EngineState::speed_sensor_fitted`) | nothing new | **worth burning**, no code; VTEC never switches on. See below | disagrees: practice expects code 17 |
+| `speed_sensor = no` | no INT0 pulses (`EngineState::speed_sensor_fitted`) | nothing new | do not burn: MIL lit 17.4 s into `lift off` (about 2440 rpm), code **17** stored and blinked; VTEC never switches on. See below | matches (code 17) |
 | `power_steering_switch = no` | **unmodelled** | sheet 3 and the wiki disagree; see below | n/a | n/a |
 | `knock_sensor = no` on a P28 | no difference | option byte 6002h = 00h clears `227h.6` (0x556E) and 0x3D44 then skips the knock check (`9Ah.2`, code 23); nothing on the board model follows the key | no difference | matches |
 | `knock_sensor = yes` | **unmodelled** on any box | the knock board is not modelled | n/a | n/a |
@@ -506,22 +508,55 @@ original Bomarc scan (37820-P28-A51), not the restored images.
 | `gearbox = manual` on an automatic board | no lock-up solenoids | sheet 8, see "Gearbox mismatch" | do not burn, code **19** | matches |
 | `gearbox = automatic` on a manual board | position inputs only | the ROM never reads the lock-up feedbacks with `216h.3` clear | worth burning | matches the ROM; practice says nothing specific |
 
-### `speed_sensor = no`: code 17 needs a longer deceleration than the script has
+### `speed_sensor = no` and the length of `lift off`
 
 The VSS check at 0x3C74..0x3C8B sets `99h.4` only when battery `C3h` is
-above 44h, `236h` is below B0h, code 17 is not yet stored (`214h.0`), no VSS
-period has been measured (`231h.3`, set at 0x24CF and 0x27E6, cleared when a
-period is measured at 0x278D) and deceleration fuel cut is active (`21Ch.4`,
-a copy of `11Ch.4`, written at 0x18BD). Its debounce count is 45 passes
-(6C68h index 13 = 2Dh). In the script, `lift off` (4 s, 6000 to 1500 rpm,
-TPS 0) is the only stage with fuel cut, and a development probe saw `99h.4`
-set for about 1.75 s of it: not enough. Holding the same conditions at
-3000 rpm, code 17 was stored after 5.1 s. So the model gives the ROM what a
-car without a speed sensor gives it, and the stock ROM would store code 17 on
-a longer deceleration; this script's 4 s `lift off` does not reach it, and
-the verdict is worth burning. The script was not lengthened: that changes
-every run and is outside this change. The model was not changed either.
+above 44h, the rpm code `236h` is below B0h (0x3C7B; observed about
+3300 rpm: set at 3250, never at 3500), code 17 is not yet stored (`214h.0`),
+no VSS period has been measured (`231h.3`, set at 0x24CF and 0x27E6, cleared
+when a period is measured at 0x278D) and deceleration fuel cut is active
+(`21Ch.4`, a copy of `11Ch.4`, written at 0x18BD). The debounce counter
+`2C1h` is loaded with 2Dh (6C68h index 13) at 0x49D3 and was observed to
+step down once every 0.10 s; holding the conditions at 3000 rpm stored code
+17 5.1 s after entering them. Fuel cut was observed on at closed throttle
+and 25 kPa throughout a falling sweep from 6000 to 1000 rpm.
 
+With the old 4 s `lift off` the window lasted about 1.75 s and nothing was
+stored, so a car without a speed sensor came out worth burning only because
+the stage was short. `lift off` is now 22 s, still a linear 6000 to 1500 rpm
+ramp at 25 kPa, closed throttle, 80 km/h, in gear: it spends 1750/4500 of its
+length below 3250 rpm, 8.6 s, about 1.7 times the 5.1 s. Observed with no
+speed sensor: the MIL lights 17.4 s into the stage (about 2440 rpm), code 17
+is stored and blinked (6C99h index 13 = 11h); do not burn. With a speed
+sensor the stock runs (cases 1, 2, the script test) store nothing in the
+longer stage.
+
+The longer run moved the read-out later, and one run (`eld = no`) then
+opened the read window 0.09 s before the lamp lit for 0.61 s: a long blink
+of the ROM's free-running sequence cut by the grounding. `blink::decode`
+read that as a code 1, because it counted the lamp's dark stretch before
+the window as the gap that starts a run. It now counts that gap from the
+window's start at the earliest, so the first run read is one that follows a
+full gap inside the window (`blink.rs`).
+
+### What the stock ROM does with AI3
+
+0x29A1 reads AI3 (`ADCR3H`) into `2F5h` and `r0`. `2F5h` is only copied out
+(0x5501). The lift check is closed: `226h.7` is the carry of
+`CMPB off(236h), #0` at 0x29AA, always 0, so `99h.0` stays clear and 0x2A02
+skips the lift check. 0x29E0..0x29E6 stores `2F2h = r0 - 2F4h`, clamped at
+0, where the base `2F4h` is written at 0x29DE from 0x29D3..0x29DD: that code
+would take `r0`, but only past two compares of `r0` with the immediate FFh
+(`CMPB A, r0` at 0x29D5 and 0x29DA), which never let it through, so the
+stock ROM stores FFh there (as at 0x2500 and 0x5543) and `2F2h` is 0
+whatever AI3 reads. `2F2h` is read at 0x0A4A (compared with FFh, automatic
+only), 0x2129 (compared with FFh) and 0x2A36 (`LB A, 2F2h; SUBB A, 2F3h`),
+which runs whenever the EGR target `2F3h` (written at 0x21B7) is not zero
+and feeds the EGR control path from 0x2A2A on. In the stock ROM that path
+therefore sees 0, not AI3, so moving the stock car's AI3 level cannot reach
+it. A ROM with other values in those immediates would learn the base from
+AI3 and its EGR control would then depend on the AI3 level; the verdict
+does not observe the EGR solenoid output either way.
 ### `power_steering_switch`: the schematic and the wiki disagree
 
 Sheet 3: connector B13 is pulled up by R101 (22 kohm) and drives, through

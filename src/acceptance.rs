@@ -122,34 +122,68 @@ fn case_6_no_eld_stores_code_20() {
 
 #[test]
 #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
-fn case_6_no_speed_sensor_stores_nothing_in_this_script() {
-    // The VSS check at 0x3C74..0x3C8B sets 99h.4 only with no VSS period
-    // (231h.3) during deceleration fuel cut (21Ch.4, a copy of 11Ch.4 from
-    // 0x18BD), and code 17 needs 45 passes of the debounce (6C68h index
-    // 13 = 2Dh). A development probe saw 99h.4 set for about 1.75 s of the
-    // 4 s `lift off` stage, and code 17 stored after 5.1 s of fuel cut held
-    // at 3000 rpm. So in this script nothing is stored (docs/CHECK.md).
-    // VTEC never engages without a speed signal.
+fn case_6_no_speed_sensor_stores_code_17() {
+    // The VSS check at 0x3C74..0x3C8B sets 99h.4 while no VSS period has
+    // been measured (231h.3) during deceleration fuel cut (21Ch.4) below
+    // rpm code B0h (0x3C7B); `lift off` is long enough for its debounce
+    // (script::stages). Observed: the MIL lights 17.4 s into `lift off`
+    // (about 2440 rpm), code 17 is stored (6C99h index 13 = 11h) and
+    // blinked. VTEC never engages without a speed signal.
     let (result, report, bench) = one_change("speed_sensor", "no");
-    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
-    assert_eq!(result.lamp, Lamp::Steady);
-    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    let lift = stage(&result, "lift off");
+    let lit = result.mil_first_lit_after_bulb_check.unwrap();
+    assert!(lit > lift.from && lit < lift.to, "{lit} not in lift off");
+    assert_eq!(result.lamp, Lamp::Codes(vec![17]));
+    assert_eq!(report.codes, vec![17]);
+    assert_eq!(stored_codes(&bench), vec![17]);
     assert_eq!(stage(&result, "full throttle").vtec_on_rpm, None);
 }
 
 #[test]
 #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn case_6_no_vtec_stores_code_21() {
+    // With the solenoid unplugged its feedback, port A bit 5, reads
+    // "powered" (Bomarc sheet 8) while the ROM keeps PC0 low. The check at
+    // 0x3D0C..0x3D21 (behind the VTEC option flag 216h.4, 0x3D06) compares
+    // the two and sets 9Ah.0, code 21 (6C99h index 17 = 15h).
+    let (result, report, bench) = one_change("vtec", "no");
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("codes: 21")), "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Codes(vec![21]));
+    assert_eq!(report.codes, vec![21]);
+    assert_eq!(stored_codes(&bench), vec![21]);
+    assert_eq!(stage(&result, "full throttle").vtec_on_rpm, None);
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn case_6_no_o2_sensor_stores_the_heater_code_and_is_unmodelled() {
+    // The sensor's level is unmodelled, the missing heater is not: as with
+    // a one-wire sensor, 0x2094..0x20CB sets 9Bh.2, stored bit 27, blinked
+    // as 41. That problem outranks the car line's could-not-tell.
+    let (result, report, bench) = one_change("o2_sensor", "none");
+    let car = &report.runs.lines[0];
+    assert_eq!((car.label, car.state), ("car as described", State::CouldNotTell));
+    assert!(car.text.contains("o2_sensor = none"), "{}", car.text);
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Codes(vec![41]));
+    assert_eq!(stored_codes(&bench), vec![27]);
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
 fn case_6_values_the_model_cannot_represent_could_not_tell() {
-    // One run for every value wiring::apply_static reports as unmodelled,
-    // so as not to spend a 20 s run on each. None of them changes the board
-    // except `o2_sensor = none`, whose missing heater is modelled: as with a
-    // one-wire sensor the ROM stores the heater fault and blinks 41, and that
-    // problem outranks the car line's could-not-tell.
+    // One run for the unmodelled values that leave the board as it is, so
+    // as not to spend a 20 s run on each (`o2_sensor = none` has its own
+    // run: its missing heater adds a code). The run is the stock one, so
+    // the only line that is not ok is the car line: COULD NOT TELL, exit 3.
     let mut setup = preset("stock-p28-manual");
     let values = [
         ("ecu", "p30"),
         ("knock_sensor", "yes"),
-        ("o2_sensor", "none"),
         ("iacv", "9.5"),
         ("egr", "yes"),
         ("power_steering_switch", "no"),
@@ -164,13 +198,14 @@ fn case_6_values_the_model_cannot_represent_could_not_tell() {
     for (key, value) in values {
         assert!(car.text.contains(&format!("{key} = {value}")), "{key}: {}", car.text);
     }
-    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
-    for l in &report.runs.lines[1..] {
-        let want = if matches!(l.label, "check-engine light" | "codes") { State::Problem } else { State::Ok };
-        assert_eq!(l.state, want, "{}: {}", l.label, l.text);
-    }
-    assert_eq!(result.lamp, Lamp::Codes(vec![41]));
-    assert_eq!(stored_codes(&bench), vec![27]);
+    assert!(
+        matches!(&report.verdict, Verdict::CouldNotTell(why) if why.starts_with("car as described: ")),
+        "{report:#?}"
+    );
+    assert_eq!(report.exit_status(), 3);
+    assert!(report.valid.lines.iter().chain(&report.runs.lines[1..]).all(|l| l.state == State::Ok), "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
 }
 
 #[test]
