@@ -26,6 +26,8 @@ mod replay;
 mod datalog_server;
 #[cfg(test)]
 mod fixtures;
+#[cfg(test)]
+mod acceptance;
 
 use std::env;
 use std::io::{self, IsTerminal};

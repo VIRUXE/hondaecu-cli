@@ -1178,7 +1178,9 @@ mod tests {
             bus.ppi.pins[crate::ppi82c55::PORT_A as usize] = 0xA1;
         });
 
-        assert_eq!(bus.ram[0x0211], 0xC4 ^ P28_INPUT_ACTIVE_LOW);
+        // Bit 3 is the lock-up B driver feedback, set by the board model: P4.3
+        // low (driver off) reads high, which the ROM stores as 0.
+        assert_eq!(bus.ram[0x0211], (0xC4 | 0x08) ^ P28_INPUT_ACTIVE_LOW);
         // Bits 4..6 are driver feedback, set by the board model.
         assert_eq!((bus.ram[0x0210] ^ P28_PPI_A_ACTIVE_LOW) & 0x8F, 0xA1 & 0x8F);
         assert_eq!((bus.external_unmapped_reads, bus.external_unmapped_writes), (0, 0));

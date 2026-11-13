@@ -1,11 +1,12 @@
 //! Applies a `Setup` (what is wired to the box) to the board model (`Bus`).
 //!
 //! Only the hooks the board model already has are covered. Everything else in
-//! `Setup` (knock sensor, EGR, ELD, speed sensor, power-steering switch, A/T
-//! gear position, IACV resistance) is left alone here rather than guessed.
+//! `Setup` (knock sensor, EGR, ELD, speed sensor, power-steering switch, IACV
+//! resistance) is left alone here rather than guessed.
 
 use crate::bus::{
-    Bus, P28_IN_AC_SWITCH, P28_IN_BRAKE_RELEASED, P28_IN_STARTER, P28_MUX_U5_ADCR1,
+    Bus, P28_IN_AC_SWITCH, P28_IN_AT_GEAR_DRIVE_3, P28_IN_AT_GEAR_DRIVE_4,
+    P28_IN_AT_GEAR_POSITION, P28_IN_BRAKE_RELEASED, P28_IN_STARTER, P28_MUX_U5_ADCR1,
     P28_PA_SERVICE_CONNECTOR, P28_U5_GEARBOX_SELECT,
 };
 use crate::car::{Gearbox, Iacv, O2Sensor, Setup};
@@ -67,7 +68,18 @@ pub fn apply_switches(bus: &mut Bus, setup: &Setup, sw: &Switches) {
         P28_PA_SERVICE_CONNECTOR,
         sw.service_connector,
     );
-    // sw.in_gear: A/T position inputs are Task 11.
+    // A/T position switch, raw 1 = that position (the ROM keeps the bits
+    // uninverted in 211h): park/neutral out of gear, D4 in gear. That 211h.5
+    // = 1 is park/neutral is read from 0x0D55..0x0D79, which applies an
+    // automatic's in-gear idle compensation (with the brake pressed) only
+    // with it clear. 0x32A8..0x32AE reads 211h.5, .6, .7 as P/N, D3, D4 in
+    // that order. D3 is never selected; the script drives in D4. A manual
+    // car has no such switch.
+    let automatic = setup.gearbox == Gearbox::Automatic;
+    let port = &mut bus.p28_input_port;
+    set_bit(port, P28_IN_AT_GEAR_POSITION, automatic && !sw.in_gear);
+    set_bit(port, P28_IN_AT_GEAR_DRIVE_4, automatic && sw.in_gear);
+    set_bit(port, P28_IN_AT_GEAR_DRIVE_3, false);
 }
 
 #[cfg(test)]
@@ -207,6 +219,28 @@ mod tests {
         let fresh = Bus::new();
         assert_eq!(bus.p28_input_port, fresh.p28_input_port);
         assert_eq!(bus.ppi.pins[PORT_A as usize], fresh.ppi.pins[PORT_A as usize]);
+    }
+
+    const AT_BITS: u8 = P28_IN_AT_GEAR_POSITION | P28_IN_AT_GEAR_DRIVE_3 | P28_IN_AT_GEAR_DRIVE_4;
+
+    #[test]
+    fn an_automatic_car_is_in_park_or_neutral_out_of_gear_and_in_d4_in_gear() {
+        let s = Setup::preset("stock-p28-automatic").unwrap();
+        let mut bus = Bus::new();
+        apply_switches(&mut bus, &s, &Switches::default());
+        assert_eq!(bus.p28_input_port & AT_BITS, P28_IN_AT_GEAR_POSITION);
+        apply_switches(&mut bus, &s, &Switches { in_gear: true, ..Switches::default() });
+        assert_eq!(bus.p28_input_port & AT_BITS, P28_IN_AT_GEAR_DRIVE_4);
+        apply_switches(&mut bus, &s, &Switches::default());
+        assert_eq!(bus.p28_input_port & AT_BITS, P28_IN_AT_GEAR_POSITION);
+    }
+
+    #[test]
+    fn a_manual_car_has_no_gear_position_inputs() {
+        let mut bus = Bus::new();
+        bus.p28_input_port |= AT_BITS;
+        apply_switches(&mut bus, &stock(), &Switches { in_gear: true, ..Switches::default() });
+        assert_eq!(bus.p28_input_port & AT_BITS, 0);
     }
 
     #[test]

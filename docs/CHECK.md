@@ -340,3 +340,104 @@ Which is right for this sensor is not settled; `IAT_VOLTS` is unchanged.
   whole stage, so `fuel_stops_rpm` is `None` there (there is no opening for a
   gap to follow).
 - No MIL edge between the bulb check (lit 0.04 to 2.11 s) and the read-out.
+
+## The automatic gearbox
+
+Added with the acceptance tests (`acceptance.rs`). Measured on the stock
+P28-230 ROM, one run of `script::run` per setup.
+
+**Car side.** With `gearbox = automatic`, `wiring::apply_switches` drives the
+A/T position switch on `4700h`: bit 5 (park/neutral) when the stage is not in
+gear, bit 7 (D4) when it is (`cruise`, `full throttle`, `lift off`); bit 6
+(D3) is never selected. The ROM keeps these three bits uninverted in `211h`
+(`211h = 4700h XOR 1Ah`). Their meaning is read from the ROM:
+0x32A8..0x32AE tests `211h.5`, `.6`, `.7` in that order as the gates of the
+lock-up routine, and 0x0D55..0x0D79 applies an automatic's in-gear idle
+compensation (brake pressed) only with `211h.5` clear, so `211h.5 = 1` is
+park/neutral. A manual car leaves all three at 0.
+
+**Board side.** `4700h` bit 3, the feedback from the driver of lock-up
+solenoid B (U16), now has a model: it reads low while P4.3 is high and high
+otherwise (`Bus::p28_input_port_as_read`). Derivation, from the ROM alone:
+
+```
+0336  STB  A, r0          ; LRB 70h: r0 = 380h, a counter 0..63h (timer ISR)
+0337  CMPB A, r1          ; r1 = 381h, the duty, reloaded from DFh at wrap
+0338  MB   P4.3, C        ; P4.3 high while counter < duty
+...
+3CAF  MOV  DP, #0380h     ; automatic only (0x5F5C: 216h.3), 214h.2 clear
+3CB9  L    A, [DP]        ; er0 = counter, duty
+3CBE  LB   A, [4700h]
+3CC6  ANDB r7, #08h       ; bit 3, raw
+3CCE  SUBB A, r1          ; counter >= duty (P4.3 low): bit 3 must be 1
+3CD6  ADDB A, #0Ah        ; counter more than 10 below duty (P4.3 high):
+                          ; bit 3 must be 0
+3CDD  SB   09Ch.7         ; else fault, code 19 (table 6C99h)
+```
+
+P4SF.3 is cleared at 0x2351 after the power-on check, so P4.3 is a plain
+output from then on. **Assumption:** P4.3 is the line into U16 and the
+feedback inverts it like the lock-up A feedback (port A bit 4, the inverse of
+PB4). Both are inferred from this check; the schematic trace from P4.3 to U16
+was not made. On the stock run the duty `381h` stays 0, so solenoid B is
+never driven and only the "off" half of the check is exercised.
+
+**Observed, `stock-p28-automatic`:** worth burning, `Lamp::Steady`, fault
+words `212h..215h` all 0, `216h` = 5Bh (bit 3, automatic, from the strap at
+0x55C5). Lock-up solenoid A (PB4, 0x3387) engages in `cruise` (24.2 s) and
+drops at the start of `full throttle` (26.6 s); the lock-up checks at 0x3C98
+and 0x3CAF ran about 8400 times each without raising a fault.
+
+### Gearbox mismatch: no code 19 (disagrees with Honda practice)
+
+Honda practice: an automatic ECU in a manual car stores code 19 (lock-up
+solenoid). The run does not.
+
+| board | car | verdict | codes | why |
+|---|---|---|---|---|
+| automatic | manual | worth burning | none | no position switch: `211h.5/.6/.7` all 0, so 0x32A8..0x32AE never commands lock-up (`22Fh.0` clear, PB4 low the whole run, duty `381h` 0). 0x3C98..0x3CA5 (`99h.6`) and 0x3CAF..0x3CDD (`9Ch.7`) compare each feedback with that off command and pass |
+| manual | automatic | worth burning | none | `216h.3` clear: 0x3C92 and 0x5F5C skip both lock-up checks; PB4 is never driven |
+
+Why the first row disagrees with practice: on a real board the two lock-up
+feedbacks sense the solenoid circuit, so with no solenoid connected they
+presumably read wrong even while the driver is off, and both checks above ran
+throughout the script (about 8400 times each) with the driver off. The model has no "solenoid absent" state: the
+feedbacks follow the drivers whatever is connected. How U15/U16's sense
+network reads with an open load is not established (the Bomarc sheet 8 detail
+was not read for it), so the model was left as it is rather than given an
+absent-solenoid behaviour that would make code 19 appear. `gearbox = manual`
+on an automatic board therefore reaches the ROM only through the position
+switch.
+
+## Where the preset values come from
+
+`stock-p28-manual`, key by key. "Option byte" means the byte at 6001h..600Ah
+that 0x5560..0x55B3 copies, bit 7 into a RAM flag; the fault code of each
+check bit is the table at 6C99h, indexed by `(byte - 98h) x 8 + bit + 1`
+(this reproduces every pairing in the monitor table of `CPU_CORE.md`).
+
+| key | value | source |
+|---|---|---|
+| `ecu` | p28 | the image is P28-230; pgmfi wiki "P28" page: 92-95 Civic Si/EX and del Sol, SOHC VTEC D16Z6 |
+| `board_gearbox` | manual | `CPU_CORE.md`: mask 230 is the manual P28-A00; the manual strap (U5/X1 low, board photographs) is what the ROM needs for `216h.3` clear (0x55C5) |
+| `gearbox` | manual | follows `board_gearbox` for a stock car; nothing more specific found |
+| `vtec` | yes | option byte 6001h = FFh sets `216h.4` (0x5566), which enables the VTEC solenoid and pressure-switch checks (0x3D06, 0x3D27); the wiki's P28 page names `216h.4` "Vtec Enable Ram Flag"; D16Z6 is a VTEC engine (wiki) |
+| `knock_sensor` | no | option byte 6002h = 00h clears `227h.6` (0x556E), and 0x3D44 then skips the check that sets `9Ah.2`, code 23 (observed: `227h` = 90h) |
+| `o2_sensor` | heated | option byte 6003h = FFh sets `216h.6` (0x5576), copied to `116h` (0x03F7, observed `116h` = 53h); `116h.6` gates the heater check at 0x2087..0x20CB (`9Bh.2`, code 27). A stock car must therefore have a heater; the wiki's P28 page lists an "O2 Heater Jump Routine" to disable it |
+| `iacv` | stock | the IACV current check 0x3C52..0x3C71 (`99h.3`, code 14) has no option-byte gate (its gate `217h.5` is not one of 0x5560's flags); with `iacv = none` the run stores code 14 |
+| `egr` | no | the stock ROM cannot raise code 12: 0x29AA `CMPB off(236h), #0` never sets carry, so `99h.0` (0x29B6) and `226h.7` stay clear, and `226h.7` clear skips the lift check that sets `99h.1` (0x2A02..0x2A23). The ROM does not care; whether the stock car had EGR is **unsourced** |
+| `eld` | yes | option byte 6005h = FFh sets `219h.1` (0x5586), which gates the ELD check 0x3CE2..0x3D02 (`99h.7`, code 20); the wiki's P28 page lists an "ELD Sensor Enable" option |
+| `speed_sensor` | yes | the VSS check 0x3C74..0x3C8B (`99h.4`, code 17) has no option-byte gate, so a stock car has a VSS; the wiki's P28 page lists the VSS RAM value |
+| `ac` | yes | the ROM drives an A/C clutch from the A/C switch (tested, `replay.rs`), but has no option byte for it; that the stock car has A/C is **unsourced** |
+| `power_steering_switch` | yes | the wiki's P28 page names the PSP input (`210h.3`, pin B8) and the ROM reads it (0x2A8F and others); that the stock car has the switch fitted is **unsourced** |
+
+No source disagreed with `car.rs`, so no preset value changed. The wiki's P28
+page gives other ROM addresses for its option bytes (60E6h, 60E7h, 60F2h);
+they do not match this image, whose options are at 6001h..600Ah, but the RAM
+flag it names for VTEC (`216h.4`) does.
+
+### Documentation now out of date
+
+"Which values change the run today" above and the "Static wiring" assumption
+predate this section: `gearbox` now reaches the board (the A/T position
+switch). They were left for the parallel review of this file.

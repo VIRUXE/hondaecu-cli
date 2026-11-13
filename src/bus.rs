@@ -41,8 +41,13 @@ pub const P28_IN_STARTER: u8 = 1 << 0;
 pub const P28_IN_VTEC_PRESSURE_SW_CLOSED: u8 = 1 << 1;
 /// A/C switch, pin B5 (Bomarc B6). Raw 1 = grounded (A/C requested).
 pub const P28_IN_AC_SWITCH: u8 = 1 << 2;
-/// Feedback from the driver of A/T lock-up solenoid B (U16), sheet 8.
+/// Feedback from the driver of A/T lock-up solenoid B (U16), sheet 8. Not a
+/// free input: it reads the inverse of `P28_P4_LOCKUP_B`
+/// (`Bus::p28_input_port_as_read`).
 pub const P28_IN_LOCKUP_B_FEEDBACK: u8 = 1 << 3;
+/// P4.3: A/T lock-up solenoid B, high = on, a software PWM (0x0338). Inferred
+/// from the ROM's check of `P28_IN_LOCKUP_B_FEEDBACK` at 0x3CAF.
+pub const P28_P4_LOCKUP_B: u8 = 1 << 3;
 /// Brake switch, pin D2 (Bomarc D22). Raw 0 = pedal pressed.
 pub const P28_IN_BRAKE_RELEASED: u8 = 1 << 4;
 /// A/T park and neutral position, pin B7 (Bomarc B5). Raw 1 = grounded.
@@ -522,8 +527,9 @@ pub struct Bus {
     /// The reset value is `P28_INPUT_ACTIVE_LOW`, the one byte the ROM stores
     /// as 00h in RAM 211h. For the bits the pgmfi wiki names (`P28_IN_*`) that
     /// is key on, engine stopped, manual gearbox: starter off, VTEC pressure
-    /// switch closed, A/C off, brake released. Bits 3, 6 and 7 are unnamed
-    /// and simply rest at the level the ROM stores as 0.
+    /// switch closed, A/C off, brake released, no A/T position selected. Bit
+    /// 3 here is ignored: the ROM reads the lock-up B driver feedback in its
+    /// place (`p28_input_port_as_read`).
     pub p28_input_port: u8,
     /// The board's 82C55. Port A pins are the second set of digital inputs
     /// (`P28_PA_*`). They reset to `P28_PPI_A_ACTIVE_LOW`, which the ROM stores
@@ -866,14 +872,28 @@ impl Bus {
     /// Assumption: the switch opens the instant the solenoid is driven. Real
     /// oil pressure takes time to build; how much delay the ROM's check
     /// tolerates is not established.
+    ///
+    /// Bit 3, the feedback from the driver of A/T lock-up solenoid B (U16),
+    /// reads low while P4.3 is high and high otherwise. The ROM drives P4.3
+    /// as a software PWM (0x0336..0x0338: high while the counter `380h` is
+    /// below the duty `381h`), and its one reader of bit 3, 0x3CAF..0x3CDD
+    /// (automatic only), raises `9Ch.7` when the bit is 0 with the counter at
+    /// or above the duty, or 1 with the counter more than 10 below it. That
+    /// P4.3 is the line into U16 is inferred from that check, not traced on
+    /// the schematic.
     fn p28_input_port_as_read(&self) -> u8 {
         let powered =
             self.vtec_solenoid_connected && self.p28_outputs().is_some_and(|out| out.vtec_solenoid);
+        let mut byte = self.p28_input_port;
         if powered {
-            self.p28_input_port & !P28_IN_VTEC_PRESSURE_SW_CLOSED
-        } else {
-            self.p28_input_port
+            byte &= !P28_IN_VTEC_PRESSURE_SW_CLOSED;
         }
+        if self.read_port(PORT4) & P28_P4_LOCKUP_B != 0 {
+            byte &= !P28_IN_LOCKUP_B_FEEDBACK;
+        } else {
+            byte |= P28_IN_LOCKUP_B_FEEDBACK;
+        }
+        byte
     }
 
     /// The VTEC oil-pressure switch's rest state is closed (pin D6
@@ -1711,6 +1731,27 @@ mod tests {
 
         bus.o2_heater_connected = false;
         assert_eq!(port_a(&mut bus) & P28_PA_O2_HEATER_FEEDBACK, 0, "unplugged heater");
+    }
+
+    #[test]
+    fn lockup_b_feedback_reads_low_while_p4_3_is_driven_high() {
+        let mut bus = Bus::new();
+        let bit3 = |bus: &mut Bus| bus.read_data_u8(P28_INPUT_PORT) & P28_IN_LOCKUP_B_FEEDBACK;
+        // P4.3 an input (reset): the feedback rests high.
+        assert_ne!(bit3(&mut bus), 0);
+        // The ROM's own configuration after the power-on check: P4.3 a plain
+        // output (P4IO = 0Dh, P4SF.3 clear at 0x2351).
+        bus.write_data_u8(SFR_P4IO, 0x0D);
+        bus.write_data_u8(SFR_P4SF, 0xF4);
+        bus.write_data_u8(SFR_P4, 0x00);
+        assert_ne!(bit3(&mut bus), 0, "solenoid B off");
+        bus.write_data_u8(SFR_P4, 0x08);
+        assert_eq!(bit3(&mut bus), 0, "solenoid B on");
+        // The other bits are the switches' own.
+        assert_eq!(
+            bus.read_data_u8(P28_INPUT_PORT) & !P28_IN_LOCKUP_B_FEEDBACK,
+            P28_INPUT_ACTIVE_LOW & !P28_IN_LOCKUP_B_FEEDBACK
+        );
     }
 
     #[test]
