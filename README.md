@@ -226,9 +226,10 @@ There are three verdicts:
 
 Exit status 2 is a bad command line or a file that cannot be read or
 written. The check does not judge fuelling, ignition timing, or anything that
-needs a responding engine. Only the car values listed in
-[`docs/CHECK.md`](docs/CHECK.md) change the run today; the others are
-recorded in the report.
+needs a responding engine. A car value the board model cannot represent
+(listed in [`docs/CHECK.md`](docs/CHECK.md), "Which values change the run
+today") is named on a `car as described` line, and the verdict is then never
+`WORTH BURNING`.
 ### 2. ECU Datalog CSV Replay & Scripted Trace Playback
 Replay a CSV log or scripted sensor preset through the emulator and export its
 observed output fields. Scenario names describe stimuli, not verified ROM

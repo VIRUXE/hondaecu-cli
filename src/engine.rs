@@ -1,7 +1,7 @@
 // Honda OBD1 D16Z6 / P28 Engine Simulator
 
 use crate::bus::{
-    Bus, IRQ_INT0, IRQ_INT1, P28_ADC_MAP, P28_ADC_TPS, P28_CKP_CAPTURE_TIMER,
+    Bus, IRQ_INT0, IRQ_INT1, P28_ADC_EGR, P28_ADC_MAP, P28_ADC_TPS, P28_CKP_CAPTURE_TIMER,
     P28_MUX_U5_ADCR1, P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT,
     P28_U6_IAT_SELECT, P28_U6_VBATT_SELECT, P28_VBATT_COUNTS_PER_VOLT,
 };
@@ -113,7 +113,10 @@ pub struct EngineState {
     pub o2_volts: f64,         // Oxygen Sensor Voltage (0.0..1.0 V)
     pub vbatt_volts: f64,      // Battery Voltage (0.0..18.0 V)
     pub speed_kmh: f64,        // Vehicle Speed (0..250 km/h)
-    
+    /// The car has a vehicle speed sensor. Without one INT0 never fires,
+    /// whatever `speed_kmh` says.
+    pub speed_sensor_fitted: bool,
+
     pub ckp_pulse_count: u64,
     pub tdc_pulse_count: u64,
     /// Cycle of the most recent distributor half-tooth edge.
@@ -135,6 +138,7 @@ impl EngineState {
             o2_volts: 0.45,        // Stoichiometric lambda
             vbatt_volts: 14.2,     // Alternator running voltage
             speed_kmh: 0.0,
+            speed_sensor_fitted: true,
             ckp_pulse_count: 0,
             tdc_pulse_count: 0,
             last_int0_cycle: 0,
@@ -173,6 +177,15 @@ impl EngineState {
         let vbatt_counts =
             (self.vbatt_volts * P28_VBATT_COUNTS_PER_VOLT * 4.0).clamp(0.0, 1023.0) as u16;
         bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] = vbatt_counts;
+
+        // EGR lift sensor input, AI3 (Bomarc sheet 3): connector D17 goes
+        // through 100 kohm in RM2 to the pin, and is tied by another RM2
+        // resistor to the battery divider node (RM2 pin 6) that feeds U6/X7
+        // through R51. With no sensor on D17 nothing else loads that path,
+        // so AI3 reads what U6/X7 reads.
+        if !bus.egr_fitted {
+            bus.adc_inputs[P28_ADC_EGR] = vbatt_counts;
+        }
 
         // VSS is a conditioned digital pulse input on the P28, not an ADC
         // channel. `speed_kmh` remains available to scenarios and telemetry.
@@ -264,7 +277,7 @@ impl EngineState {
     /// the edge period against TM2 with an overflow extension, which fits a
     /// slow speed signal and not the 24-tooth crank signal.
     fn check_vss_pulse(&mut self, total_cycles: u64, cpu_freq_hz: u64) -> u16 {
-        if self.speed_kmh <= 0.0 {
+        if !self.speed_sensor_fitted || self.speed_kmh <= 0.0 {
             self.next_vss_cycle = None;
             return 0;
         }
@@ -347,6 +360,34 @@ mod tests {
             assert!((ckp - revs * 12.0).abs() <= 1.0, "{rpm} rpm: {ckp} CKP edges in a second");
             assert!((tdc - revs * 2.0).abs() <= 1.0, "{rpm} rpm: {tdc} TDC edges in a second");
         }
+    }
+
+    #[test]
+    fn without_a_speed_sensor_int0_never_fires() {
+        use crate::bus::CPU_HZ;
+        let count = |fitted: bool| {
+            let mut engine = EngineState::new();
+            engine.speed_kmh = 60.0;
+            engine.speed_sensor_fitted = fitted;
+            (0..CPU_HZ / 1000).filter(|ms| engine.check_vss_pulse(ms * 1000, CPU_HZ) != 0).count()
+        };
+        assert!(count(true) > 10, "{}", count(true));
+        assert_eq!(count(false), 0);
+    }
+
+    #[test]
+    fn without_an_egr_sensor_ai3_reads_the_battery_divider() {
+        let mut bus = Bus::new();
+        let engine = EngineState::new();
+        engine.sync_sensors_to_bus(&mut bus);
+        let vbatt = bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT];
+        assert_eq!(bus.adc_inputs[P28_ADC_EGR], vbatt);
+
+        let mut bus = Bus::new();
+        bus.egr_fitted = true;
+        bus.adc_inputs[P28_ADC_EGR] = 300;
+        engine.sync_sensors_to_bus(&mut bus);
+        assert_eq!(bus.adc_inputs[P28_ADC_EGR], 300, "a fitted sensor is left alone");
     }
 
     #[test]

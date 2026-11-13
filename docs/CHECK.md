@@ -77,16 +77,37 @@ when none was given. Taking a default does not make a value given.
 `board_gearbox`, when not given, is set to the car's `gearbox` after all inputs
 are applied; it stays in the defaulted list.
 
-**Which values change the run today** (`wiring.rs`, `script.rs`). `board_gearbox`
-sets the gearbox strap input. `gearbox`, when `automatic`, drives the A/T
-position inputs (park/neutral out of gear, D4 in gear; see "The automatic
-gearbox" below). `vtec` `no` unplugs the solenoid and opens the pressure
-switch. `o2_sensor` plugs the heater only when `heated`. `iacv` `stock` or
-`none` plugs or unplugs the valve; an ohms value is recorded but changes
-nothing. `ac` `no` leaves out the A/C stage and the A/C switch. `ecu`,
-`knock_sensor`, `egr`, `eld`, `speed_sensor` and `power_steering_switch` are
-recorded in the report and the saved file but are not wired to anything yet,
-so changing them does not change the verdict.
+**Which values change the run today** (`wiring.rs`, `script.rs`). Every
+value either changes the board model or is **unmodelled**: `wiring::apply_static`
+returns it with the reason, and the verdict adds a could-not-tell line
+`car as described`, first in `RUNS A BASIC SETUP`, naming each one. With that
+line the verdict cannot be worth burning; a problem still outranks it. The
+line is absent when every value is modelled. Key by key (evidence in "The car
+values, one by one" below):
+
+| key = value | effect on the model |
+|---|---|
+| `ecu = p28` | none (the model is the P28 box) |
+| `ecu = p30` | **unmodelled**: the P30 box's knock board is not modelled |
+| `board_gearbox` | the gearbox strap input |
+| `gearbox = automatic` | the A/T position inputs (park/neutral out of gear, D4 in gear; "The automatic gearbox" below) and the lock-up solenoids on their drivers |
+| `gearbox = manual` | no position switch and no lock-up solenoids: on an automatic board both lock-up feedbacks read "powered" |
+| `vtec = no` | VTEC solenoid unplugged (its feedback reads "powered"), pressure switch open |
+| `knock_sensor = no` | none: the stock P28 has no knock check (option byte 6002h) |
+| `knock_sensor = yes` | **unmodelled** on any box |
+| `o2_sensor = heated` | heater plugged in |
+| `o2_sensor = one-wire` | heater unplugged |
+| `o2_sensor = none` | heater unplugged; the sensor input level is **unmodelled** |
+| `iacv = stock`, `none` | valve plugged or unplugged |
+| `iacv = <ohms>` | **unmodelled**: no source for the stock valve's resistance |
+| `egr = no` | AI3 reads the battery divider |
+| `egr = yes` | **unmodelled**: the lift sensor's level has no source |
+| `eld = yes` | U5/X0 at mid scale, as before |
+| `eld = no` | U5/X0 at the open-input level, 4.55 V |
+| `speed_sensor = no` | no pulses on INT0 |
+| `ac = no` | no A/C stage and no A/C switch |
+| `power_steering_switch = yes` | port A bit 3 at its old rest level (raw 1), as before |
+| `power_steering_switch = no` | **unmodelled**: the schematic and the pgmfi wiki disagree on the level |
 
 ### Exit status
 
@@ -142,6 +163,7 @@ could-not-tell if any line is, else ok. The rules below are those of
 
 | line | ok when | problem when | could not tell when |
 |---|---|---|---|
+| car as described | (never ok; the line is absent when every car value is modelled) | never | some value is unmodelled; the line names each key and the reason |
 | fuel pump prime | in `key on` the pump was on for 0.5 to 5 s and then off | otherwise | the run stopped before the stage |
 | cranking | the engine turned and every injector output opened | an output never opened | the engine did not turn, or the run stopped before the stage |
 | warm idle | at least 10 engine cycles; each output opened within 2 of the cycle count; ignitions at least 3 per cycle | an output opened 0 times or more than 2 away from the cycle count; too few ignitions | fewer than 10 engine cycles in the stage (`MIN_IDLE_ENGINE_CYCLES`), or the run stopped before it |
@@ -188,9 +210,11 @@ Numbers chosen here rather than measured on a car or taken from a document:
   2 of the engine cycles, 3 ignitions per cycle, 10 engine cycles minimum for
   `warm idle` (`verdict.rs`). Fuel stop: an opening followed by two engine
   cycles with none (`script.rs`).
-- **Static wiring.** Only the values listed under "Which values change the run
-  today" are applied to the board, and the A/T position inputs are a model of
-  the switch, not a measured one; the rest of a car is not modelled.
+- **Static wiring.** The values listed under "Which values change the run
+  today" are applied to the board; the unmodelled ones make the verdict could
+  not tell. The A/T position inputs are a model of the switch, not a measured
+  one. A working ELD and the stock power-steering switch keep the model's old
+  levels (mid scale; port A bit 3 raw 1), which are not measured either.
 - **Coolant at 88 C.** Every stage but `cold idle`; see the VTEC finding below
   for why the curve matters.
 
@@ -399,26 +423,38 @@ words `212h..215h` all 0, `216h` = 5Bh (bit 3, automatic, from the strap at
 drops at the start of `full throttle` (26.6 s); the lock-up checks at 0x3C98
 and 0x3CAF ran about 8400 times each without raising a fault.
 
-### Gearbox mismatch: no code 19 (disagrees with Honda practice)
+### Gearbox mismatch
 
 Honda practice: an automatic ECU in a manual car stores code 19 (lock-up
-solenoid). The run does not.
+solenoid). The run now does too (acceptance case 7).
 
 | board | car | verdict | codes | why |
 |---|---|---|---|---|
-| automatic | manual | worth burning | none | no position switch: `211h.5/.6/.7` all 0, so 0x32A8..0x32AE never commands lock-up (`22Fh.0` clear, PB4 low the whole run, duty `381h` 0). 0x3C98..0x3CA5 (`99h.6`) and 0x3CAF..0x3CDD (`9Ch.7`) compare each feedback with that off command and pass |
-| manual | automatic | worth burning | none | `216h.3` clear: 0x3C92 and 0x5F5C skip both lock-up checks; PB4 is never driven |
+| automatic | manual | do not burn | 19 | no solenoids, so both lock-up feedbacks read "powered" (below) while the ROM keeps both drivers off: no position switch, `211h.5/.6/.7` all 0, so 0x32A8..0x32AE never commands lock-up (PB4 low the whole run, duty `381h` 0). 0x3C98..0x3CA5 (`99h.6`) and 0x3CAF..0x3CDD (`9Ch.7`) compare each feedback with that off command and fail; both are code 19 in the table at 6C99h |
+| manual | automatic | worth burning | none | `216h.3` clear: 0x3C92 and 0x5F5C skip both lock-up checks; PB4 is never driven. The ROM never looks at the lock-up feedbacks, so a missing driver or solenoid cannot reach it; the mismatch reaches the ROM only through the A/T position inputs. Modelled, not reported as unmodelled. (The pgmfi wiki's auto/manual page says a manual board lacks IC16, the lock-up B driver.) |
 
-Why the first row disagrees with practice: on a real board the two lock-up
-feedbacks sense the solenoid circuit, so with no solenoid connected they
-presumably read wrong even while the driver is off, and both checks above ran
-throughout the script (about 8400 times each) with the driver off. The model has no "solenoid absent" state: the
-feedbacks follow the drivers whatever is connected. How U15/U16's sense
-network reads with an open load is not established (the Bomarc sheet 8 detail
-was not read for it), so the model was left as it is rather than given an
-absent-solenoid behaviour that would make code 19 appear. `gearbox = manual`
-on an automatic board therefore reaches the ROM only through the position
-switch.
+How the feedbacks read with no solenoid, from Bomarc sheet 8: each lock-up
+driver (U15 for A, U16 for B, "5050" parts; VTEC's U14 is the same) has its
+output pin wired to the connector (A4, A5; A25 for VTEC) and, on the board,
+to RM11 (M5565): an 8.2 kohm pull-up from RM11 pin 1, a supply rail, and an
+18 kohm / 10 kohm divider into the base of a 2SC2785 with its emitter
+grounded (Q28 for A, Q27 for B, Q26 for VTEC). The collector, pulled up in
+RM13 (10 kohm), is the feedback: Q28 to 82C55 pin 42 (port A bit 4), Q27 to
+ID3 (`4700h` bit 3), Q26 to pin 41 (port A bit 5). With a solenoid connected
+and the driver off the coil holds the output near ground: transistor off,
+bit 1. Driver on: output at the supply, bit 0. No solenoid: the pull-up alone
+sets the output at about 0.77 of the rail (8.2 k against 28 k), the base at
+about 0.28 of it, enough to turn the transistor on at 5 V or more, so the bit
+reads 0 whatever the driver does. That is the open-load detection the
+pull-ups exist for. **Assumption:** a "5050" that is off does not itself pull
+its output down; its data sheet was not found.
+
+`Bus::lockup_solenoids_connected` (set to `gearbox = automatic` by
+`wiring::apply_static`) applies this; `Bus::vtec_solenoid_connected` now
+follows the same circuit, so an unplugged VTEC solenoid reads "powered" too
+(it read "not powered" before). Observed with `vtec = no` after the change:
+do not burn, code 21 (a development run, not an acceptance case; the run
+before the change was not recorded).
 
 ## Where the preset values come from
 
@@ -446,3 +482,75 @@ No source disagreed with `car.rs`, so no preset value changed. The wiki's P28
 page gives other ROM addresses for its option bytes (60E6h, 60E7h, 60F2h);
 they do not match this image, whose options are at 6001h..600Ah, but the RAM
 flag it names for VTEC (`216h.4`) does.
+
+## The car values, one by one
+
+Each row below was run on the stock P28-230 ROM with only that key changed
+from `stock-p28-manual` (`acceptance.rs`, cases 6 and 7), except the
+unmodelled ones, which share one run. Schematic references are to the
+original Bomarc scan (37820-P28-A51), not the restored images.
+
+| key = value | level chosen | source | stock ROM did | Honda practice |
+|---|---|---|---|---|
+| `o2_sensor = one-wire` | heater unplugged (`o2_heater_connected = false`); sensor input as before | nothing new | do not burn: MIL lit at 8.8 s, code **41** blinked; the stored fault bit is 27 (`9Bh.2` from 0x2094..0x20CB, table 6C99h index 27 = 1Bh), so the ROM blinks stored bit 27 as 41 | matches (code 41, O2 heater) |
+| `o2_sensor = none` | heater unplugged as above; the sensor input is **unmodelled** | sheet 3: D16 goes through R4 (10 kohm) to the + input of U22a (NJM2904), a voltage follower into U6/X0 through 1 kohm; only C2 and C3 sit on that node, nothing biases it. With no sensor the level is set by the op-amp's input bias current, which no source here gives | code 41 from the heater (it outranks the car line) | n/a |
+| `iacv = <ohms>` | **unmodelled** | no stock coil resistance was found: not in the eCtune source, not on the pgmfi wiki's IACV page. See below | n/a | n/a |
+| `egr = no` (stock) | AI3 = the U6/X7 battery level | sheet 3: D17 reaches AI3 (MCU pin 57, P5.3) through 100 kohm in RM2 and is tied by another RM2 resistor to RM2 pin 6, the battery divider node that feeds U6/X7 through R51 (10 kohm). With D17 open, AI3 sits at that node | unchanged from before: worth burning (case 1). The stock ROM reads AI3 at 0x29A1 into `2F5h` and `r0`; its lift check is closed (`226h.7` is the carry of `CMPB off(236h), #0` at 0x29AA, always 0, so 0x2A02 skips it and `99h.0` stays clear), and the only other readers compare against FFh (0x0A4A, 0x2129) or copy the byte out (0x5501) | matches (no EGR code on a car without EGR) |
+| `egr = yes` | **unmodelled** | the lift sensor's resting voltage has no source here | n/a | n/a |
+| `eld = no` | U5/X0 = 930 counts, 4.55 V (E8h) | sheet 3: D18 has R136 (1 kohm, 1 %) to +5 V and R138 (10 kohm) to ground, then R137 (100 kohm) into U5/X0; open, 5 x 10/11 = 4.55 V. Caveat: R136's value is typed on the scan, not hand-lettered like the rest, so someone added it later; with R136 above about 1.6 kohm the open level would be inside the ROM's range and no code would be stored | do not burn: code **20**, no MIL. 0x3CE2..0x3D02 (gated by option flag `219h.1`, `217h.6`, `214h.3` clear and battery `C3h` at least 69h) sets `99h.7` when `3C6h` is above DCh or below 0Eh | matches (code 20, ELD) |
+| `speed_sensor = no` | no INT0 pulses (`EngineState::speed_sensor_fitted`) | nothing new | **worth burning**, no code; VTEC never switches on. See below | disagrees: practice expects code 17 |
+| `power_steering_switch = no` | **unmodelled** | sheet 3 and the wiki disagree; see below | n/a | n/a |
+| `knock_sensor = no` on a P28 | no difference | option byte 6002h = 00h clears `227h.6` (0x556E) and 0x3D44 then skips the knock check (`9Ah.2`, code 23); nothing on the board model follows the key | no difference | matches |
+| `knock_sensor = yes` | **unmodelled** on any box | the knock board is not modelled | n/a | n/a |
+| `ecu = p30` | **unmodelled** | the P30 box's knock board is not modelled | n/a | n/a |
+| `gearbox = manual` on an automatic board | no lock-up solenoids | sheet 8, see "Gearbox mismatch" | do not burn, code **19** | matches |
+| `gearbox = automatic` on a manual board | position inputs only | the ROM never reads the lock-up feedbacks with `216h.3` clear | worth burning | matches the ROM; practice says nothing specific |
+
+### `speed_sensor = no`: code 17 needs a longer deceleration than the script has
+
+The VSS check at 0x3C74..0x3C8B sets `99h.4` only when battery `C3h` is
+above 44h, `236h` is below B0h, code 17 is not yet stored (`214h.0`), no VSS
+period has been measured (`231h.3`, set at 0x24CF and 0x27E6, cleared when a
+period is measured at 0x278D) and deceleration fuel cut is active (`21Ch.4`,
+a copy of `11Ch.4`, written at 0x18BD). Its debounce count is 45 passes
+(6C68h index 13 = 2Dh). In the script, `lift off` (4 s, 6000 to 1500 rpm,
+TPS 0) is the only stage with fuel cut, and a development probe saw `99h.4`
+set for about 1.75 s of it: not enough. Holding the same conditions at
+3000 rpm, code 17 was stored after 5.1 s. So the model gives the ROM what a
+car without a speed sensor gives it, and the stock ROM would store code 17 on
+a longer deceleration; this script's 4 s `lift off` does not reach it, and
+the verdict is worth burning. The script was not lengthened: that changes
+every run and is outside this change. The model was not changed either.
+
+### `power_steering_switch`: the schematic and the wiki disagree
+
+Sheet 3: connector B13 is pulled up by R101 (22 kohm) and drives, through
+R102 (4.7 kohm), the base of a PNP 2SA1175 (Q41) whose emitter is on +5 V
+(R99, 22 kohm, base to emitter; C87 across them). Its collector, with R100
+(4.7 kohm) to ground, is the output "C (6)", which sheet 6 places by the
+82C55 without drawing its pin. Read that way, a grounded switch turns Q41 on
+and the bit reads 1; an open switch, or no switch, leaves it off and the bit
+reads 0, so `210h.3` (bit 3 of `port A XOR 38h`) is 1 with nothing on B13.
+The pgmfi wiki's P30 page says the opposite: "If pin B8 (PSP) is grounded,
+0x0210.3 will read 1". Unless the path on sheet 6 inverts again (it is not
+drawn), the two cannot both hold. The ROM does not settle it: it has no
+fault code for the switch, and a development run with port A bit 3 at 0
+(the schematic's open level) was worth burning with idle-valve duties within
+0.2 points of the stock run's in every stage. So `no` stays unmodelled. The
+stock car's switch keeps the model's old rest level, raw 1, which by the
+schematic is a grounded switch and by the wiki an open one; which state a
+Honda P/S switch rests in is not sourced here either.
+
+### `iacv = <ohms>`: why a resistance could not be trusted far anyway
+
+The model's IACV current is `I = duty x Vbatt x P28_IACV_SENSE_PER_VOLT`,
+and that gain is not a measured board constant: it was picked (0.14) inside
+the window of about 0.10 to 0.20 of full scale per volt that the ROM's own
+limit tables at 6B24h and 6B2Ah allow (`CPU_CORE.md`, "IACV current loop").
+A fitted coil of R ohms would scale the current by `R_stock / R`. Even with a
+sourced `R_stock`, a ratio of up to about 1.4 either way could be absorbed by
+where in that window the real gain sits, so a resistance-based result could
+only say something about coils far from stock (roughly below 0.7 or above
+1.4 times its resistance), and nothing about the edge cases between. Without
+`R_stock` the value is unmodelled.
+

@@ -61,7 +61,10 @@ pub const P28_IN_AT_GEAR_DRIVE_4: u8 = 1 << 7;
 // transistor off its driver's output), bit 7 on sheets 2 and 6. Bit 3 is
 // from the wiki's P30 map; sheet 3 takes the P/S switch to the 82C55 but the
 // pin is not legible.
-/// Power-steering pressure switch, pin B8 (Bomarc B13). Raw 0 = grounded.
+/// Power-steering pressure switch, pin B8 (Bomarc B13). Raw 0 = grounded per
+/// the wiki; Bomarc sheet 3's PNP input stage (Q41) reads the other way, and
+/// the path to the 82C55 is not drawn, so the polarity is unsettled
+/// (docs/CHECK.md).
 pub const P28_PA_PSP_OPEN: u8 = 1 << 3;
 /// Feedback from the driver of A/T lock-up solenoid A (U15).
 pub const P28_PA_LOCKUP_FEEDBACK: u8 = 1 << 4;
@@ -499,8 +502,16 @@ pub struct Bus {
     pub vtec_solenoid_active: bool,    // set from engine conditions, see EngineState::vtec_engaged
     /// The VTEC solenoid is plugged in. While it is, 82C55 port A bit 5 (the
     /// solenoid feedback) follows the port C bit 0 driver; unplugged, the
-    /// feedback always reads "not powered".
+    /// feedback always reads "powered" (the RM11 pull-up on U14's output,
+    /// Bomarc sheet 8; see `drive_p28_feedback`).
     pub vtec_solenoid_connected: bool,
+    /// The A/T lock-up solenoids A and B are on the end of their drivers
+    /// (U15, U16). Without them both driver feedbacks read "powered" whatever
+    /// the drivers do (see `drive_p28_feedback`).
+    pub lockup_solenoids_connected: bool,
+    /// An EGR lift sensor drives AI3. Without one, AI3 sits on the battery
+    /// divider (`EngineState::sync_sensors_to_bus`).
+    pub egr_fitted: bool,
     pub ac_clutch_active: bool,
     pub radiator_fan_active: bool,
     pub purge_solenoid_active: bool,
@@ -590,6 +601,8 @@ impl Bus {
             mil_check_engine_light: false,
             vtec_solenoid_active: false,
             vtec_solenoid_connected: true,
+            lockup_solenoids_connected: true,
+            egr_fitted: false,
             ac_clutch_active: false,
             radiator_fan_active: false,
             purge_solenoid_active: false,
@@ -806,14 +819,28 @@ impl Bus {
     ///
     /// The polarities of bits 4 and 6 are read from those checks, not from
     /// the board.
+    ///
+    /// Bomarc sheet 8 shows how bits 4 and 5 (and `4700h` bit 3) sense their
+    /// loads: each driver's output pin (U15 lock-up A, U14 VTEC, U16 lock-up
+    /// B) has an 8.2 kohm pull-up in RM11 (pin 1, a supply rail) and an
+    /// 18 k / 10 k divider into the base of a 2SC2785 (Q28, Q26, Q27) whose
+    /// collector, pulled up by RM13, is the feedback bit. A connected
+    /// solenoid holds the output near ground while the driver is off, so the
+    /// transistor is off and the bit reads 1; a driven output is at the
+    /// supply and the bit reads 0. With no solenoid, the pull-up alone takes
+    /// the output to about three quarters of the rail even with the driver
+    /// off, so the bit reads 0, "powered", whatever the driver does.
+    /// Assumption: a driver that is off does not itself pull its output
+    /// down (U14..U16 are "5050" parts whose data sheet was not found).
     fn drive_p28_feedback(&mut self) {
         let outputs = self.p28_outputs();
-        let vtec = self.vtec_solenoid_connected && outputs.is_some_and(|out| out.vtec_solenoid);
+        let vtec = !self.vtec_solenoid_connected || outputs.is_some_and(|out| out.vtec_solenoid);
         let heater = self.o2_heater_connected && outputs.is_some_and(|out| out.o2_heater);
-        let lockup = self
-            .ppi
-            .output(ppi82c55::PORT_B)
-            .is_some_and(|b| b & P28_PB_LOCKUP_SOLENOID != 0);
+        let lockup = !self.lockup_solenoids_connected
+            || self
+                .ppi
+                .output(ppi82c55::PORT_B)
+                .is_some_and(|b| b & P28_PB_LOCKUP_SOLENOID != 0);
 
         let pins = &mut self.ppi.pins[ppi82c55::PORT_A as usize];
         let mut drive = |mask: u8, level: bool| {
@@ -880,7 +907,10 @@ impl Bus {
     /// (automatic only), raises `9Ch.7` when the bit is 0 with the counter at
     /// or above the duty, or 1 with the counter more than 10 below it. That
     /// P4.3 is the line into U16 is inferred from that check, not traced on
-    /// the schematic.
+    /// the schematic. Bomarc sheet 8 does show the bit's source: Q27's
+    /// collector (ID3) off U16's output pin, sensed like the other solenoid
+    /// feedbacks (`drive_p28_feedback`), so with no solenoid it reads 0
+    /// whatever P4.3 does.
     fn p28_input_port_as_read(&self) -> u8 {
         let powered =
             self.vtec_solenoid_connected && self.p28_outputs().is_some_and(|out| out.vtec_solenoid);
@@ -888,7 +918,7 @@ impl Bus {
         if powered {
             byte &= !P28_IN_VTEC_PRESSURE_SW_CLOSED;
         }
-        if self.read_port(PORT4) & P28_P4_LOCKUP_B != 0 {
+        if !self.lockup_solenoids_connected || self.read_port(PORT4) & P28_P4_LOCKUP_B != 0 {
             byte &= !P28_IN_LOCKUP_B_FEEDBACK;
         } else {
             byte |= P28_IN_LOCKUP_B_FEEDBACK;
@@ -1634,8 +1664,30 @@ mod tests {
         bus.write_data_u8(0x2F00, P28_PC_VTEC_SOLENOID);
         assert_eq!(feedback(&mut bus), 0, "driver on, solenoid powered");
 
+        // Unplugged, the RM11 pull-up holds U14's output high: the feedback
+        // reads powered with the driver on or off.
         bus.vtec_solenoid_connected = false;
-        assert_ne!(feedback(&mut bus), 0, "unplugged solenoid never reads powered");
+        assert_eq!(feedback(&mut bus), 0, "unplugged, driver on");
+        bus.write_data_u8(0x2F00, 0x00);
+        assert_eq!(feedback(&mut bus), 0, "unplugged, driver off");
+    }
+
+    #[test]
+    fn without_lockup_solenoids_both_feedbacks_read_powered() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x3F00, 0x90);
+        bus.write_data_u8(SFR_P4IO, 0x0D);
+        bus.write_data_u8(SFR_P4SF, 0xF4);
+        bus.write_data_u8(SFR_P4, 0x00);
+        bus.write_data_u8(0x1F00, 0x00);
+        let a = |bus: &mut Bus| bus.read_data_u8(0x0F00) & P28_PA_LOCKUP_FEEDBACK;
+        let b = |bus: &mut Bus| bus.read_data_u8(P28_INPUT_PORT) & P28_IN_LOCKUP_B_FEEDBACK;
+        // Drivers off (PB4 low, P4.3 low), solenoids connected: both read 1.
+        assert_ne!(a(&mut bus), 0);
+        assert_ne!(b(&mut bus), 0);
+        bus.lockup_solenoids_connected = false;
+        assert_eq!(a(&mut bus), 0, "lock-up A, no solenoid");
+        assert_eq!(b(&mut bus), 0, "lock-up B, no solenoid");
     }
 
     #[test]

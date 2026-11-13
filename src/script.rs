@@ -4,7 +4,7 @@
 use crate::bench::{Bench, Settling, Stop};
 use crate::blink::{decode, Lamp};
 use crate::car::Setup;
-use crate::wiring::{apply_static, apply_switches, Switches};
+use crate::wiring::{apply_engine, apply_static, apply_switches, Switches, Unmodelled};
 
 /// Engine inputs are refreshed this often.
 pub const SLICE_SECONDS: f64 = 0.01;
@@ -56,6 +56,9 @@ pub struct RunResult {
     pub mil_first_lit_after_bulb_check: Option<f64>,
     pub lamp: Lamp,
     pub seconds: f64,
+    /// Car values the board model could not represent, with the reason
+    /// (`wiring::apply_static`).
+    pub unmodelled: Vec<Unmodelled>,
 }
 
 /// Coolant temperature in every stage but `cold idle`.
@@ -166,7 +169,8 @@ pub fn stages(setup: &Setup) -> Vec<Stage> {
 /// stops as soon as execution does; the stage it stopped in is kept, cut
 /// short at the stop.
 pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
-    apply_static(&mut bench.bus, setup);
+    let unmodelled = apply_static(&mut bench.bus, setup);
+    apply_engine(&mut bench.engine, setup);
     let mut results = Vec::new();
     // Start of the read-out and whether it ran its full length.
     let mut read_out: Option<(f64, bool)> = None;
@@ -212,6 +216,7 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
         mil_first_lit_after_bulb_check,
         lamp,
         seconds: end,
+        unmodelled,
     }
 }
 

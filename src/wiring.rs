@@ -1,15 +1,16 @@
 //! Applies a `Setup` (what is wired to the box) to the board model (`Bus`).
 //!
-//! Only the hooks the board model already has are covered. Everything else in
-//! `Setup` (knock sensor, EGR, ELD, speed sensor, power-steering switch, IACV
-//! resistance) is left alone here rather than guessed.
+//! A value the board model cannot represent is not guessed: `apply_static`
+//! returns it as unmodelled, with the reason, and the verdict then cannot be
+//! "worth burning".
 
 use crate::bus::{
     Bus, P28_IN_AC_SWITCH, P28_IN_AT_GEAR_DRIVE_3, P28_IN_AT_GEAR_DRIVE_4,
     P28_IN_AT_GEAR_POSITION, P28_IN_BRAKE_RELEASED, P28_IN_STARTER, P28_MUX_U5_ADCR1,
-    P28_PA_SERVICE_CONNECTOR, P28_U5_GEARBOX_SELECT,
+    P28_PA_SERVICE_CONNECTOR, P28_U5_ELD_SELECT, P28_U5_GEARBOX_SELECT,
 };
-use crate::car::{Gearbox, Iacv, O2Sensor, Setup};
+use crate::car::{EcuModel, Gearbox, Iacv, O2Sensor, Setup};
+use crate::engine::EngineState;
 use crate::ppi82c55::PORT_A;
 
 /// 3.2 V on the 10-bit gearbox strap input: an automatic.
@@ -27,22 +28,81 @@ pub struct Switches {
     pub brake: bool,
 }
 
+/// A car value the board model cannot represent: the key and why.
+pub type Unmodelled = (&'static str, String);
+
 /// Straps and plugs that do not change during a run. Call once after Bench::new.
-pub fn apply_static(bus: &mut Bus, setup: &Setup) {
+///
+/// Returns the values in `setup` this model cannot represent, each with the
+/// reason. A run with any of them cannot be worth burning (`verdict::judge`).
+pub fn apply_static(bus: &mut Bus, setup: &Setup) -> Vec<Unmodelled> {
+    let mut unmodelled: Vec<Unmodelled> = Vec::new();
+    let mut not = |key: &'static str, reason: &str| unmodelled.push((key, reason.to_string()));
+
+    if setup.ecu == EcuModel::P30 {
+        not("ecu", "p30: the P30 box's knock board is not modelled");
+    }
+    if setup.knock_sensor {
+        not("knock_sensor", "yes: the knock board and its sensor input are not modelled");
+    }
     bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = match setup.board_gearbox {
         Gearbox::Manual => GEARBOX_STRAP_MANUAL_COUNTS,
         Gearbox::Automatic => GEARBOX_STRAP_AUTOMATIC_COUNTS,
     };
+    // Only an automatic gearbox has lock-up solenoids. On an automatic board
+    // their absence reaches the ROM through the driver feedbacks
+    // (`Bus::drive_p28_feedback`); on a manual board the ROM never reads
+    // them (216h.3 clear: 0x3C92, 0x5F5C), so an automatic car there
+    // changes only the A/T position inputs (`apply_switches`).
+    bus.lockup_solenoids_connected = setup.gearbox == Gearbox::Automatic;
     if !setup.vtec {
         bus.vtec_solenoid_connected = false;
         bus.set_vtec_pressure_switch_closed(false);
     }
     bus.o2_heater_connected = matches!(setup.o2_sensor, O2Sensor::Heated);
+    if setup.o2_sensor == O2Sensor::None {
+        not("o2_sensor", "none: the level the oxygen-sensor input reads with no sensor is not established");
+    }
     match setup.iacv {
         Iacv::Stock => bus.iacv_connected = true,
         Iacv::None => bus.iacv_connected = false,
-        Iacv::Ohms(_) => {}
+        Iacv::Ohms(r) => not(
+            "iacv",
+            &format!("{r} ohms: the stock valve's resistance has no source to scale it against"),
+        ),
     }
+    // Without a sensor AI3 sits on the battery divider (`EngineState::
+    // sync_sensors_to_bus`); with one, the lift sensor's level is unsourced.
+    bus.egr_fitted = setup.egr;
+    if setup.egr {
+        not("egr", "yes: the level an EGR lift sensor presents on AI3 has no source");
+    }
+    // A working detector is left at the model's mid scale.
+    if !setup.eld {
+        bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT] = ELD_OPEN_COUNTS;
+    }
+    if !setup.power_steering_switch {
+        not(
+            "power_steering_switch",
+            "no: the schematic and the pgmfi wiki disagree on the level the input reads with the switch open",
+        );
+    }
+    unmodelled
+}
+
+/// U5/X0, the ELD input, with nothing on connector D18 (Bomarc sheet 3): R136
+/// (1 kohm, 1 %) to +5 V and R138 (10 kohm) to ground, into the mux through
+/// R137 (100 kohm, no load to speak of): 5 V x 10 / 11 = 4.55 V, E8h. The
+/// ROM's ELD check at 0x3CEB..0x3D02 accepts 0Eh..DCh only. Caveat: R136's
+/// value is printed in type on the scan, not in the drawing's hand
+/// lettering, so it was added later by whoever annotated the scan; with
+/// R136 above about 1.6 kohm the open level would fall inside the ROM's range.
+pub const ELD_OPEN_COUNTS: u16 = 930;
+
+/// Car parts that live on the engine model rather than the board. Call once
+/// after Bench::new.
+pub fn apply_engine(engine: &mut EngineState, setup: &Setup) {
+    engine.speed_sensor_fitted = setup.speed_sensor;
 }
 
 fn set_bit(byte: &mut u8, mask: u8, on: bool) {
@@ -241,6 +301,120 @@ mod tests {
         bus.p28_input_port |= AT_BITS;
         apply_switches(&mut bus, &stock(), &Switches { in_gear: true, ..Switches::default() });
         assert_eq!(bus.p28_input_port & AT_BITS, 0);
+    }
+
+    /// The keys `apply_static` reports for `s`.
+    fn unmodelled_keys(s: &Setup) -> Vec<&'static str> {
+        apply_static(&mut Bus::new(), s).into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// `stock-p28-manual` with one key changed.
+    fn with(key: &str, value: &str) -> Setup {
+        let mut s = stock();
+        s.set(key, value).unwrap();
+        s
+    }
+
+    #[test]
+    fn the_stock_p28_presets_are_fully_modelled() {
+        assert_eq!(unmodelled_keys(&stock()), Vec::<&str>::new());
+        assert_eq!(unmodelled_keys(&Setup::preset("stock-p28-automatic").unwrap()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn every_unmodelled_value_names_its_key_and_a_reason() {
+        for (key, value) in [
+            ("ecu", "p30"),
+            ("knock_sensor", "yes"),
+            ("o2_sensor", "none"),
+            ("iacv", "9.5"),
+            ("egr", "yes"),
+            ("power_steering_switch", "no"),
+        ] {
+            let got = apply_static(&mut Bus::new(), &with(key, value));
+            assert_eq!(got.len(), 1, "{key} = {value}: {got:?}");
+            assert_eq!(got[0].0, key);
+            assert!(got[0].1.starts_with(value), "{key}: {}", got[0].1);
+        }
+    }
+
+    #[test]
+    fn a_p30_box_is_unmodelled_and_so_is_its_knock_sensor() {
+        let p30 = Setup::preset("stock-p30").unwrap();
+        assert_eq!(unmodelled_keys(&p30), ["ecu", "knock_sensor"]);
+    }
+
+    #[test]
+    fn modelled_values_are_not_reported() {
+        for (key, value) in [
+            ("knock_sensor", "no"),
+            ("vtec", "no"),
+            ("o2_sensor", "one-wire"),
+            ("iacv", "none"),
+            ("egr", "no"),
+            ("eld", "no"),
+            ("speed_sensor", "no"),
+            ("ac", "no"),
+        ] {
+            assert_eq!(unmodelled_keys(&with(key, value)), Vec::<&str>::new(), "{key} = {value}");
+        }
+    }
+
+    #[test]
+    fn a_manual_car_has_no_lockup_solenoids_on_either_board() {
+        for board in ["manual", "automatic"] {
+            let mut s = stock();
+            s.set("board_gearbox", board).unwrap();
+            let mut bus = Bus::new();
+            assert_eq!(apply_static(&mut bus, &s), Vec::new(), "{board}");
+            assert!(!bus.lockup_solenoids_connected, "{board}");
+        }
+    }
+
+    #[test]
+    fn an_automatic_car_has_its_lockup_solenoids_on_either_board() {
+        // On a manual board the ROM never looks at the lock-up feedbacks
+        // (216h.3 clear: 0x3C92, 0x5F5C), so the mismatch reaches it only
+        // through the A/T position inputs.
+        for board in ["manual", "automatic"] {
+            let mut s = stock();
+            s.set("gearbox", "automatic").unwrap();
+            s.set("board_gearbox", board).unwrap();
+            let mut bus = Bus::new();
+            bus.lockup_solenoids_connected = false;
+            assert_eq!(apply_static(&mut bus, &s), Vec::new(), "{board}");
+            assert!(bus.lockup_solenoids_connected, "{board}");
+        }
+    }
+
+    #[test]
+    fn no_eld_presents_the_open_input_level() {
+        let mut bus = Bus::new();
+        apply_static(&mut bus, &with("eld", "no"));
+        assert_eq!(bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT], ELD_OPEN_COUNTS);
+        // 4.55 V: above the ROM's DCh limit (0x3CF4).
+        assert!(ELD_OPEN_COUNTS >> 2 > 0xDC);
+        let mut bus = Bus::new();
+        apply_static(&mut bus, &stock());
+        assert_eq!(bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT], Bus::new().p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT]);
+    }
+
+    #[test]
+    fn egr_wiring_follows_the_setup() {
+        let mut bus = Bus::new();
+        apply_static(&mut bus, &with("egr", "yes"));
+        assert!(bus.egr_fitted);
+        apply_static(&mut bus, &stock());
+        assert!(!bus.egr_fitted);
+    }
+
+    #[test]
+    fn no_speed_sensor_takes_it_off_the_engine() {
+        let mut engine = EngineState::new();
+        apply_engine(&mut engine, &with("speed_sensor", "no"));
+        assert!(!engine.speed_sensor_fitted);
+        apply_engine(&mut engine, &stock());
+        assert!(engine.speed_sensor_fitted);
     }
 
     #[test]

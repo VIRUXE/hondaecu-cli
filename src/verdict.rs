@@ -284,12 +284,27 @@ fn codes(result: &RunResult) -> Line {
     }
 }
 
+/// "Could not tell" naming every car value the board model could not
+/// represent, or nothing when there is none. Never ok: having modelled the car
+/// is not something the ROM was observed to do.
+fn car_as_described(result: &RunResult) -> Option<Line> {
+    if result.unmodelled.is_empty() {
+        return None;
+    }
+    let each: Vec<String> = result.unmodelled.iter().map(|(key, why)| format!("{key} = {why}")).collect();
+    Some(could_not_tell(
+        "car as described",
+        format!("not modelled, so the run is not of this car: {}", each.join("; ")),
+    ))
+}
+
 pub fn judge(result: &RunResult, _setup: &Setup) -> Report {
     let valid = section(
         "VALID FOR THIS ECU",
         vec![executes(result), settles(result), own_board(result)],
     );
-    let mut run_lines = vec![fuel_pump(result), cranking(result), warm_idle(result)];
+    let mut run_lines: Vec<Line> = car_as_described(result).into_iter().collect();
+    run_lines.extend([fuel_pump(result), cranking(result), warm_idle(result)]);
     run_lines.extend(ac_idle(result));
     run_lines.extend([sweep(result), check_engine_light(result), codes(result)]);
     let runs = section("RUNS A BASIC SETUP", run_lines);
@@ -357,7 +372,46 @@ mod tests {
             mil_first_lit_after_bulb_check: None,
             lamp: Lamp::Off,
             seconds: 90.0,
+            unmodelled: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_unmodelled_car_value_is_the_first_runs_line_and_could_not_tell() {
+        let mut c = clean();
+        c.unmodelled = vec![
+            ("eld", "no: the level is not established".to_string()),
+            ("egr", "yes: not established".to_string()),
+        ];
+        let r = judge(&c, &setup());
+        let first = &r.runs.lines[0];
+        assert_eq!(first.label, "car as described");
+        assert_eq!(first.state, State::CouldNotTell);
+        assert!(first.text.contains("eld = no: the level is not established"), "{}", first.text);
+        assert!(first.text.contains("egr = yes: not established"), "{}", first.text);
+        assert_eq!(r.runs.state, State::CouldNotTell);
+        assert_eq!(r.exit_status(), 3);
+        match &r.verdict {
+            Verdict::CouldNotTell(why) => assert!(why.starts_with("car as described: "), "{why}"),
+            v => panic!("{v:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fully_modelled_car_has_no_car_line() {
+        let r = judge(&clean(), &setup());
+        assert!(r.runs.lines.iter().all(|l| l.label != "car as described"));
+        assert_eq!(r.runs.lines[0].label, "fuel pump prime");
+    }
+
+    #[test]
+    fn a_problem_still_outranks_an_unmodelled_car() {
+        let mut c = clean();
+        c.unmodelled = vec![("eld", "no: not established".to_string())];
+        c.lamp = Lamp::Codes(vec![20]);
+        let r = judge(&c, &setup());
+        assert_eq!(r.exit_status(), 1);
+        assert!(matches!(&r.verdict, Verdict::DoNotBurn(why) if why.starts_with("codes: ")));
     }
 
     fn setup() -> Setup {

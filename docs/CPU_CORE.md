@@ -375,6 +375,21 @@ schematic:
 | U5/X1 (RAM `3C7h`) | gearbox configuration resistors RP17/RP18 | 0x55C5..0x55D0 copies bit 7 into `216h.3`, the wiki's "1 = automatic" flag; bit 6 is inverted into `216h.2` and `216h.0`. ROM mask 230 is the manual P28-A00, so the model presents 0 V. Mid scale, the old default, made the ROM run as an automatic |
 | AI4 | IACV coil current | sampled by the timer-1 handler at 0x0136; see "IACV current loop" below |
 
+Two inputs have a modelled "nothing connected" level, both from sheet 3:
+
+- AI3, EGR lift sensor (connector D17): 100 kohm in RM2 to the pin, and a
+  second RM2 resistor to RM2 pin 6, the battery divider node that feeds
+  U6/X7 through R51. With no sensor (`Bus::egr_fitted` false, the stock
+  car) AI3 is given the U6/X7 level in `EngineState::sync_sensors_to_bus`.
+  It used to sit at mid scale. A fitted sensor's level has no source.
+- U5/X0, ELD (connector D18): R136 (1 kohm) to +5 V and R138 (10 kohm) to
+  ground, into the mux through R137 (100 kohm); open, 4.55 V
+  (`wiring::ELD_OPEN_COUNTS`). A working detector stays at mid scale.
+
+The O2 input (D16, through R4 into U22a, a voltage follower, then 1 kohm to
+U6/X0) has no bias resistor on the follower's input, so its level with no
+sensor is not established.
+
 The battery model used to sit on AI5, which the ROM reads at 0x1052 and
 0x3D64 for something else that is still unidentified. Sheet 2 puts the
 alternator FR signal, RC-filtered, on MCU pin 56 (AI2); the engine model does
@@ -580,7 +595,7 @@ no longer reports it as the A/C clutch.
 | `4700h`.7 | A/T "gear drive 4" (sheet 2), 1 = selected (0x32AE reads it as D4). Driven by `wiring::apply_switches` for `gearbox = automatic`: set while the stage is in gear | 0x32AE, 0x32FE, 0x4824 |
 | port A.0, .1 | knock-board connector FC1 through resistors R110..R113 (sheet 5) | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` |
 | port A.2 | knock-board connector FC1 through R109/R114 (sheet 5) | raw at 0x2800 into `232h.6` |
-| port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28). Sheet 3 takes the switch to the 82C55, pin not legible | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
+| port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28). Sheet 3 takes the switch through a PNP stage (Q41, 2SA1175, emitter on +5 V, R100 to ground on the collector) whose output reads 1 with B13 grounded, the opposite of the wiki; the pin it reaches on the 82C55 is not drawn (docs/CHECK.md, "power_steering_switch") | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
 | port A.4 | feedback from the driver of lock-up solenoid A, U15 (sheet 8) | raw at 0x3C9C into `99h.6` |
 | port A.5 | VTEC solenoid feedback off U14's output: 0 = powered (sheet 8, P30) | 0x3D15, 0x3D21 |
 | port A.6 | O2-heater driver feedback (sheet 8) | raw at 0x2098: compared with `A0h.5`, drives PC2 |
@@ -870,11 +885,11 @@ through the register aliases; ten instructions in this ROM use the form.
 | ignition output, TRNS1 / P4.5 | 0x0698 `RB TRNSIT.1` after each firing | `9Ch.3`, code 15; fuel is cut | one edge per falling edge of TM3IO (`Bus::igniter_connected`) |
 | injector test circuit, TRNS2 / P4.6 | bit cleared at 0x4BCF before an opening, tested at 0x0637 / 0x1486 | `9Ch.6`, code 16 | one edge whenever an injector output opens (`Bus::injectors_connected`) |
 | heartbeat, TRNS3 / P4.7 | 0x2964 counts RAM `2EBh` down from `FFh` while no edge arrives | none stored; `230h.6` lights the MIL (0x4293) unless U5/X3 reads `FCh` or more | an edge every 10 ms (`Bus::heartbeat_present`) |
-| VTEC solenoid, port A bit 5 | 0x3D0C..0x3D21 | `9Ah.0`, code 21 | follows PC0 (`vtec_solenoid_connected`) |
+| VTEC solenoid, port A bit 5 | 0x3D0C..0x3D21 | `9Ah.0`, code 21 | follows PC0; with the solenoid unplugged (`vtec_solenoid_connected` false) reads "powered" whatever PC0 does (sheet 8, below) |
 | VTEC oil-pressure switch, `4700h` bit 1 | 0x3D34..0x3D40: `211h.1` (1 = open) must be 0 with VTEC off (`21Fh.2` clear) and 1 with it on | `9Ah.1`, code 22 | `p28_input_port` is the switch's rest state (closed); the ROM reads it open while the solenoid is powered (`vtec_solenoid_connected` and PC0, `Bus::p28_input_port_as_read`). Assumption: it opens the instant the solenoid is driven; real oil pressure takes time to build, and how much delay the ROM's check tolerates is not established |
 | O2 heater, port A bit 6 | 0x2094..0x20CB: 0 with the heater off, 1 with it on | `9Bh.2`, code 27 | follows PC2 (`o2_heater_connected`) |
-| lock-up solenoid, port A bit 4 | 0x3C98..0x3CA5, automatic only | `99h.6`, code 19 | inverse of PB4 |
-| lock-up solenoid B, `4700h` bit 3 | 0x3CAF..0x3CDD, automatic only (0x5F5C: `216h.3` set, `214h.2` clear; 0x3CA9: `227h.2` clear). P4.3 is a software PWM, high while the counter `380h` (0..63h) is below the duty `381h` (0x0336..0x0338); the bit must be 1 with the counter at or above the duty and 0 with it more than 10 below | `9Ch.7`, code 19 | inverse of the P4.3 pin. Assumption: P4.3 is the line into U16 and the feedback inverts it like lock-up A's; both inferred from this check, the P4.3-to-U16 trace not made on the schematic. The stock ROM keeps `381h` at 0, so only the "off" half is exercised by a run |
+| lock-up solenoid, port A bit 4 | 0x3C98..0x3CA5, automatic only | `99h.6`, code 19 | inverse of PB4; with no solenoids (`lockup_solenoids_connected` false, a manual car) reads "powered", 0, whatever PB4 does (sheet 8, below) |
+| lock-up solenoid B, `4700h` bit 3 | 0x3CAF..0x3CDD, automatic only (0x5F5C: `216h.3` set, `214h.2` clear; 0x3CA9: `227h.2` clear). P4.3 is a software PWM, high while the counter `380h` (0..63h) is below the duty `381h` (0x0336..0x0338); the bit must be 1 with the counter at or above the duty and 0 with it more than 10 below | `9Ch.7`, code 19 | inverse of the P4.3 pin. Assumption: P4.3 is the line into U16 and the feedback inverts it like lock-up A's; both inferred from this check, the P4.3-to-U16 trace not made on the schematic. With no solenoids it reads 0 whatever P4.3 does (sheet 8: Q27 off U16's output, collector to ID3). The stock ROM keeps `381h` at 0, so only the "off" half is exercised by a run |
 | IACV current, AI4 | 0x3C52..0x3C71 | `99h.3`, code 14 | see below (`iacv_connected`) |
 
 The wiki's engine-simulator page agrees with the set: its author had to fit
@@ -894,7 +909,18 @@ The schematic shows every one of these paths:
   backup MCU showing it is alive. What it sends is not known; the modeled
   rate is arbitrary and the ROM needs one edge in about five seconds;
 - IACV current (sheets 8, 5): sense resistor R61 in the emitter of the IACV
-  driver, amplified by U11 into MCU pin 58, P5.4.
+  driver, amplified by U11 into MCU pin 58, P5.4;
+- solenoid feedbacks (sheet 8): the outputs of U15 (lock-up A, A4), U16
+  (lock-up B, A5) and U14 (VTEC, A25) each have an 8.2 kohm pull-up in RM11
+  and an 18 k / 10 k divider into an NPN 2SC2785 (Q28, Q27, Q26) whose
+  collector is the feedback bit (82C55 pin 42 = port A bit 4, ID3 =
+  `4700h` bit 3, pin 41 = port A bit 5). A connected coil holds an undriven
+  output low (bit 1); a driven output, or an output with no coil on it,
+  turns the transistor on (bit 0). `Bus::drive_p28_feedback` and
+  `p28_input_port_as_read` model the missing coil through
+  `vtec_solenoid_connected` and `lockup_solenoids_connected`; the one
+  assumption is that a "5050" driver that is off does not pull its output
+  down itself.
 
 The mid-scale level on U5/X3 that the boot check at 0x530C demands is a
 separate thing: sheet 3 shows that input coming from connector pin B14 and
