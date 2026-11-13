@@ -62,6 +62,14 @@ const PUMP_PRIME_SECONDS: (f64, f64) = (0.5, 5.0);
 const OPENINGS_TOLERANCE: f64 = 2.0;
 const IGNITIONS_PER_CYCLE: f64 = 3.0;
 const SWEEP_TOP_RPM: f64 = 9000.0;
+/// Fewer engine cycles than this in the warm idle stage say nothing about it.
+pub const MIN_IDLE_ENGINE_CYCLES: f64 = 10.0;
+const READ_OUT_STAGE: &str = "code read-out";
+
+/// The run got through the fault-code read-out without stopping early.
+fn reached_read_out(result: &RunResult) -> bool {
+    result.stop.is_none() && stage(result, READ_OUT_STAGE).is_some()
+}
 
 fn line(label: &'static str, state: State, text: impl Into<String>) -> Line {
     Line { label, state, text: text.into() }
@@ -163,6 +171,9 @@ fn fuel_pump(result: &RunResult) -> Line {
 
 fn cranking(result: &RunResult) -> Line {
     staged(result, "cranking", "cranking", |s| {
+        if s.engine_cycles.is_nan() || s.engine_cycles == 0.0 {
+            return could_not_tell("cranking", "the engine did not turn in this stage");
+        }
         let silent: Vec<String> = s
             .injector_opens
             .iter()
@@ -181,15 +192,18 @@ fn cranking(result: &RunResult) -> Line {
 fn warm_idle(result: &RunResult) -> Line {
     staged(result, "warm idle", "warm idle", |s| {
         let cycles = s.engine_cycles;
+        if cycles.is_nan() || cycles < MIN_IDLE_ENGINE_CYCLES {
+            return could_not_tell("warm idle", format!("the engine turned only {cycles:.1} cycles in this stage"));
+        }
         for (i, n) in s.injector_opens.iter().enumerate() {
-            if (*n as f64 - cycles).abs() > OPENINGS_TOLERANCE {
+            if *n == 0 || (*n as f64 - cycles).abs() > OPENINGS_TOLERANCE {
                 return problem(
                     "warm idle",
                     format!("output {} opened {n} times in {cycles:.1} engine cycles", i + 1),
                 );
             }
         }
-        if (s.ignitions as f64) < IGNITIONS_PER_CYCLE * cycles {
+        if s.ignitions == 0 || (s.ignitions as f64) < IGNITIONS_PER_CYCLE * cycles {
             return problem(
                 "warm idle",
                 format!("{} ignitions in {cycles:.1} engine cycles (wanted at least {IGNITIONS_PER_CYCLE} per cycle)", s.ignitions),
@@ -228,13 +242,20 @@ fn sweep(result: &RunResult) -> Line {
 
 fn check_engine_light(result: &RunResult) -> Line {
     match result.mil_first_lit_after_bulb_check {
-        None => ok("check-engine light", "never lit after the bulb check"),
         Some(t) => problem("check-engine light", format!("lit at {t:.1} s, after the bulb check")),
+        None if !reached_read_out(result) => could_not_tell("check-engine light", "the run stopped before this"),
+        None => ok("check-engine light", "never lit after the bulb check"),
     }
 }
 
 fn codes(result: &RunResult) -> Line {
     match &result.lamp {
+        Lamp::Off | Lamp::Steady if !reached_read_out(result) => {
+            could_not_tell("codes", "the run stopped before this")
+        }
+        Lamp::Codes(v) if v.is_empty() => {
+            could_not_tell("codes", "the lamp blinked but no code could be read")
+        }
         Lamp::Off => ok("codes", "none"),
         Lamp::Steady => ok("codes", "none (lamp steady with the connector grounded: no code stored)"),
         Lamp::Codes(v) => {
@@ -303,6 +324,7 @@ mod tests {
         let mut key_on = stage("key on", 0.0, 6.0);
         key_on.fuel_pump_on_seconds = 2.0;
         let mut cranking = stage("cranking", 6.0, 7.5);
+        cranking.engine_cycles = 3.75;
         cranking.injector_opens = [3, 3, 3, 3];
         let mut warm = stage("warm idle", 10.0, 18.0);
         warm.engine_cycles = 53.3;
@@ -314,7 +336,7 @@ mod tests {
         full.fuel_stops_rpm = Some(7420.0);
         full.vtec_on_rpm = Some(4875.0);
         RunResult {
-            stages: vec![key_on, cranking, warm, ac, full],
+            stages: vec![key_on, cranking, warm, ac, full, stage("code read-out", 50.0, 90.0)],
             settling: Settling::Settled { boot_breaks: 0 },
             board_programmed: true,
             stop: None,
@@ -575,6 +597,8 @@ mod tests {
         c.lamp = Lamp::Codes(vec![23]);
         let r = judge(&c, &setup());
         assert_eq!(r.exit_status(), 1);
+        assert_eq!(r.valid.state, State::CouldNotTell);
+        assert_eq!(r.runs.state, State::Problem);
         match &r.verdict {
             Verdict::DoNotBurn(why) => {
                 assert!(why.starts_with("codes: "));
@@ -582,6 +606,67 @@ mod tests {
             }
             v => panic!("{v:?}"),
         }
+    }
+
+    #[test]
+    fn a_dead_warm_idle_is_not_ok() {
+        let mut c = clean();
+        let w = stage_mut(&mut c, "warm idle");
+        w.engine_cycles = 0.0;
+        w.injector_opens = [0; 4];
+        w.ignitions = 0;
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "warm idle").state, State::CouldNotTell);
+        assert_eq!(r.exit_status(), 3);
+
+        let mut c = clean();
+        stage_mut(&mut c, "warm idle").engine_cycles = f64::NAN;
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "warm idle").state, State::CouldNotTell);
+
+        let mut c = clean();
+        stage_mut(&mut c, "warm idle").injector_opens = [53, 53, 0, 53];
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "warm idle").state, State::Problem);
+        assert!(find(&r, "warm idle").text.contains("output 3 opened 0 times"));
+
+        let mut c = clean();
+        stage_mut(&mut c, "warm idle").ignitions = 0;
+        assert_eq!(find(&judge(&c, &setup()), "warm idle").state, State::Problem);
+    }
+
+    #[test]
+    fn cranking_without_a_turning_engine_is_could_not_tell() {
+        let mut c = clean();
+        stage_mut(&mut c, "cranking").engine_cycles = 0.0;
+        assert_eq!(find(&judge(&c, &setup()), "cranking").state, State::CouldNotTell);
+    }
+
+    #[test]
+    fn an_early_stop_does_not_pass_the_lamp_lines() {
+        let mut c = clean();
+        c.stages.retain(|s| matches!(s.name, "key on" | "cranking" | "warm idle"));
+        c.stop = Some((20.0, Stop::Unimplemented { pc: 0x1234, mnemonic: "DAA" }));
+        let r = judge(&c, &setup());
+        for label in ["check-engine light", "codes"] {
+            assert_eq!(find(&r, label).state, State::CouldNotTell, "{label}");
+            assert_eq!(find(&r, label).text, "the run stopped before this");
+        }
+        assert_ne!(r.exit_status(), 0);
+
+        c.mil_first_lit_after_bulb_check = Some(12.0);
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "check-engine light").state, State::Problem);
+        assert_eq!(r.exit_status(), 1);
+    }
+
+    #[test]
+    fn an_empty_code_list_is_could_not_tell() {
+        let mut c = clean();
+        c.lamp = Lamp::Codes(vec![]);
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "codes").state, State::CouldNotTell);
+        assert!(r.codes.is_empty());
     }
 
     #[test]
