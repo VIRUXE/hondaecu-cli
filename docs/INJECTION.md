@@ -244,12 +244,14 @@ What `9Fh.0` does:
   `135h` is cleared too.
 
 So it selects a full-width, all-cylinder first pulse and is consumed once.
-Injection is sustained with it clear, which is what the emulator currently
-supplies (`4700h` aliases RAM `0700h` and reads 0).
+Injection is sustained with it clear, which is what the emulator supplies:
+`Bus::p28_input_port` bit 0 resets to 0. The pgmfi wiki names that bit the
+starter signal (1 while cranking), which fits: a full-width pulse on all four
+cylinders, consumed once, is a cranking prime.
 
 `4700h` itself is a digital input port: 0x2581, 0x2940 and 0x3CBB read it,
-XOR it with `1Ah` and keep the result in `211h`. Modeling it is tracked
-separately; it is no longer a blocker for injection.
+XOR it with `1Ah` and keep the result in `211h`. It and the board's 82C55 are
+described in [`CPU_CORE.md`](CPU_CORE.md), "P28 external data bus".
 
 ---
 
@@ -292,7 +294,8 @@ the last width.
 - Pulse widths are produced by the ROM's own tables from modeled sensor
   voltages. They are plausible, not validated against a datalog; in particular
   the ECT/IAT/battery transfer functions in `engine.rs` are approximations.
-- External data `4700h` (digital inputs, including the `9Fh.0` source).
+- The signals on external data `4700h` and the 82C55 are named from the pgmfi
+  wiki, not the schematic; `4700h` bits 3, 6 and 7 are unnamed.
 - The executor's flag behavior was wrong in three places that the decoder
   ground-truth test cannot see. The remaining mnemonics have not been audited
   against the manual's summary tables (pp. 3-179 onward).

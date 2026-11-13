@@ -974,7 +974,11 @@ impl ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::ReplayEngine;
-    use crate::bus::{Bus, P28_MUX_U5_ADCR1, P28_U5_BOOT_CHECK_SELECT};
+    use crate::bus::{
+        Bus, P28_INPUT_ACTIVE_LOW, P28_IN_AC_SWITCH, P28_IN_STARTER, P28_MUX_U5_ADCR1,
+        P28_PA_SERVICE_CONNECTOR, P28_PPI_A_ACTIVE_LOW, P28_U5_BOOT_CHECK_SELECT, SFR_P0,
+        SFR_P1,
+    };
     use crate::cpu::Cpu;
     use crate::engine::EngineState;
     use crate::interpreter::Interpreter;
@@ -1022,12 +1026,22 @@ mod tests {
     /// `engine_cycles` full engine cycles. Returns the injector outputs in
     /// the order they opened, the last pulse width per output, and the bus.
     fn run_stock_p28(rpm: f64, engine_cycles: u32) -> Option<(Vec<usize>, [u32; 4], Bus)> {
+        run_stock_p28_with(rpm, engine_cycles, |_| {})
+    }
+
+    /// `run_stock_p28` with the board inputs adjusted before reset.
+    fn run_stock_p28_with(
+        rpm: f64,
+        engine_cycles: u32,
+        board: impl FnOnce(&mut Bus),
+    ) -> Option<(Vec<usize>, [u32; 4], Bus)> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
         let mut bus = Bus::new();
         if bus.load_rom_file(path).is_err() {
             eprintln!("stock P28 ROM not present at {path}; skipping");
             return None;
         }
+        board(&mut bus);
         let hz = crate::bus::CPU_HZ;
         let mut engine = EngineState::new();
         engine.rpm = rpm;
@@ -1109,6 +1123,246 @@ mod tests {
             let ie_shadow = bus.ram[0x00F2] as u16 | ((bus.ram[0x00F3] as u16) << 8);
             assert_eq!(ie_shadow, 0x2BAB, "{rpm} rpm: crank-signal mode");
         }
+    }
+
+    /// Issue #11: every external data access the stock ROM makes lands on a
+    /// modeled device, and the ROM's own bookkeeping agrees with the board.
+    #[test]
+    fn stock_p28_external_bus_is_fully_decoded() {
+        let Some((_, _, bus)) = run_stock_p28(800.0, 4) else {
+            return;
+        };
+
+        assert_eq!(
+            (bus.external_unmapped_reads, bus.external_unmapped_writes),
+            (0, 0),
+            "unmapped external access, last at {:04X?}",
+            bus.external_last_unmapped
+        );
+        // 0x51E4: mode 0, port A input, ports B and C output.
+        assert_eq!(bus.ppi.control, 0x90);
+        assert!(!bus.ppi.unsupported_mode);
+        // The ROM keeps ports B and C in step with its P0/P1 shadow latches.
+        assert_eq!(
+            bus.p28_board_outputs(),
+            (bus.ram[SFR_P0 as usize], bus.ram[SFR_P1 as usize])
+        );
+        // Both input bytes are stored polarity-corrected; the reset levels are
+        // the ones that read back as "nothing asserted".
+        assert_eq!(bus.ram[0x0210], 0x00, "82C55 port A image");
+        assert_eq!(bus.ram[0x0211], 0x00, "switch-input buffer image");
+        assert_ne!(bus.ram[0x00EB], 0x4D, "port readback fault must not latch");
+    }
+
+    #[test]
+    fn stock_p28_samples_both_digital_input_bytes() {
+        let Some((_, _, bus)) = run_stock_p28_with(800.0, 4, |bus| {
+            bus.p28_input_port = 0xC4;
+            // Bit 5 is driven by the VTEC feedback model: high, driver off.
+            bus.ppi.pins[crate::ppi82c55::PORT_A as usize] = 0xA1;
+        }) else {
+            return;
+        };
+
+        assert_eq!(bus.ram[0x0211], 0xC4 ^ P28_INPUT_ACTIVE_LOW);
+        assert_eq!(bus.ram[0x0210], 0xA1 ^ P28_PPI_A_ACTIVE_LOW);
+        assert_eq!((bus.external_unmapped_reads, bus.external_unmapped_writes), (0, 0));
+    }
+
+    /// Boot the stock ROM and run it for `seconds` of ECU time after boot at a
+    /// light-load operating point, calling `observe(bus, t)` after every
+    /// instruction. `rpm == 0.0` leaves the engine stopped (no crank signal).
+    fn observe_stock_p28(
+        rpm: f64,
+        seconds: f64,
+        board: impl FnOnce(&mut Bus),
+        mut observe: impl FnMut(&mut Bus, f64),
+    ) -> Option<Bus> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../P28-230.bin");
+        let mut bus = Bus::new();
+        if bus.load_rom_file(path).is_err() {
+            eprintln!("stock P28 ROM not present at {path}; skipping");
+            return None;
+        }
+        board(&mut bus);
+        let hz = crate::bus::CPU_HZ;
+        let mut engine = EngineState::new();
+        engine.rpm = rpm;
+        engine.map_kpa = 40.0;
+        engine.tps_pct = 2.0;
+        engine.ect_celsius = 88.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = bus.read_code_u16(0);
+        ReplayEngine::boot_to_runtime(&mut cpu, &mut bus).expect("stock P28 boots");
+
+        let start = cpu.cycles;
+        let end = start + (seconds * hz as f64) as u64;
+        while cpu.cycles < end {
+            let before = cpu.cycles;
+            let instruction = Interpreter::step(&mut cpu, &mut bus);
+            assert!(
+                !cpu.halted,
+                "halted at {:#06X}: {}",
+                instruction.pc,
+                instruction.mnemonic
+            );
+            let mut irq = bus.tick_timers((cpu.cycles - before) as u32);
+            if rpm > 0.0 {
+                irq |= engine.check_distributor_pulses(&mut bus, cpu.cycles, hz);
+            }
+            InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
+            observe(&mut bus, (cpu.cycles - start) as f64 / hz as f64);
+        }
+        Some(bus)
+    }
+
+    /// Append `(t, level)` when `level` differs from the last recorded one.
+    /// `None` (output not driven yet) records nothing.
+    fn record_edges(edges: &mut Vec<(f64, bool)>, level: Option<bool>, t: f64) {
+        let Some(level) = level else {
+            return;
+        };
+        if edges.last().map(|&(_, last)| last) != Some(level) {
+            edges.push((t, level));
+        }
+    }
+
+    /// Port B bit 7 is the fuel-pump relay: with the key on and the engine
+    /// stopped the ROM runs it for two seconds and then drops it.
+    #[test]
+    fn stock_p28_primes_the_fuel_pump_for_two_seconds() {
+        let mut edges = Vec::new();
+        let Some(bus) = observe_stock_p28(0.0, 3.0, |_| {}, |bus, t| {
+            record_edges(&mut edges, bus.p28_outputs().map(|out| out.fuel_pump), t);
+        }) else {
+            return;
+        };
+
+        assert_eq!(edges.len(), 2, "pump edges: {edges:?}");
+        assert!(edges[0].1 && edges[0].0 < 0.1, "on from reset: {edges:?}");
+        assert!(
+            !edges[1].1 && (1.8..=2.3).contains(&edges[1].0),
+            "off after the prime: {edges:?}"
+        );
+        assert!(!bus.fuel_pump_active);
+    }
+
+    #[test]
+    fn stock_p28_keeps_the_fuel_pump_on_while_the_engine_turns() {
+        let mut edges = Vec::new();
+        let Some(bus) = observe_stock_p28(800.0, 3.0, |_| {}, |bus, t| {
+            record_edges(&mut edges, bus.p28_outputs().map(|out| out.fuel_pump), t);
+        }) else {
+            return;
+        };
+
+        assert_eq!(edges.len(), 1, "pump edges: {edges:?}");
+        assert!(bus.fuel_pump_active);
+    }
+
+    /// `4700h` bit 0 is the starter signal. Latched at reset it selects the
+    /// all-cylinder cranking pulse (`9Fh.0`), and while it stays set every
+    /// injection opens all four injectors together instead of sequencing.
+    #[test]
+    fn stock_p28_injects_on_all_cylinders_while_the_starter_is_engaged() {
+        let mut states = Vec::new();
+        let Some(_) = observe_stock_p28(
+            300.0,
+            0.6,
+            |bus| bus.p28_input_port |= P28_IN_STARTER,
+            |bus, _| {
+                let outputs = bus.injector_outputs();
+                if states.last() != Some(&outputs) {
+                    states.push(outputs);
+                }
+            },
+        ) else {
+            return;
+        };
+
+        let openings = states.iter().filter(|&&s| s != 0x0F).count();
+        assert!(openings >= 4, "injector states: {states:02X?}");
+        assert!(
+            states.iter().all(|&s| s == 0x0F || s == 0x00),
+            "only all-open or all-closed while cranking: {states:02X?}"
+        );
+    }
+
+    /// `4700h` bit 2 is the A/C switch and port B bit 0 the A/C clutch relay.
+    #[test]
+    fn stock_p28_engages_the_ac_clutch_after_the_switch_closes() {
+        let mut edges = Vec::new();
+        let Some(bus) = observe_stock_p28(800.0, 3.5, |_| {}, |bus, t| {
+            if t > 1.0 {
+                bus.p28_input_port |= P28_IN_AC_SWITCH;
+            }
+            record_edges(&mut edges, bus.p28_outputs().map(|out| out.ac_clutch), t);
+        }) else {
+            return;
+        };
+
+        // Between the 82C55 mode word (which clears port B, i.e. every
+        // active-low driver on) and the ROM's first port write there are a
+        // few microseconds of "on"; skip them.
+        let edges: Vec<_> = edges.into_iter().filter(|&(t, _)| t > 0.01).collect();
+        assert_eq!(edges.len(), 1, "clutch edges: {edges:?}");
+        assert!(edges[0].1 && edges[0].0 > 1.0, "on after the switch: {edges:?}");
+        assert!(bus.ac_clutch_active);
+    }
+
+    /// `4700h` bit 1 is the VTEC oil-pressure switch. With VTEC off the ROM
+    /// expects it closed and flags `9Ah.1` when it is open (0x3D34).
+    #[test]
+    fn stock_p28_flags_an_open_vtec_pressure_switch() {
+        let fault = |closed: bool| {
+            observe_stock_p28(
+                800.0,
+                1.0,
+                |bus| bus.set_vtec_pressure_switch_closed(closed),
+                |_, _| {},
+            )
+            .map(|bus| bus.ram[0x009A] & 0x02 != 0)
+        };
+        let (Some(open), Some(closed)) = (fault(false), fault(true)) else {
+            return;
+        };
+
+        assert!(open, "open switch with VTEC off must set 9Ah.1");
+        assert!(!closed, "closed switch must not");
+    }
+
+    /// Port C bit 4 is the MIL and port A bit 7 the service check connector:
+    /// the lamp is lit for the bulb check at reset, and with the connector
+    /// grounded the ROM blinks it. (This operating point leaves a fault bit
+    /// set in `212h`, which is what gives the ROM a code to blink; without
+    /// the jumper the lamp is simply on.)
+    #[test]
+    fn stock_p28_blinks_the_mil_with_the_service_connector_grounded() {
+        let mil_edges = |jumper: bool| {
+            let mut edges = Vec::new();
+            observe_stock_p28(
+                800.0,
+                6.0,
+                |bus| {
+                    if jumper {
+                        bus.ppi.pins[crate::ppi82c55::PORT_A as usize] |= P28_PA_SERVICE_CONNECTOR;
+                    }
+                },
+                |bus, t| record_edges(&mut edges, bus.p28_outputs().map(|out| out.mil), t),
+            )
+            .map(|_| edges)
+        };
+        let (Some(steady), Some(blinking)) = (mil_edges(false), mil_edges(true)) else {
+            return;
+        };
+
+        let at_reset = steady.iter().rfind(|&&(t, _)| t < 0.05).map(|&(_, lit)| lit);
+        assert_eq!(at_reset, Some(true), "bulb check at reset: {steady:?}");
+        let late = |edges: &[(f64, bool)]| edges.iter().filter(|&&(t, _)| t > 1.0).count();
+        assert_eq!(late(&steady), 0, "no jumper, steady lamp: {steady:?}");
+        assert!(late(&blinking) >= 3, "jumper, blinking lamp: {blinking:?}");
     }
 
     #[test]

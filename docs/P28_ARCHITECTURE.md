@@ -68,7 +68,7 @@ flowchart TD
 | `0x0000` – `0x007F` | **SFR Space** | Special Function Registers (Timers, ADC, PWM, I/O Ports) |
 | `0x0080` – `0x00BF` | **Pointing Registers** | 8 sets `PR0..PR7`, each `X1, X2, DP, USP`; the live set is chosen by PSW `SCB` |
 | `0x00C0` – `0x047F` | **On-chip Data RAM** | Internal transient state and learned trims |
-| `0x0480` – `0xFFFF` | **External Data Space** | Architectural external bus; the emulator currently has a 4 KiB backing array and aliases higher addresses |
+| `0x0480` – `0xFFFF` | **External Data Space** | External bus. The P28 ROM uses `0x4700` (switch-input buffer) and `0x0F00`/`0x1F00`/`0x2F00`/`0x3F00` (82C55 ports A, B, C and control); everything else is unmapped and counted |
 | `0x0000` – `0x7FFF` | **Code ROM** | 32KB External EPROM (Machine code instructions, Fuel & Ignition 3D Lookup Tables) |
 
 ---
@@ -108,9 +108,10 @@ state, not a pre-mux configuration source.
 The saved bit at `0x9F.0` comes from external DATA[`0x4700`].0 instead:
 `0x220E` selects `0x4700`, `0x2211` reads it, `0x2212` shifts bit 0 into carry,
 and `0x2213` stores carry into `0x9F.0`; `0x2426` restores it after RAM clear.
-The emulator currently aliases `0x4700` to its 4 KiB backing store at `0x0700`.
-That external digital-input buffer is a separate unresolved board model, not
-part of the analog mux and not a value that should be invented at `0x0320`.
+`0x4700` is the board's switch-input buffer, modeled as `Bus::p28_input_port`;
+see [`CPU_CORE.md`](CPU_CORE.md), "P28 external data bus". Bit 0 is the
+starter signal according to the pgmfi wiki, 1 while cranking, so it rests at
+0; it is not a value that should be invented at `0x0320`.
 
 ---
 
@@ -225,9 +226,12 @@ not apply generically to digital switches and solenoids.
 
 ## Known Fidelity Limits
 
-- The P28 board outputs other than the injectors remain unresolved,
-  including the loads on the PWM pins.
-- The external digital-input buffer at `0x4700` is not modeled.
+- The P28 board outputs other than the injectors and the named 82C55 bits
+  remain unresolved, including the loads on the PWM pins.
+- The switch-input buffer at `0x4700` and the 82C55 at `0x0F00..0x3F00` are
+  modeled as devices. Their signal names are taken from the pgmfi wiki and
+  from ROM behaviour rather than the schematic, and three input bits are
+  unnamed. The fuel-pump relay is 82C55 port B bit 7 (active low).
 - The injector output stage and crank-signal pin assignment are ROM-derived
   and await confirmation against the schematic; cylinder mapping and sensor
   phasing are not established.

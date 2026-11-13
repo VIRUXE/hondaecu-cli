@@ -226,7 +226,7 @@ impl EcuTestSuite {
         engine.tps_pct = 50.0;
         engine.ect_celsius = 85.0;
         engine.speed_kmh = 60.0;
-        bus.vtec_pressure_switch = true; // Oil pressure confirmed (switch closed)
+        bus.set_vtec_pressure_switch_closed(true);
         engine.sync_sensors_to_bus(&mut bus);
 
         let passed = bus.vtec_solenoid_active;

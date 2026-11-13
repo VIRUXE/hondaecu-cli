@@ -150,7 +150,7 @@ impl DatalogServer {
 
         let mut flags1: u8 = 0;
         if bus.vtec_solenoid_active { flags1 |= 1 << 0; }
-        if bus.vtec_pressure_switch { flags1 |= 1 << 1; }
+        if bus.vtec_pressure_switch_closed() { flags1 |= 1 << 1; }
         if bus.mil_check_engine_light { flags1 |= 1 << 2; }
 
         let mut flags2: u8 = 0;

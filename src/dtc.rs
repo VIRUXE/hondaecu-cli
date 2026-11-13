@@ -214,11 +214,12 @@ impl DtcEvaluator {
 
             DtcCode::Dtc21_VtecSolenoidValve => {
                 bus.vtec_solenoid_active = false;
+                bus.vtec_solenoid_connected = false;
                 (true, format!("VTEC Solenoid Disconnected -> (DTC 21 Triggered)"))
             }
 
             DtcCode::Dtc22_VtecOilPressureSwitch => {
-                bus.vtec_pressure_switch = false; // Low oil pressure switch open
+                bus.set_vtec_pressure_switch_closed(false);
                 (true, format!("VTEC Oil Pressure Switch Open -> (DTC 22 Triggered)"))
             }
 

@@ -39,8 +39,10 @@ impl Cpu {
             dp: 0,
             x1: 0,
             x2: 0,
-            usp: 0x0700,
-            ssp: 0x07FE,
+            // Datasheet SFR table: SSP resets to FFFFh. USP lives in the
+            // pointing-register RAM, which reset leaves undefined.
+            usp: 0x0000,
+            ssp: 0xFFFF,
             lrb: 0,
             psw_other: 0,
             zf: false,

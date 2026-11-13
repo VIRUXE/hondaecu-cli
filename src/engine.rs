@@ -92,12 +92,11 @@ impl EngineState {
         // VSS is a conditioned digital pulse input on the P28, not an ADC
         // channel. `speed_kmh` remains available to scenarios and telemetry.
 
-        // VTEC spool valve. On the real board this output is driven by the ASIC
-        // (schematic pin A25, active-low low-side driver), not a directly
-        // modeled OKI GPIO, so it cannot be pin-sensed from the emulated ports.
-        // Derive engagement from the documented P28 crossover conditions and
-        // the oil-pressure switch input instead.
-        bus.vtec_solenoid_active = self.vtec_engaged(bus.vtec_pressure_switch);
+        // VTEC spool valve, scenario-side model: engagement derived from the
+        // documented P28 crossover conditions and the oil-pressure switch.
+        // What the ROM itself commands is 82C55 port C bit 0, available as
+        // `Bus::p28_outputs().vtec_solenoid`; the two are not reconciled yet.
+        bus.vtec_solenoid_active = self.vtec_engaged(bus.vtec_pressure_switch_closed());
     }
 
     /// VTEC spool-valve engagement per the documented P28 low-to-high cam

@@ -4,6 +4,7 @@
 
 mod cpu;
 mod bus;
+mod ppi82c55;
 mod engine;
 mod interpreter;
 mod interrupts;

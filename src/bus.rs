@@ -3,8 +3,118 @@
 use std::fs;
 use std::io;
 
+use crate::ppi82c55::{self, Ppi82c55};
+
 pub const ROM_SIZE: usize = 32768; // 32KB ROM space (0x0000..0x7FFF)
-pub const RAM_SIZE: usize = 4096;  // 4KB Data RAM & SFR space (0x0000..0x0FFF)
+/// On-chip data space: SFRs at 0x0000..0x007F and 1 KiB of RAM at
+/// 0x0080..0x047F. Every data address from `EXTERNAL_DATA_START` up leaves the
+/// chip on the external bus and is decoded by `Bus::read_external` /
+/// `Bus::write_external`, never by this array.
+pub const RAM_SIZE: usize = 0x0480;
+/// First data address that is not on the MSM66207 itself.
+pub const EXTERNAL_DATA_START: u16 = RAM_SIZE as u16;
+
+/// The P28 board's digital switch-input buffer, read by the ROM at 0x2211,
+/// 0x2584, 0x2943 and 0x3CBE through `DP = 4700h`. It is read-only.
+///
+/// Only this one address is decoded. The board almost certainly decodes fewer
+/// address lines than that, so the real buffer has mirrors, but the stock ROM
+/// never uses another external data address and the decode logic has not been
+/// read off the schematic.
+pub const P28_INPUT_PORT: u16 = 0x4700;
+/// The ROM inverts these bits (`XORB A, #01Ah` at 0x2585 and 0x2944) before
+/// storing the port in RAM 211h, so they are active low as read.
+pub const P28_INPUT_ACTIVE_LOW: u8 = 0x1A;
+// Signals on the switch-input buffer, as masks on the raw byte. Names and
+// polarities are from the pgmfi.org wiki's "P30 (Rom #203)" RAM map, whose
+// patch addresses coincide with this ROM (e.g. 0x2855, 0x3C6E, 0x3D06); they
+// were traced by that community, not read off the Bomarc schematic here.
+// Bits 3, 6 and 7 are not named there.
+/// Starter signal, ECU pin B9. Raw 1 = powered (cranking).
+pub const P28_IN_STARTER: u8 = 1 << 0;
+/// VTEC oil-pressure switch, pin D6. Raw 1 = grounded, i.e. the switch is
+/// closed, which is its state without VTEC oil pressure.
+pub const P28_IN_VTEC_PRESSURE_SW_CLOSED: u8 = 1 << 1;
+/// A/C switch, pin B5. Raw 1 = grounded (A/C requested).
+pub const P28_IN_AC_SWITCH: u8 = 1 << 2;
+/// Brake switch, pin D2. Raw 0 = powered (pedal pressed).
+pub const P28_IN_BRAKE_RELEASED: u8 = 1 << 4;
+/// A/T gear position, pin B7. Raw 1 = grounded.
+pub const P28_IN_AT_GEAR_POSITION: u8 = 1 << 5;
+
+// Signals on 82C55 port A, same source, plus the pgmfi "82C55" page (an
+// electrical trace of OBD1 Civic/Integra boards) for bits 4 and 6.
+/// Power-steering pressure switch, pin B8. Raw 0 = grounded.
+pub const P28_PA_PSP_OPEN: u8 = 1 << 3;
+/// Feedback from the A/T lock-up solenoid driver (IC15).
+pub const P28_PA_LOCKUP_FEEDBACK: u8 = 1 << 4;
+/// VTEC solenoid feedback, pin A4. Raw 0 = solenoid powered.
+pub const P28_PA_VTEC_SOLENOID_OFF: u8 = 1 << 5;
+/// Feedback from the O2-heater driver; the ROM compares it with what it
+/// drives on port C bit 2 (0x2094).
+pub const P28_PA_O2_HEATER_FEEDBACK: u8 = 1 << 6;
+/// Service check connector, pin D4. Raw 1 = grounded (jumper fitted).
+pub const P28_PA_SERVICE_CONNECTOR: u8 = 1 << 7;
+
+// Loads on the 82C55 output ports. Sources as for the inputs; "ROM" marks
+// the ones a stock-ROM test in `replay.rs` exercises.
+/// Port B bit 0: A/C clutch relay, pin A15, low = on (wiki P30; ROM).
+pub const P28_PB_AC_CLUTCH_OFF: u8 = 1 << 0;
+/// Port B bit 1: purge solenoid, pin A20, low = on (wiki P30).
+pub const P28_PB_PURGE_OFF: u8 = 1 << 1;
+/// Port B bit 2: alternator control, pin A16, high = pin pulled low (wiki P30).
+pub const P28_PB_ALTERNATOR_CONTROL: u8 = 1 << 2;
+/// Port B bit 3: radiator fan, low = on (wiki P30).
+pub const P28_PB_FAN_OFF: u8 = 1 << 3;
+/// Port B bit 7: fuel-pump relay, low = on. The wiki only traces this pin to
+/// the 7U016 custom IC; the function is from the ROM, which holds it low for
+/// two seconds after reset, while the starter input is set, and while the
+/// engine turns (0x4272..0x427E).
+pub const P28_PB_FUEL_PUMP_OFF: u8 = 1 << 7;
+/// Port C bit 0: VTEC solenoid driver IC14, high = on (wiki 82C55/P72; the
+/// ROM sets it together with its own "VTEC line active" flag `11Fh.2`).
+pub const P28_PC_VTEC_SOLENOID: u8 = 1 << 0;
+/// Port C bit 2: O2 heater, low = on (wiki 82C55; polarity from the ROM's
+/// inverted copy at 0x4869).
+pub const P28_PC_O2_HEATER_OFF: u8 = 1 << 2;
+/// Port C bit 4: malfunction indicator lamp, high = lit (wiki 82C55; ROM).
+pub const P28_PC_MIL: u8 = 1 << 4;
+
+/// The 82C55 outputs this model can name, decoded to "is it on".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct P28Outputs {
+    pub fuel_pump: bool,
+    pub ac_clutch: bool,
+    pub purge_solenoid: bool,
+    pub alternator_control: bool,
+    pub radiator_fan: bool,
+    pub vtec_solenoid: bool,
+    pub o2_heater: bool,
+    pub mil: bool,
+}
+
+/// The P28 board's MSM82C55A. Its four registers answer at 0F00h, 1F00h, 2F00h
+/// and 3F00h, i.e. the chip's A1:A0 are address lines A13:A12. Evidence is the
+/// ROM's init at 0x51E4: it writes 90h -- an 82C55 mode word, "mode 0, port A
+/// input, ports B and C output" -- to 3F00h, then loads 1F00h and 2F00h and
+/// reads 0F00h. As with `P28_INPUT_PORT`, only these four addresses are decoded.
+pub const P28_PPI_BASE: u16 = 0x0F00;
+const P28_PPI_REGISTER_SHIFT: u32 = 12;
+/// The ROM inverts these port A bits (`XORB A, #038h` at 0x51FA and 0x290E)
+/// before storing the port in RAM 210h, so they are active low as read.
+pub const P28_PPI_A_ACTIVE_LOW: u8 = 0x38;
+
+/// Register index of a P28 82C55 address, if `addr` is one.
+fn p28_ppi_register(addr: u16) -> Option<u8> {
+    let reg = addr.wrapping_sub(P28_PPI_BASE) >> P28_PPI_REGISTER_SHIFT;
+    (reg < 4 && addr == P28_PPI_BASE + (reg << P28_PPI_REGISTER_SHIFT)).then_some(reg as u8)
+}
+
+/// What an external read returns when no device answers. Nothing drives the
+/// bus, so the real value depends on board pull-ups and bus capacitance; all
+/// ones is a placeholder, and `Bus::external_unmapped_reads` counts how often
+/// it was handed out.
+pub const EXTERNAL_OPEN_BUS: u8 = 0xFF;
 
 /// Machine-cycle rate of the OKI core, in Hz. `cpu.cycles` counts machine
 /// cycles (from `decoder::int_cycles`, which are the manual's INT cycle counts),
@@ -62,8 +172,13 @@ pub const IRQ_INT1: u16 = 15;
 // 0 = input; reset 00H) and, for P2..P4, a secondary-function register
 // (PxSF: 1 = the pin is driven by the on-chip peripheral). Confirmed against
 // the MSM66207 datasheet SFR map and the P28 ROM's own init at 0x2292..0x2304,
-// which writes P0IO/P1IO/P2IO = 0FFh for the three driver ports and
-// P4IO = 00Dh / P4SF = 0FCh, leaving P4.1 a plain GPIO *input*.
+// which writes P0IO/P1IO/P2IO = 0FFh and
+// P4IO = 00Dh / P4SF = 0FCh, leaving P4.1 a plain GPIO *input*. P0 and P1 are
+// the external address/data bus on the P28; the ROM uses their latches as
+// shadows of the board's 82C55 output ports (see `Bus::ppi`). P2.0..P2.3 are
+// the injector latch data, P2.5..P2.7 the analog mux selects, and P2.4 is
+// toggled next to every watchdog reload (0x5220..0x522A), i.e. it strobes
+// something outside the chip rather than switching a load.
 pub const SFR_P0: u16   = 0x20;
 pub const SFR_P0IO: u16 = 0x21;
 pub const SFR_P1: u16   = 0x22;
@@ -227,13 +342,17 @@ pub struct Bus {
     /// (0 = injector open). See `latch_injector_outputs`.
     injector_outputs: u8,
 
-    // Board-output telemetry. None of these is pin-sensed from a verified
-    // P28 net: P2.0..P2.3 are the injector latch data and P2.5..P2.7 the
-    // analog mux selects, so the fields below are scenario-side state only.
+    // Board-output telemetry. `fuel_pump_active`, `mil_check_engine_light`,
+    // `ac_clutch_active`, `radiator_fan_active` and `purge_solenoid_active`
+    // follow the 82C55 outputs once the ROM has programmed it (see
+    // `p28_outputs`). `vtec_solenoid_active` is still the scenario-side model.
     pub fuel_pump_active: bool,
     pub mil_check_engine_light: bool,
     pub vtec_solenoid_active: bool,    // set from engine conditions, see EngineState::vtec_engaged
-    pub vtec_pressure_switch: bool,
+    /// The VTEC solenoid is plugged in. While it is, 82C55 port A bit 5 (the
+    /// solenoid feedback) follows the port C bit 0 driver; unplugged, the
+    /// feedback always reads "not powered".
+    pub vtec_solenoid_connected: bool,
     pub ac_clutch_active: bool,
     pub radiator_fan_active: bool,
     pub purge_solenoid_active: bool,
@@ -253,6 +372,32 @@ pub struct Bus {
     /// continuous scan conversions; each completion raises IRQH.4, which the
     /// P28 boot routine polls at 0x52C5.
     pub adc_cycles_remaining: Option<u32>,
+
+    /// Byte presented by the P28 switch-input buffer at `P28_INPUT_PORT`, as
+    /// the ROM reads it (before its own `XOR 1Ah`).
+    ///
+    /// The reset value is `P28_INPUT_ACTIVE_LOW`, the one byte the ROM stores
+    /// as 00h in RAM 211h. For the bits the pgmfi wiki names (`P28_IN_*`) that
+    /// is key on, engine stopped, manual gearbox: starter off, VTEC pressure
+    /// switch closed, A/C off, brake released. Bits 3, 6 and 7 are unnamed
+    /// and simply rest at the level the ROM stores as 0.
+    pub p28_input_port: u8,
+    /// The board's 82C55. Port A pins are the second set of digital inputs
+    /// (`P28_PA_*`). They reset to `P28_PPI_A_ACTIVE_LOW`, which the ROM stores
+    /// as 00h in RAM 210h: VTEC solenoid off, service connector open, and the
+    /// power-steering switch not grounded -- whether that switch really rests
+    /// open is not established. Ports B and C are the board's latched outputs,
+    /// which the ROM shadows in the otherwise unused P0 and P1 latches.
+    /// Port A bit 5 is not a free input: `drive_p28_feedback` sets it from
+    /// the VTEC solenoid driver on every read.
+    pub ppi: Ppi82c55,
+    /// External-bus reads / writes that no modeled device decoded. The stock
+    /// P28 ROM performs none; a non-zero count means a ROM or a test reached
+    /// for hardware this model does not have.
+    pub external_unmapped_reads: u64,
+    pub external_unmapped_writes: u64,
+    /// Address of the most recent unmapped external access.
+    pub external_last_unmapped: Option<u16>,
 
     /// Levels driven onto P0..P4 from outside the chip. Only consulted for
     /// bits the ROM has configured as inputs; output bits read back their own
@@ -284,7 +429,7 @@ impl Bus {
             fuel_pump_active: false,
             mil_check_engine_light: false,
             vtec_solenoid_active: false,
-            vtec_pressure_switch: true, // Normal oil pressure closed
+            vtec_solenoid_connected: true,
             ac_clutch_active: false,
             radiator_fan_active: false,
             purge_solenoid_active: false,
@@ -292,6 +437,15 @@ impl Bus {
             // All external inputs idle low. In particular P4.1 low means the
             // ECU is powered and should run; high sends it to STOP mode.
             port_pins: [0; 5],
+            p28_input_port: P28_INPUT_ACTIVE_LOW,
+            ppi: {
+                let mut ppi = Ppi82c55::new();
+                ppi.pins[ppi82c55::PORT_A as usize] = P28_PPI_A_ACTIVE_LOW;
+                ppi
+            },
+            external_unmapped_reads: 0,
+            external_unmapped_writes: 0,
+            external_last_unmapped: None,
             timer_accum: [0; 4],
             capture_lapped: [false; 4],
             adc_cycles_remaining: None,
@@ -299,7 +453,10 @@ impl Bus {
             serial_tx_queue: Vec::new(),
         };
         // Initialize default SFR values
-        bus.write_data_u16(SFR_ASSP, 0x07FE);
+        // Datasheet SFR table: SSP resets to FFFFh. Every ROM loads its own
+        // stack pointer; until then the stack is in unmapped external space,
+        // where pushes are counted rather than silently landing in RAM.
+        bus.write_data_u16(SFR_ASSP, 0xFFFF);
         bus
     }
 
@@ -339,7 +496,10 @@ impl Bus {
 
     // Data Space Read (RAM & SFRs)
     pub fn read_data_u8(&mut self, addr: u16) -> u8 {
-        let idx = (addr as usize) & (RAM_SIZE - 1);
+        if addr >= EXTERNAL_DATA_START {
+            return self.read_external(addr);
+        }
+        let idx = addr as usize;
 
         // Handle special SFR reads. ADCR0..ADCR7 come from the backing latches
         // below; live input changes are not visible until conversion completes.
@@ -371,6 +531,98 @@ impl Bus {
         self.ram[idx]
     }
 
+    /// Read from the external data bus (`EXTERNAL_DATA_START..=0xFFFF`).
+    fn read_external(&mut self, addr: u16) -> u8 {
+        let driven = match addr {
+            P28_INPUT_PORT => Some(self.p28_input_port),
+            _ => p28_ppi_register(addr).and_then(|reg| {
+                self.drive_p28_feedback();
+                self.ppi.read(reg)
+            }),
+        };
+        driven.unwrap_or_else(|| {
+            self.external_unmapped_reads += 1;
+            self.external_last_unmapped = Some(addr);
+            EXTERNAL_OPEN_BUS
+        })
+    }
+
+    /// Write to the external data bus. The 82C55 is the only writable
+    /// device; the switch-input buffer does not latch, so a write to it is
+    /// dropped and counted like any other unmapped access.
+    fn write_external(&mut self, addr: u16, val: u8) {
+        if let Some(reg) = p28_ppi_register(addr) {
+            self.ppi.write(reg, val);
+            self.sync_p28_telemetry();
+            return;
+        }
+        self.external_unmapped_writes += 1;
+        self.external_last_unmapped = Some(addr);
+    }
+
+    /// Levels on the board's latched outputs: 82C55 port B (`.0`) and port C
+    /// (`.1`). `docs/CPU_CORE.md` lists what is known about each bit.
+    pub fn p28_board_outputs(&self) -> (u8, u8) {
+        (self.ppi.port(ppi82c55::PORT_B), self.ppi.port(ppi82c55::PORT_C))
+    }
+
+    /// The named board outputs, or `None` until the ROM has made ports B and
+    /// C outputs -- before that the pins float and nothing is being driven.
+    pub fn p28_outputs(&self) -> Option<P28Outputs> {
+        let b = self.ppi.output(ppi82c55::PORT_B)?;
+        let c = self.ppi.output(ppi82c55::PORT_C)?;
+        Some(P28Outputs {
+            fuel_pump: b & P28_PB_FUEL_PUMP_OFF == 0,
+            ac_clutch: b & P28_PB_AC_CLUTCH_OFF == 0,
+            purge_solenoid: b & P28_PB_PURGE_OFF == 0,
+            alternator_control: b & P28_PB_ALTERNATOR_CONTROL != 0,
+            radiator_fan: b & P28_PB_FAN_OFF == 0,
+            vtec_solenoid: c & P28_PC_VTEC_SOLENOID != 0,
+            o2_heater: c & P28_PC_O2_HEATER_OFF == 0,
+            mil: c & P28_PC_MIL != 0,
+        })
+    }
+
+    /// Copy the ROM-driven outputs into the telemetry fields.
+    fn sync_p28_telemetry(&mut self) {
+        if let Some(out) = self.p28_outputs() {
+            self.fuel_pump_active = out.fuel_pump;
+            self.ac_clutch_active = out.ac_clutch;
+            self.radiator_fan_active = out.radiator_fan;
+            self.purge_solenoid_active = out.purge_solenoid;
+            self.mil_check_engine_light = out.mil;
+        }
+    }
+
+    /// Board feedback into 82C55 port A. Bit 5 senses the VTEC solenoid line:
+    /// low while the port C bit 0 driver powers a connected solenoid. The ROM
+    /// checks it against its own command at 0x3D0C..0x3D21, so leaving the bit
+    /// static would fault as soon as the ROM switched VTEC.
+    fn drive_p28_feedback(&mut self) {
+        let powered = self.vtec_solenoid_connected
+            && self.p28_outputs().is_some_and(|out| out.vtec_solenoid);
+        let pins = &mut self.ppi.pins[ppi82c55::PORT_A as usize];
+        if powered {
+            *pins &= !P28_PA_VTEC_SOLENOID_OFF;
+        } else {
+            *pins |= P28_PA_VTEC_SOLENOID_OFF;
+        }
+    }
+
+    /// The VTEC oil-pressure switch is closed (pin D6 grounded), its state
+    /// without VTEC oil pressure.
+    pub fn vtec_pressure_switch_closed(&self) -> bool {
+        self.p28_input_port & P28_IN_VTEC_PRESSURE_SW_CLOSED != 0
+    }
+
+    pub fn set_vtec_pressure_switch_closed(&mut self, closed: bool) {
+        if closed {
+            self.p28_input_port |= P28_IN_VTEC_PRESSURE_SW_CLOSED;
+        } else {
+            self.p28_input_port &= !P28_IN_VTEC_PRESSURE_SW_CLOSED;
+        }
+    }
+
     /// Read a port the way the silicon does, one bit at a time:
     ///   * secondary function enabled -> the on-chip peripheral drives the pin
     ///   * else configured as output  -> the port's own output latch
@@ -397,25 +649,13 @@ impl Bus {
             } else if dir & m != 0 {
                 latch & m != 0
             } else {
-                self.input_level(port, bit).unwrap_or(pins & m != 0)
+                pins & m != 0
             };
             if level {
                 v |= m;
             }
         }
         v
-    }
-
-    /// Named external inputs, for pins whose harness signal this model tracks
-    /// as a field rather than as a raw bit in `port_pins`. Only consulted when
-    /// the ROM has left the pin configured as an input -- the P28 sets
-    /// P2IO = 0FFh, so on this ROM P2.3 is a driver output and the VTEC
-    /// pressure switch never reads back here.
-    fn input_level(&self, port: usize, bit: u8) -> Option<bool> {
-        match (port, bit) {
-            (2, 3) => Some(self.vtec_pressure_switch),
-            _ => None,
-        }
     }
 
     /// Level driven by the on-chip peripheral assigned to a pin, for the pins
@@ -537,7 +777,11 @@ impl Bus {
             return;
         }
 
-        let idx = (addr as usize) & (RAM_SIZE - 1);
+        if addr >= EXTERNAL_DATA_START {
+            self.write_external(addr, val);
+            return;
+        }
+        let idx = addr as usize;
         let old = self.ram[idx];
         self.ram[idx] = val;
 
@@ -551,13 +795,6 @@ impl Bus {
             } else {
                 None
             };
-        } else if addr == SFR_P2 || addr == SFR_P3 {
-            // P2.0..P2.3 are only the *data* for the injector output latch;
-            // see `latch_injector_outputs`.
-            let p2 = self.ram[SFR_P2 as usize];
-            self.ac_clutch_active = (p2 & (1 << 4)) != 0;
-            // P2.5..P2.7 are the shared A/B/C selects for U5 and U6, not fan
-            // or purge outputs. Those board-output mappings remain unresolved.
         } else if addr == SFR_STBUF {
             self.serial_tx_queue.push(val);
         } else if addr == SFR_TCON0 && old & TCON_TROUT == 0 && val & TCON_TROUT != 0 {
@@ -962,6 +1199,116 @@ mod tests {
 
         assert_ne!(bus.tick_timers(1) & (1 << IRQ_TM1), 0);
         assert_eq!(bus.read_data_u16(SFR_ADCR0 + 4), 0x0100 << 6);
+    }
+
+    #[test]
+    fn external_addresses_do_not_alias_on_chip_ram() {
+        let mut bus = Bus::new();
+        bus.p28_input_port = 0x5A;
+        // The old 4 KiB mask folded 4700h onto 0700h and 1480h onto 0480h.
+        bus.write_data_u8(0x047F, 0x11);
+        bus.write_data_u8(0x0700, 0x22);
+        bus.write_data_u8(0x1480, 0x33);
+
+        assert_eq!(bus.read_data_u8(0x047F), 0x11, "last on-chip RAM byte");
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT), 0x5A);
+        assert_eq!(bus.external_unmapped_writes, 2);
+        assert_eq!(bus.read_data_u8(0x0700), EXTERNAL_OPEN_BUS);
+        assert_eq!(bus.read_data_u8(0x0480), EXTERNAL_OPEN_BUS);
+        assert_eq!(bus.external_unmapped_reads, 2);
+        assert_eq!(bus.external_last_unmapped, Some(0x0480));
+    }
+
+    #[test]
+    fn p28_input_port_is_read_only_and_resets_to_nothing_asserted() {
+        let mut bus = Bus::new();
+
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT) ^ P28_INPUT_ACTIVE_LOW, 0);
+        bus.write_data_u8(P28_INPUT_PORT, 0xFF);
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT), P28_INPUT_ACTIVE_LOW);
+        assert_eq!(bus.external_unmapped_writes, 1);
+    }
+
+    #[test]
+    fn p28_ppi_answers_at_its_four_addresses_only() {
+        let mut bus = Bus::new();
+        // Bit 5 is the VTEC solenoid feedback, high while the driver is off.
+        bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xE3;
+        // The ROM's init sequence at 0x51E4.
+        bus.write_data_u8(0x3F00, 0x90);
+        bus.write_data_u8(0x1F00, 0xEB);
+        bus.write_data_u8(0x2F00, 0x44);
+
+        assert_eq!(bus.read_data_u8(0x0F00), 0xE3);
+        assert_eq!(bus.read_data_u8(0x1F00), 0xEB);
+        assert_eq!(bus.read_data_u8(0x2F00), 0x44);
+        assert_eq!(bus.p28_board_outputs(), (0xEB, 0x44));
+        assert_eq!(bus.external_unmapped_reads, 0);
+
+        for addr in [0x0E00, 0x0F01, 0x4F00, 0x1F80] {
+            assert_eq!(p28_ppi_register(addr), None, "{addr:04X}");
+        }
+        assert_eq!(bus.read_data_u8(0x4F00), EXTERNAL_OPEN_BUS);
+        assert_eq!(bus.external_unmapped_reads, 1);
+    }
+
+    #[test]
+    fn p28_outputs_are_undriven_until_the_ppi_is_programmed() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x1F00, 0x00);
+
+        assert_eq!(bus.p28_outputs(), None);
+        assert!(!bus.fuel_pump_active, "nothing is driven yet");
+
+        bus.write_data_u8(0x3F00, 0x90);
+        // The ROM's own reset values: P0 = EBh, P1 = 44h.
+        bus.write_data_u8(0x1F00, 0xEB);
+        bus.write_data_u8(0x2F00, 0x44);
+
+        assert_eq!(
+            bus.p28_outputs(),
+            Some(P28Outputs {
+                fuel_pump: false,
+                ac_clutch: false,
+                purge_solenoid: false,
+                alternator_control: false,
+                radiator_fan: false,
+                vtec_solenoid: false,
+                o2_heater: false,
+                mil: false,
+            })
+        );
+
+        bus.write_data_u8(0x1F00, 0xEB & !(P28_PB_FUEL_PUMP_OFF | P28_PB_AC_CLUTCH_OFF));
+        bus.write_data_u8(0x2F00, 0x44 | P28_PC_MIL);
+        assert!(bus.fuel_pump_active && bus.ac_clutch_active && bus.mil_check_engine_light);
+        assert!(!bus.radiator_fan_active && !bus.purge_solenoid_active);
+    }
+
+    #[test]
+    fn vtec_solenoid_feedback_follows_the_driver_while_connected() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x3F00, 0x90);
+        let feedback = |bus: &mut Bus| bus.read_data_u8(0x0F00) & P28_PA_VTEC_SOLENOID_OFF;
+
+        bus.write_data_u8(0x2F00, 0x00);
+        assert_ne!(feedback(&mut bus), 0, "driver off");
+        bus.write_data_u8(0x2F00, P28_PC_VTEC_SOLENOID);
+        assert_eq!(feedback(&mut bus), 0, "driver on, solenoid powered");
+
+        bus.vtec_solenoid_connected = false;
+        assert_ne!(feedback(&mut bus), 0, "unplugged solenoid never reads powered");
+    }
+
+    #[test]
+    fn vtec_pressure_switch_is_bit_1_of_the_input_port() {
+        let mut bus = Bus::new();
+        assert!(bus.vtec_pressure_switch_closed(), "closed at rest");
+
+        bus.set_vtec_pressure_switch_closed(false);
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT) & P28_IN_VTEC_PRESSURE_SW_CLOSED, 0);
+        // The ROM's image of an open switch is 211h.1 = 1.
+        assert_ne!((bus.p28_input_port ^ P28_INPUT_ACTIVE_LOW) & 0x02, 0);
     }
 
     #[test]
