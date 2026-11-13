@@ -9,6 +9,7 @@ mod bus;
 mod bench;
 mod blink;
 mod script;
+mod verdict;
 mod ppi82c55;
 mod engine;
 mod interpreter;

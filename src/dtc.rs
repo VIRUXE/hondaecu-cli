@@ -235,3 +235,8 @@ impl DtcEvaluator {
         }
     }
 }
+
+/// The name of a Honda OBD1 fault code, if the table has it.
+pub fn code_name(number: u8) -> Option<&'static str> {
+    ALL_HONDA_OBD1_DTCS.iter().find(|d| d.number == number).map(|d| d.name)
+}
