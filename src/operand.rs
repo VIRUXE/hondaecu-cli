@@ -1,7 +1,7 @@
 // Operand model for the OKI 66207.
 //
 // FULL_OPCODES stores each instruction as display text ("MOV DP, #N16",
-// "JBS off N8.5, rel8"). Rather than hand-writing 2623 execution arms, the
+// "JBS off N8.5, rel8"). Rather than hand-writing 2624 execution arms, the
 // operand text is parsed once into this small tree and evaluated generically.
 //
 // Addressing notes that are easy to get wrong:

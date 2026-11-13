@@ -1,5 +1,6 @@
 // 100% Full-Coverage OKI 66207 Opcode Table & Decoder
 // Generated automatically from 66207.op (2,623 instructions)
+// plus the corrections in tools/gen_full_decoder.py
 
 use crate::cpu::Cpu;
 use crate::bus::Bus;
@@ -12,7 +13,7 @@ pub struct OpcodePattern {
     pub bytes_pat: &'static [&'static str],
 }
 
-pub const FULL_OPCODE_COUNT: usize = 2623;
+pub const FULL_OPCODE_COUNT: usize = 2624;
 
 pub const FULL_OPCODES: &[OpcodePattern] = &[
     OpcodePattern { mnemonic: "ADC A, #N16", dd_mode: '1', bytes_pat: &["96", "NL", "NH"] },
@@ -1645,7 +1646,8 @@ pub const FULL_OPCODES: &[OpcodePattern] = &[
     OpcodePattern { mnemonic: "ORB A, r7", dd_mode: '0', bytes_pat: &["6F"] },
     OpcodePattern { mnemonic: "ORB A, PSWH", dd_mode: '0', bytes_pat: &["A2", "E2"] },
     OpcodePattern { mnemonic: "ORB A, PSWL", dd_mode: '0', bytes_pat: &["A3", "E2"] },
-    OpcodePattern { mnemonic: "ORB A, off N8", dd_mode: 'U', bytes_pat: &["E7", "N8"] },
+    OpcodePattern { mnemonic: "OR A, off N8", dd_mode: '1', bytes_pat: &["E7", "N8"] },
+    OpcodePattern { mnemonic: "ORB A, off N8", dd_mode: '0', bytes_pat: &["E7", "N8"] },
     OpcodePattern { mnemonic: "ORB A, N8", dd_mode: '0', bytes_pat: &["C5", "N8", "E2"] },
     OpcodePattern { mnemonic: "ORB A, [DP]", dd_mode: '0', bytes_pat: &["C2", "E2"] },
     OpcodePattern { mnemonic: "ORB A, S8[USP]", dd_mode: '0', bytes_pat: &["C3", "S8", "E2"] },

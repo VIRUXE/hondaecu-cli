@@ -947,6 +947,24 @@ mod tests {
         }
     }
 
+    /// The stock ROM decides "is any fault stored" at 0x5FDB with
+    /// `L A, off(212h)` / `E7 14` / `ADD A, #0FFFFh`: the OR has to take in
+    /// both bytes of the second fault word, or codes 25..32 go unnoticed.
+    #[test]
+    fn or_with_an_off_page_word_takes_both_bytes_in_word_mode() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        cpu.dd = true;
+        cpu.a = 0x0000;
+        bus.write_data_u16(0x0114, 0x0100); // off 14h on page 1
+        bus.rom[..2].copy_from_slice(&[0xE7, 0x14]);
+
+        let decoded = step(&mut cpu, &mut bus).expect("E7 executes");
+
+        assert_eq!(decoded.mnemonic, "OR A, off N8");
+        assert_eq!(cpu.a, 0x0100);
+        assert!(!cpu.zf);
+    }
+
     #[test]
     fn mul_uses_the_implicit_accumulator_and_er0_operands() {
         let (mut cpu, mut bus) = cpu_with_local_bank();

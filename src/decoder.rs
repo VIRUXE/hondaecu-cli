@@ -104,9 +104,9 @@ pub struct ExtCycles {
 /// the object, `4w + 1` for the `off N8` source -- and is encoded as printed.
 /// An external system stack costs four cycles per word pushed or popped.
 ///
-/// Three cells are not taken from the page: `ADDB A, [DP]` prints a dash
-/// (p. 3-16), and the page for `<alu> obj, A` in word mode (3-6) is missing
-/// from the scan, so `off N8` and `S8[USP]` there follow the rule.
+/// Two cells are not taken from the page: `ADDB A, [DP]` prints a dash
+/// (p. 3-16), and `MOVB off N8, A` is 11 in Table 3-4 but 13 on page 3-95,
+/// the value of the row beneath it; 11 is used.
 fn ext_cycles(mnemonic: &str, len: usize) -> ExtCycles {
     let (op, operands) = mnemonic.split_once(' ').unwrap_or((mnemonic, ""));
     let mut args = operands.split(',').map(str::trim);
@@ -562,6 +562,21 @@ mod tests {
         assert_eq!(d.fields.n16, 0x047E);
     }
 
+    /// `E7 N8` is the short `off N8` form of OR, like 87/97/A7/B7/C7/D7/F7 for
+    /// the other seven accumulator operations: a word OR when DD is set, a
+    /// byte OR when it is clear. 66207.op lists it for the byte form only.
+    #[test]
+    fn e7_is_a_word_or_when_dd_is_set() {
+        let code = [0xE7u8, 0x14];
+        let fetch = |i: usize| code.get(i).copied().unwrap_or(0);
+
+        let word = decode(true, fetch).expect("E7 decodes in word mode");
+        assert_eq!((word.mnemonic, word.len, word.cycles), ("OR A, off N8", 2, 4));
+
+        let byte = decode(false, fetch).expect("E7 decodes in byte mode");
+        assert_eq!((byte.mnemonic, byte.len, byte.cycles), ("ORB A, off N8", 2, 4));
+    }
+
     /// Decode every instruction dasm662 found in the P28-230 OEM ROM and compare
     /// mnemonic and length. The fixture carries a 6-byte window per instruction
     /// so this test needs no ROM image.
@@ -600,6 +615,14 @@ mod tests {
             // dasm662 prints this one as "TRB"; 66207.op (and the assembler)
             // call it "TBR". Same encoding, same length -- spelling only.
             let want_mnem = if want_mnem == "TRB" { "TBR" } else { want_mnem };
+            // dasm662 is built from the same 66207.op, which has E7 as a
+            // byte OR in either DD state. In word mode it is `OR A, off N8`
+            // (see `e7_is_a_word_or_when_dd_is_set`); the ROM has one, at 5FDD.
+            let want_mnem = if want_mnem == "ORB" && dd && win.first() == Some(&0xE7) {
+                "OR"
+            } else {
+                want_mnem
+            };
 
             if got_mnem.eq_ignore_ascii_case(want_mnem) {
                 ok_mnem += 1;

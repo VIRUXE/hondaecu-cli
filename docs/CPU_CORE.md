@@ -68,7 +68,7 @@ Common first-byte prefixes:
 | `C4` / `C5` | `off N8` / `N8` (byte) | | |
 
 Because of this, patterns must be matched **whole**. That is what
-`src/decoder.rs` does, against the 2623-entry `FULL_OPCODES` table.
+`src/decoder.rs` does, against the 2624-entry `FULL_OPCODES` table.
 
 > The correct table already existed in `src/full_decoder.rs`, generated from the
 > spec — but was entirely unused (`mod full_decoder;` declared, never called,
@@ -90,6 +90,19 @@ In `66207.op` the flag column `-XY` encodes this in `X`:
 | `R` | **resets** DD to 0 |
 
 DD is therefore decoder *context*, threaded through `decode(dd, …)`.
+
+One entry of `66207.op` is corrected when the table is generated
+(`tools/gen_full_decoder.py`). It lists `E7,N8` as `ORB A, off N8` with flag
+`U` and gives the word form only the long encoding `B4,N8,E2`. The eight
+accumulator operations share one layout -- `x6` immediate, `x7` `off N8`:
+`87` ADD, `97` ADC, `A7` SUB, `B7` SBC, `C7` CMP, `D7` AND, `E7` OR, `F7`
+XOR -- each a word operation with DD set and a byte operation with DD
+clear. The manual's `OR A, obj` page (3-103) prints the long code beside the
+two-byte form's 4 cycles. The stock ROM depends on it: at `0x5FDB` it runs
+`L A, off(212h)` / `E7 14` / `ADD A, #0FFFFh` to ask whether either 16-bit
+fault word is non-zero, and as a byte OR that missed `215h` (codes 25 to
+32). The table therefore has 2624 entries, and the dasm662 fixture, built
+from the same spec, is expected to say `ORB` at `5FDD`.
 
 Short `+N` register forms cover **er0–er3** (4); byte `rN` forms cover
 **r0–r7** (8).
@@ -613,14 +626,14 @@ soft-resets between init phases on purpose.
 
 | file | role |
 |---|---|
-| `src/full_decoder.rs` | generated 2623-entry opcode table (data only) |
+| `src/full_decoder.rs` | generated 2624-entry opcode table (data only) |
 | `src/decoder.rs` | whole-pattern, DD-aware matcher → `Decoded` |
 | `src/operand.rs` | parses operand *text* once into an `Arg` tree |
 | `src/exec.rs` | evaluates the tree; each mnemonic implemented once |
 
 Parsing operand text (`"JBS off N8.5, rel8"`) into a tree means each mnemonic is
 implemented once regardless of how many addressing-mode encodings it has — 85
-mnemonics cover all 2623 patterns.
+mnemonics cover all 2624 patterns.
 
 Unknown instructions return a typed `ExecError` rather than silently doing
 something plausible. That is deliberate, and it caught three real bugs:
@@ -642,7 +655,7 @@ cargo test --release
 |---|---|
 | `decoder::matches_dasm662_ground_truth` | **10914 / 10914** instructions match `dasm662` on mnemonic *and* length |
 | `decoder::decodes_reset_sequence` | pins the exact reset path that broke before |
-| `operand::every_pattern_parses` | all 2623 patterns parse |
+| `operand::every_pattern_parses` | all 2624 patterns parse |
 | `exec::oem_rom_passes_its_cpu_self_test` | when the external stock ROM is present, observes it reaching the modeled Port-4 check |
 | `exec::accumulator_loads_set_zero_from_the_loaded_value`, `exec::rotates_go_through_carry_and_leave_zero_alone`, `exec::bit_operands_address_one_byte_in_word_mode` | the three manual-specified semantics the injection path depends on |
 | `bus::timer_clock_select_follows_the_manual`, `bus::auto_reload_mode_…`, `bus::capture_mode_…` | timer clock select and modes per ch. 9 |
@@ -779,17 +792,19 @@ through the active LRB page, not plain address `N8`.
      saves the same registers, is documented two apart as well: 14 to enter,
      12 for `RTI` (MSM66573 Family User's Manual, p. 16-9). NMI is not
      modeled at all.
-   - **Three `Ext` cells follow the rule instead of the page.** `ADDB A,
-     [DP]` prints a dash (p. 3-16). Page 3-6 (`<alu> obj, A`, word) is
-     missing from the scan, so its `off N8` and `S8[USP]` rows are taken
-     from the pattern of the byte page. For `MOVB off N8, A` Table 3-4 gives
+   - **Two `Ext` cells follow the rule instead of the page.** `ADDB A,
+     [DP]` prints a dash (p. 3-16). For `MOVB off N8, A` Table 3-4 gives
      11 and page 3-95 gives 13, the value of the row beneath it; 11 is used.
+     Page 3-6 (`ADC obj, A`) is missing from the scan; its values are read
+     from the identical `XOR obj, A` page (3-172).
    - **`PUSHU` and `SMOVI`** are in the opcode table but not in the manual's
      list. `PUSHU` is charged like `PUSHS`, `SMOVI` two cycles per byte, and
      neither has an `Ext` cost.
 9. Found while reading the tables, not fixed, and not used by the stock ROM:
-   - The manual lists `XOR A, erN` (Table 3-26); the opcode table generated
-     from `66207.op` has no entry for it, so it would not decode.
+   - The manual lists `XOR A, erN` as a two-byte instruction (Table 3-26),
+     but its page (3-171) prints `68+N` for it, which is `OR A, erN`.
+     `66207.op` has no entry, so it does not decode; `44+N, F2` would fit
+     the pattern of `XORB A, rN` but is not confirmed.
    - `N'16[X1]` / `N'16[X2]` operands (`MOV N'16[X1], #N16` and the like)
      take their displacement from the instruction's first 16-bit field.
      `exec` adds the second one, the immediate, so these 18 forms address
