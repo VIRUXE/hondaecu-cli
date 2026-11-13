@@ -38,7 +38,9 @@ pub struct StageResult {
     pub iacv_duty_pct: f32,
     /// rpm of the last opening followed by two engine cycles with none.
     pub fuel_stops_rpm: Option<f64>,
-    /// rpm when port C bit 0 first went high.
+    /// rpm when port C bit 0 first went from low to high inside the stage.
+    /// This reports a switch-on edge only: `None` does not mean VTEC was off
+    /// when the stage began.
     pub vtec_on_rpm: Option<f64>,
 }
 
@@ -63,6 +65,50 @@ const CODE_READ_OUT: &str = "code read-out";
 /// An opening followed by this many engine cycles without another is where
 /// fuel stopped.
 const FUEL_STOP_CYCLES: f64 = 2.0;
+
+/// Finds `StageResult::fuel_stops_rpm`: the rpm of the last injector opening
+/// followed by at least `FUEL_STOP_CYCLES` engine cycles with no opening. A
+/// gap still open at the end counts once it has lasted that long.
+#[derive(Debug, Clone)]
+pub struct FuelStop {
+    opens: u64,
+    /// Engine cycles and rpm at the latest opening.
+    last_open: Option<(f64, f64)>,
+    stopped_rpm: Option<f64>,
+}
+
+impl FuelStop {
+    /// `opens`: the total injector openings so far, before the stage.
+    pub fn new(opens: u64) -> FuelStop {
+        FuelStop { opens, last_open: None, stopped_rpm: None }
+    }
+
+    /// Feed the current rpm, the engine cycles since the stage began and the
+    /// total injector openings so far.
+    pub fn observe(&mut self, rpm: f64, engine_cycles: f64, opens: u64) {
+        if opens != self.opens {
+            self.opens = opens;
+            self.last_open = Some((engine_cycles, rpm));
+        } else if let Some((at, open_rpm)) = self.last_open {
+            if engine_cycles - at >= FUEL_STOP_CYCLES {
+                self.stopped_rpm = Some(open_rpm);
+            }
+        }
+    }
+
+    pub fn result(&self) -> Option<f64> {
+        self.stopped_rpm
+    }
+}
+
+/// The lamp over the read-out: `read_out` is its start and whether it ran its
+/// full length. A read-out cut short or never reached has not been read.
+fn read_out_lamp(edges: &[(f64, bool)], read_out: Option<(f64, bool)>, end: f64) -> Lamp {
+    match read_out {
+        Some((from, true)) => decode(edges, from, end),
+        _ => Lamp::Unreadable,
+    }
+}
 
 pub fn stages(setup: &Setup) -> Vec<Stage> {
     let still = |name, seconds, rpm: f64, map_kpa, switches| Stage {
@@ -122,13 +168,15 @@ pub fn stages(setup: &Setup) -> Vec<Stage> {
 pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
     apply_static(&mut bench.bus, setup);
     let mut results = Vec::new();
-    let mut read_out_from = None;
+    // Start of the read-out and whether it ran its full length.
+    let mut read_out: Option<(f64, bool)> = None;
     for stage in stages(setup) {
-        if stage.name == CODE_READ_OUT {
-            read_out_from = Some(bench.seconds());
-        }
+        let start = bench.seconds();
         let (result, running) = run_stage(bench, setup, &stage);
         results.push(result);
+        if stage.name == CODE_READ_OUT {
+            read_out = Some((start, running));
+        }
         if !running {
             break;
         }
@@ -143,16 +191,12 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
         .windows(2)
         .find(|w| w[0].1 && !w[1].1 && w[1].0 <= key_on_end)
         .map_or(key_on_end, |w| w[1].0);
-    let search_to = read_out_from.unwrap_or(end);
+    let search_to = read_out.map_or(end, |r| r.0);
     let mil_first_lit_after_bulb_check = edges
         .windows(2)
         .find(|w| !w[0].1 && w[1].1 && w[1].0 > bulb_check_end && w[1].0 < search_to)
         .map(|w| w[1].0);
-    // A run that never reached the read-out has not been read.
-    let lamp = match read_out_from {
-        Some(from) => decode(&edges, from, end),
-        None => Lamp::Unreadable,
-    };
+    let lamp = read_out_lamp(&edges, read_out, end);
 
     RunResult {
         stages: results,
@@ -188,9 +232,7 @@ fn run_stage(bench: &mut Bench, setup: &Setup, stage: &Stage) -> (StageResult, b
 
     let slices = (stage.seconds / SLICE_SECONDS).round() as usize;
     let mut engine_cycles = 0.0;
-    // Engine cycles and rpm at the latest injector opening.
-    let mut last_open: Option<(f64, f64)> = None;
-    let mut fuel_stops_rpm = None;
+    let mut fuel_stop = FuelStop::new(bench.bus.injector_open_count.iter().sum());
     let mut vtec_on_rpm = None;
     let mut running = true;
     for i in 0..slices {
@@ -208,20 +250,9 @@ fn run_stage(bench: &mut Bench, setup: &Setup, stage: &Stage) -> (StageResult, b
         let slice_start = bench.seconds();
         let cycles_at_start = engine_cycles;
         let board_seen = bench.log.board.len();
-        let mut opens: u64 = bench.bus.injector_open_count.iter().sum();
         running = bench.run_observed(SLICE_SECONDS, |b| {
             let cycles = cycles_at_start + (b.seconds() - slice_start) * rpm / 120.0;
-            let now: u64 = b.bus.injector_open_count.iter().sum();
-            if now != opens {
-                opens = now;
-                last_open = Some((cycles, rpm));
-            } else if fuel_stops_rpm.is_none() {
-                if let Some((at, open_rpm)) = last_open {
-                    if cycles - at >= FUEL_STOP_CYCLES {
-                        fuel_stops_rpm = Some(open_rpm);
-                    }
-                }
-            }
+            fuel_stop.observe(rpm, cycles, b.bus.injector_open_count.iter().sum());
         });
         engine_cycles = cycles_at_start + (bench.seconds() - slice_start) * rpm / 120.0;
 
@@ -273,7 +304,7 @@ fn run_stage(bench: &mut Bench, setup: &Setup, stage: &Stage) -> (StageResult, b
         mil_lit_at_end: bench.bus.p28_outputs().is_some_and(|o| o.mil),
         ac_clutch_seen,
         iacv_duty_pct: bench.bus.iacv_duty_cycle_pct,
-        fuel_stops_rpm,
+        fuel_stops_rpm: fuel_stop.result(),
         vtec_on_rpm,
     };
     (result, running)
@@ -289,6 +320,71 @@ mod tests {
         assert!(stages(&s).iter().any(|st| st.name == "idle, A/C on"));
         s.set("ac", "no").unwrap();
         assert!(!stages(&s).iter().any(|st| st.name == "idle, A/C on"));
+    }
+
+    /// Feed `FuelStop` in steps of a tenth of an engine cycle up to `end`
+    /// cycles, with rpm = 1000 x cycles, opening an injector at every
+    /// half cycle where `fuelled(cycles)` holds.
+    fn fuel_stop_over(end: f64, fuelled: impl Fn(f64) -> bool) -> Option<f64> {
+        let mut detector = FuelStop::new(100);
+        let mut opens = 100;
+        for step in 0..=(end * 10.0).round() as u32 {
+            let cycles = step as f64 / 10.0;
+            if step % 5 == 0 && fuelled(cycles) {
+                opens += 1;
+            }
+            detector.observe(1000.0 * cycles, cycles, opens);
+        }
+        detector.result()
+    }
+
+    #[test]
+    fn fuel_stop_reports_the_last_opening_of_a_clean_cut() {
+        assert_eq!(fuel_stop_over(20.0, |c| c <= 7.0), Some(7000.0));
+    }
+
+    #[test]
+    fn fuel_stop_after_cut_resume_and_cut_reports_the_second_cut() {
+        let fuelled = |c: f64| c <= 5.0 || (9.0..=12.0).contains(&c);
+        assert_eq!(fuel_stop_over(20.0, fuelled), Some(12000.0));
+    }
+
+    #[test]
+    fn fuel_stop_ignores_a_gap_shorter_than_two_cycles() {
+        // Gap 3.0 -> 4.5 is 1.5 cycles; the real cut follows 10.0.
+        let fuelled = |c: f64| c <= 3.0 || (4.5..=10.0).contains(&c);
+        assert_eq!(fuel_stop_over(20.0, fuelled), Some(10000.0));
+    }
+
+    #[test]
+    fn fuel_stop_keeps_the_last_cut_when_fuel_resumes_to_the_end() {
+        let fuelled = |c: f64| c <= 5.0 || c >= 9.0;
+        assert_eq!(fuel_stop_over(20.0, fuelled), Some(5000.0));
+    }
+
+    #[test]
+    fn fuel_stop_counts_a_gap_open_at_the_end_only_once_it_is_two_cycles() {
+        assert_eq!(fuel_stop_over(11.5, |c| c <= 10.0), None);
+        assert_eq!(fuel_stop_over(12.0, |c| c <= 10.0), Some(10000.0));
+    }
+
+    #[test]
+    fn fuel_that_never_stops_gives_none() {
+        assert_eq!(fuel_stop_over(20.0, |_| true), None);
+    }
+
+    #[test]
+    fn a_stage_with_no_opening_gives_none() {
+        assert_eq!(fuel_stop_over(20.0, |_| false), None);
+    }
+
+    #[test]
+    fn a_read_out_cut_short_or_never_reached_is_unreadable() {
+        let lit_since = [(0.0, false), (50.07, true)];
+        assert_eq!(read_out_lamp(&lit_since, Some((50.0, true)), 90.0), Lamp::Steady);
+        assert_eq!(read_out_lamp(&lit_since, Some((50.0, false)), 90.0), Lamp::Unreadable);
+        assert_eq!(read_out_lamp(&[], Some((50.0, false)), 60.0), Lamp::Unreadable);
+        assert_eq!(read_out_lamp(&[], None, 30.0), Lamp::Unreadable);
     }
 
     #[test]
