@@ -13,7 +13,7 @@ pub struct OpcodePattern {
     pub bytes_pat: &'static [&'static str],
 }
 
-pub const FULL_OPCODE_COUNT: usize = 2624;
+pub const FULL_OPCODE_COUNT: usize = 2628;
 
 pub const FULL_OPCODES: &[OpcodePattern] = &[
     OpcodePattern { mnemonic: "ADC A, #N16", dd_mode: '1', bytes_pat: &["96", "NL", "NH"] },
@@ -2514,6 +2514,10 @@ pub const FULL_OPCODES: &[OpcodePattern] = &[
     OpcodePattern { mnemonic: "XCHGB A, N16[X2]", dd_mode: '0', bytes_pat: &["C1", "NL", "NH", "10"] },
     OpcodePattern { mnemonic: "XNBL A, off N8", dd_mode: 'U', bytes_pat: &["84", "N8"] },
     OpcodePattern { mnemonic: "XOR A, #N16", dd_mode: '1', bytes_pat: &["F6", "NL", "NH"] },
+    OpcodePattern { mnemonic: "XOR A, er0", dd_mode: '1', bytes_pat: &["44", "F2"] },
+    OpcodePattern { mnemonic: "XOR A, er1", dd_mode: '1', bytes_pat: &["45", "F2"] },
+    OpcodePattern { mnemonic: "XOR A, er2", dd_mode: '1', bytes_pat: &["46", "F2"] },
+    OpcodePattern { mnemonic: "XOR A, er3", dd_mode: '1', bytes_pat: &["47", "F2"] },
     OpcodePattern { mnemonic: "XOR A, DP", dd_mode: '1', bytes_pat: &["92", "F2"] },
     OpcodePattern { mnemonic: "XOR A, X1", dd_mode: '1', bytes_pat: &["90", "F2"] },
     OpcodePattern { mnemonic: "XOR A, X2", dd_mode: '1', bytes_pat: &["91", "F2"] },

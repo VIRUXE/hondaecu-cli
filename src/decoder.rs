@@ -16,6 +16,7 @@
 use std::sync::OnceLock;
 
 use crate::full_decoder::FULL_OPCODES;
+use crate::operand::takes_pointer_operand;
 
 /// Longest encoding in the table, used to bound the fetch window.
 pub const MAX_INSN_LEN: usize = 6;
@@ -281,14 +282,6 @@ fn int_cycles(mnemonic: &str, len: usize) -> u16 {
     let second = args.next().unwrap_or("");
 
     2 * len as u16 + mode_cycles(op, first, second) + operation_cycles(op, first, second, len)
-}
-
-/// Operations whose operand is a pointer to the real target: a jump or call
-/// destination, or a ROM-table address. Their operand text carries one more
-/// bracket layer than the addressing itself (`J [DP]` jumps to the address in
-/// DP; `J [[DP]]` fetches the address from the word DP points at).
-fn takes_pointer_operand(op: &str) -> bool {
-    matches!(op, "J" | "CAL" | "LC" | "LCB" | "CMPC" | "CMPCB")
 }
 
 /// Extra cycles for reaching the memory operand.
@@ -577,6 +570,16 @@ mod tests {
         assert_eq!((byte.mnemonic, byte.len, byte.cycles), ("ORB A, off N8", 2, 4));
     }
 
+    /// `XOR A, erN` is commented out of 66207.op because the manual prints
+    /// OR's code for it. It is the object prefix `44+N` followed by `F2`,
+    /// like `XORB A, rN` (`20+N, F2`) and every other `XOR A, obj`.
+    #[test]
+    fn xor_with_a_register_bank_word_decodes() {
+        let code = [0x45u8, 0xF2];
+        let d = decode(true, |i| code.get(i).copied().unwrap_or(0)).expect("44+N F2 decodes");
+        assert_eq!((d.mnemonic, d.len, d.cycles), ("XOR A, er1", 2, 4));
+    }
+
     /// Decode every instruction dasm662 found in the P28-230 OEM ROM and compare
     /// mnemonic and length. The fixture carries a 6-byte window per instruction
     /// so this test needs no ROM image.
@@ -846,6 +849,7 @@ mod cycle_tests {
                 ("CMP A, off N8", 9),
                 ("CMPB A, N16[X1]", 10),
                 ("XOR A, [DP]", 10),
+                ("XOR A, er0", 8),
                 ("XORB A, r0", 6),
             ],
         );
@@ -1314,6 +1318,7 @@ mod cycle_tests {
                 ("CMP A, er0", 3),
                 ("CMPB A, r0", 3),
                 // XOR has no one-byte form.
+                ("XOR A, er0", 4),
                 ("XORB A, r0", 4),
                 ("XOR A, DP", 4),
                 ("XOR A, [DP]", 6),

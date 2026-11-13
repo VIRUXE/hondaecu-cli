@@ -60,6 +60,15 @@ def correct(records):
     count of 4 cycles, and the stock P28 ROM uses E7 in word mode at 0x5FDD
     to OR its two 16-bit fault words. So E7 is `OR A, off N8` when DD is set.
     The long form stays: the manual lists it.
+
+    XOR A, erN -- commented out of 66207.op ("cannot be 68+N, cause that's
+    OR A,erN"). The manual's page (3-171) does print 68+N, OR's one-byte code,
+    but gives 4 cycles, and its Instruction List (Table 3-26) gives 2 bytes:
+    XOR has no one-byte form. Two bytes is the object prefix followed by the
+    operation, as for every other `XOR A, obj` (92,F2 for DP; B2,F2 for [DP])
+    and for the byte form `XORB A, rN` (20+N,F2). The prefix for erN is 44+N,
+    so the encoding is 44+N,F2. This one is inferred from the encoding scheme,
+    not read off a page.
     """
     out = []
     for instr, dd, cond, opc in records:
@@ -69,6 +78,10 @@ def correct(records):
             out.append((instr, "0", cond, opc))
         else:
             out.append((instr, dd, cond, opc))
+        if instr == "XOR A, #N16":
+            assert not any(r[0] == "XOR A, er0" for r in records), "66207.op gained XOR A, erN"
+            for n in range(4):
+                out.append((f"XOR A, er{n}", "1", cond, ["%02X" % (0x44 + n), "F2"]))
     return out
 
 

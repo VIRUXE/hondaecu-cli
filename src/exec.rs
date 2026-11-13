@@ -164,12 +164,9 @@ impl<'a> Exec<'a> {
             Mem::OffPage => self.cpu.off_page(f.n8),
             Mem::OffPageAlt => self.cpu.off_page(f.n8_alt),
             Mem::AtReg(r) => self.reg(r),
-            Mem::AtEr(n) => {
-                let a = self.cpu.bank_base().wrapping_add(n as u16 * 2);
-                self.bus.read_data_u16(a)
-            }
             Mem::IdxUsp => { let u = self.reg(Reg::Usp); u.wrapping_add(f.s8 as u16) }
             Mem::IdxReg(r) => self.reg(r).wrapping_add(f.n16),
+            Mem::IdxRegAlt(r) => self.reg(r).wrapping_add(f.n16_alt),
             // The base word goes through `load`, not straight to the bus:
             // the P28 indexes its fault tables with `LCB A, 6C99h[ACC]`
             // (B5 06 AB 99 6C), where "RAM 06h" is the accumulator itself.
@@ -219,6 +216,16 @@ impl<'a> Exec<'a> {
             Arg::Addr16 => f.addr16,
             Arg::Rel8 => f.rel8 as u16,
             Arg::Lit(n) => *n as u16,
+            // The inner operand's 16-bit value is an address: the target
+            // itself for a jump or call, the place to read for LC/CMPC.
+            Arg::Ptr(inner) => {
+                let addr = self.read(inner, false, false);
+                match (code, byte) {
+                    (false, _) => addr,
+                    (true, true) => self.bus.read_code_u8(addr) as u16,
+                    (true, false) => self.bus.read_code_u16(addr),
+                }
+            }
         }
     }
 
@@ -625,7 +632,7 @@ impl<'a> Exec<'a> {
 
             // ---- control flow --------------------------------------------
             "J" => {
-                // `J addr16` is absolute; `J [reg]` takes the operand's value.
+                // `J addr16` is absolute; `J [obj]` takes the operand's value.
                 self.cpu.pc = self.read(&args[0], false, false);
             }
             "SJ" => {
@@ -963,6 +970,92 @@ mod tests {
         assert_eq!(decoded.mnemonic, "OR A, off N8");
         assert_eq!(cpu.a, 0x0100);
         assert!(!cpu.zf);
+    }
+
+    /// `MOV N'16[X1], #N16` carries two 16-bit fields: the displacement, then
+    /// the immediate. The displacement addresses the word; the immediate is
+    /// what gets stored there.
+    #[test]
+    fn indexed_destination_with_an_immediate_uses_the_first_field_as_displacement() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.write_data_u16(0x0080, 0x0010); // X1 in pointing-register set 0
+        bus.rom[..6].copy_from_slice(&[0xB0, 0x00, 0x03, 0x98, 0x34, 0x12]);
+
+        let decoded = step(&mut cpu, &mut bus).expect("MOV executes");
+
+        assert_eq!(decoded.mnemonic, "MOV N'16[X1], #N16");
+        assert_eq!(bus.read_data_u16(0x0310), 0x1234, "0300h[X1] <- #1234h");
+        assert_eq!(bus.external_unmapped_writes, 0, "nothing lands at 1234h[X1]");
+    }
+
+    /// `J [obj]` is "MOV PC, obj with the brackets removed" (manual p. 3-63):
+    /// a register operand holds the target itself, a memory operand holds it
+    /// in the word it addresses. `CAL` takes the same operands.
+    #[test]
+    fn indirect_jumps_take_the_target_from_the_operand_value() {
+        // (encoding, mnemonic, target)
+        let cases: &[(&[u8], &str, u16)] = &[
+            (&[0x44, 0x22], "J [er0]", 0x3000),
+            (&[0x92, 0x22], "J [DP]", 0x0300),
+            (&[0xB4, 0x40, 0x22], "J [off N8]", 0x5000),
+            (&[0xB2, 0x22], "J [[DP]]", 0x4000),
+            (&[0x44, 0x23], "CAL [er0]", 0x3000),
+            (&[0x92, 0x23], "CAL [DP]", 0x0300),
+            (&[0xB2, 0x23], "CAL [[DP]]", 0x4000),
+        ];
+
+        for (code, mnemonic, target) in cases {
+            let (mut cpu, mut bus) = cpu_with_local_bank();
+            cpu.ssp = 0x0400;
+            bus.write_data_u16(cpu.bank_base(), 0x3000); // er0
+            bus.write_data_u16(0x0084, 0x0300); // DP
+            bus.write_data_u16(0x0300, 0x4000); // the word DP points at
+            bus.write_data_u16(0x0140, 0x5000); // off 40h on page 1
+            bus.rom[..code.len()].copy_from_slice(code);
+
+            let decoded = step(&mut cpu, &mut bus).expect("executes");
+
+            assert_eq!(decoded.mnemonic, *mnemonic);
+            assert_eq!(cpu.pc, *target, "`{mnemonic}`");
+            if mnemonic.starts_with("CAL") {
+                assert_eq!(bus.read_data_u16(0x0400), code.len() as u16, "return address");
+            }
+        }
+    }
+
+    /// The ROM-table reads take their address the same way: `[DP]` and
+    /// `[erN]` hold it, `[off N8]` and `[[DP]]` point at the word that does
+    /// (manual pp. 3-72, 3-75).
+    #[test]
+    fn rom_table_reads_take_the_address_from_the_operand_value() {
+        // (encoding, mnemonic, accumulator afterwards)
+        let cases: &[(&[u8], &str, u16)] = &[
+            (&[0x92, 0xA8], "LC A, [DP]", 0x1234),
+            (&[0x44, 0xA8], "LC A, [er0]", 0x1234),
+            (&[0xB4, 0x40, 0xA8], "LC A, [off N8]", 0x1234),
+            (&[0xB2, 0xA8], "LC A, [[DP]]", 0x5678),
+            (&[0x44, 0xAA], "LCB A, [er0]", 0x0034),
+            (&[0xB2, 0xAA], "LCB A, [[DP]]", 0x0078),
+        ];
+
+        for (code, mnemonic, want) in cases {
+            let (mut cpu, mut bus) = cpu_with_local_bank();
+            bus.write_data_u16(cpu.bank_base(), 0x6000); // er0
+            bus.write_data_u16(0x0084, 0x6000); // DP: a ROM address...
+            bus.write_data_u16(0x0140, 0x6000); // off 40h on page 1
+            bus.rom[0x6000..0x6002].copy_from_slice(&[0x34, 0x12]);
+            if mnemonic.contains("[[DP]]") {
+                bus.write_data_u16(0x0084, 0x0300); // ...or a RAM address
+                bus.write_data_u16(0x0300, 0x6100);
+                bus.rom[0x6100..0x6102].copy_from_slice(&[0x78, 0x56]);
+            }
+            bus.rom[..code.len()].copy_from_slice(code);
+
+            let decoded = step(&mut cpu, &mut bus).expect("executes");
+
+            assert_eq!(decoded.mnemonic, *mnemonic);
+            assert_eq!(cpu.a, *want, "`{mnemonic}`");
+        }
     }
 
     #[test]

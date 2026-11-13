@@ -1,7 +1,7 @@
 // Operand model for the OKI 66207.
 //
 // FULL_OPCODES stores each instruction as display text ("MOV DP, #N16",
-// "JBS off N8.5, rel8"). Rather than hand-writing 2624 execution arms, the
+// "JBS off N8.5, rel8"). Rather than hand-writing 2628 execution arms, the
 // operand text is parsed once into this small tree and evaluated generically.
 //
 // Addressing notes that are easy to get wrong:
@@ -43,12 +43,13 @@ pub enum Mem {
     OffPageAlt,
     /// `[reg]`
     AtReg(Reg),
-    /// `[erN]`
-    AtEr(u8),
     /// `S8[USP]`
     IdxUsp,
     /// `N16[reg]`
     IdxReg(Reg),
+    /// `N'16[reg]` -- the displacement is the first of two 16-bit fields;
+    /// the second is an immediate.
+    IdxRegAlt(Reg),
     /// `N16[N8]` -- base is the word held at RAM `N8`.
     IdxMemN8,
     /// `N16[off N8]` -- base is the word held at the LRB-paged `off N8`.
@@ -76,6 +77,11 @@ pub enum Arg {
     Rel8,
     /// Bare integer, as in `VCAL 3`.
     Lit(u8),
+    /// `[<operand>]` of a jump, call or ROM-table read: the 16-bit value of
+    /// the inner operand, used as an address. The manual puts it as "MOV
+    /// PC, obj with the brackets removed" (p. 3-63): `J [DP]` goes where DP
+    /// says, `J [[DP]]` where the word DP points at says.
+    Ptr(Box<Arg>),
 }
 
 #[derive(Debug, Clone)]
@@ -129,20 +135,9 @@ fn parse_arg(s: &str) -> Option<Arg> {
         });
     }
 
-    // Indirect through a register or register-bank slot: "[DP]", "[er0]".
+    // Indirect through a pointing register: "[DP]".
     if s.starts_with('[') && s.ends_with(']') {
-        let inner = &s[1..s.len() - 1];
-        if let Some(r) = parse_reg(inner) {
-            return Some(Arg::Mem(Mem::AtReg(r)));
-        }
-        if let Some(n) = inner.strip_prefix("er").and_then(|d| d.parse().ok()) {
-            return Some(Arg::Mem(Mem::AtEr(n)));
-        }
-        // "[[DP]]", "[off N8]", "[N8]", "[S8[USP]]", "[N16[X1]]": the extra
-        // bracket layer is display notation for jump/call targets, where the
-        // value fetched *is* the destination. The addressing itself is the
-        // inner form.
-        return parse_arg(inner);
+        return Some(Arg::Mem(Mem::AtReg(parse_reg(&s[1..s.len() - 1])?)));
     }
 
     // Indexed: "N16[X1]", "S8[USP]", "N16[N8]".
@@ -154,7 +149,7 @@ fn parse_arg(s: &str) -> Option<Arg> {
                 ("N16", "N8") => Mem::IdxMemN8,
                 ("N16", "off N8") => Mem::IdxMemOff,
                 ("N16", b) => Mem::IdxReg(parse_reg(b)?),
-                ("N'16", b) => Mem::IdxReg(parse_reg(b)?),
+                ("N'16", b) => Mem::IdxRegAlt(parse_reg(b)?),
                 _ => return None,
             }));
         }
@@ -206,6 +201,12 @@ fn is_byte_variant(op: &str, all: &HashSet<&str>) -> bool {
     op.len() > 1 && op.ends_with('B') && all.contains(&op[..op.len() - 1])
 }
 
+/// Operations whose bracketed operand is a pointer to the real target: a
+/// jump or call destination, or a ROM-table address.
+pub fn takes_pointer_operand(op: &str) -> bool {
+    matches!(op, "J" | "CAL" | "LC" | "LCB" | "CMPC" | "CMPCB")
+}
+
 fn parse_one(text: &'static str, all: &HashSet<&str>) -> Option<Parsed> {
     let (op, rest) = match text.split_once(' ') {
         Some((o, r)) => (o, r),
@@ -215,7 +216,16 @@ fn parse_one(text: &'static str, all: &HashSet<&str>) -> Option<Parsed> {
     if !rest.trim().is_empty() {
         // Operands are comma-separated, and no operand form contains a comma.
         for part in rest.split(',') {
-            args.push(parse_arg(part)?);
+            let part = part.trim();
+            // A bracketed operand of a jump, call or ROM-table read names
+            // where the address comes from; see `Arg::Ptr`.
+            let pointer = takes_pointer_operand(op)
+                .then(|| part.strip_prefix('[')?.strip_suffix(']'))
+                .flatten();
+            args.push(match pointer {
+                Some(inner) => Arg::Ptr(Box::new(parse_arg(inner)?)),
+                None => parse_arg(part)?,
+            });
         }
     }
     Some(Parsed {
@@ -298,6 +308,23 @@ mod tests {
         assert_eq!(
             parse("LC A, N16[X1]").unwrap().args,
             vec![Arg::Reg(Reg::A), Arg::Mem(Mem::IdxReg(Reg::X1))]
+        );
+
+        // Pointer operands: one bracket layer is the pointer, what is
+        // inside it is an ordinary operand.
+        let ptr = |inner: Arg| vec![Arg::Ptr(Box::new(inner))];
+        assert_eq!(parse("J [DP]").unwrap().args, ptr(Arg::Reg(Reg::Dp)));
+        assert_eq!(parse("J [er2]").unwrap().args, ptr(Arg::Er(2)));
+        assert_eq!(parse("J [[DP]]").unwrap().args, ptr(Arg::Mem(Mem::AtReg(Reg::Dp))));
+        assert_eq!(parse("CAL [off N8]").unwrap().args, ptr(Arg::Mem(Mem::OffPage)));
+        assert_eq!(
+            parse("LCB A, [S8[USP]]").unwrap().args,
+            vec![Arg::Reg(Reg::A), Arg::Ptr(Box::new(Arg::Mem(Mem::IdxUsp)))]
+        );
+        // In a data operation the same text is the memory DP points at.
+        assert_eq!(
+            parse("L A, [DP]").unwrap().args,
+            vec![Arg::Reg(Reg::A), Arg::Mem(Mem::AtReg(Reg::Dp))]
         );
     }
 }
