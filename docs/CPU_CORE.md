@@ -348,7 +348,40 @@ schematic:
 | AI4 | IACV coil current | sampled by the timer-1 handler at 0x0136; see "IACV current loop" below |
 
 The battery model used to sit on AI5, which the ROM reads at 0x1052 and
-0x3D64 for something else that is still unidentified.
+0x3D64 for something else that is still unidentified. Sheet 2 puts the
+alternator FR signal, RC-filtered, on MCU pin 56 (AI2); the engine model does
+not drive it.
+
+Sheet 3 confirms all four rows above, and shows what the remaining mux
+positions are: board-configuration inputs. Each is a pair of resistor
+positions, one to +5 V and one to ground, in which a board fits a zero-ohm
+link, a single resistor or a divider. The drawing marks the unfitted position
+of each pair with dashed leads. Two photographs fix the population on real
+boards: the pgmfi wiki's close-ups of the resistor array on an automatic
+before and after conversion to manual, and its top view of a 5-speed P28-A01
+on the same 02D01720-1500 board, which shows the same parts as the converted
+one.
+
+| input | positions | fitted | level | ROM use |
+|---|---|---|---|---|
+| U5/X1 | RP17 / RP18 | manual: link at RP18, RP17 empty. Automatic: 2.7 kohm / 4.7 kohm | 0 V (3.2 V) | gearbox flag `216h.3`, 0x55C5 |
+| U5/X3 | R2.. 1 % divider, connector B14 | divider | 2.5 V | boot check 0x530C |
+| U5/X4 | RP4 / RP3 | link | 0 V | offset selector, 0x5A19: low = none |
+| U5/X5 | RP13 / RP14 | one resistor to +5 V | 5 V | 0x40CF: `F0h` or more = default |
+| U5/X6 | RP7 / RP8 | 1.5 kohm / 1.5 kohm 1 % | 2.5 V | trim around `80h`, 0x40AD |
+| U5/X7 | RP6 / RP5 | link | 0 V | bit 7 into `220h.4`, 0x3E3E |
+| U6/X1 | RP15 / RP16 | link (schematic only) | 0 V | read only when ROM byte `600Fh` is set |
+| U6/X4 | RP1 / RP2 | pull-up only (schematic only) | 5 V | 0x4079: `F0h` or more = default |
+| U6/X5 | R50 / J11 | pull-up, J11 open (schematic only) | 5 V | bit into `354h.1`, 0x56A9 |
+| U6/X6 | RP9 / RP10 | pull-up only (schematic only) | 5 V | table index, 0x2196 |
+
+`Bus::new` sets these levels; they used to sit at mid scale, which among other
+things made the ROM run as an automatic. Two caveats. That the links tie their
+input to ground rather than +5 V rests on the gearbox pair (the ROM needs a
+manual to read low) and on the links sitting in the same column of the array;
+the Bomarc drawing has the reference designators of those pairs the other way
+up. And the U6 rows come from the drawing of an automatic board alone -- the
+photographs are too coarse to show those parts.
 
 The stock sampler at `0x52DE..0x52F7` derives the select index from `P2 >> 5`,
 stores ADCR1H at `0x03C6[index]` and ADCR0H at `0x03BE[index]`, then advances

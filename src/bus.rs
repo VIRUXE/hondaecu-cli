@@ -601,9 +601,44 @@ impl Bus {
             serial_rx_queue: Vec::new(),
             serial_tx_queue: Vec::new(),
         };
-        // P28-A00 (ROM mask 230) is a manual-gearbox ECU: the configuration
-        // input reads 0 V. See `P28_U5_GEARBOX_SELECT`.
-        bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = 0;
+        // Board-configuration inputs. Each is a pair of resistor positions,
+        // one to +5 V and one to ground, and a board fits a link, a single
+        // resistor or a divider. Sources: Bomarc sheet 3 (which marks the
+        // unfitted position of each pair with dashed leads) and two board
+        // photographs -- the pgmfi wiki's RP-array close-ups of an automatic
+        // before and after conversion to manual, and its top view of a
+        // 5-speed P28-A01 on the same 02D01720-1500 board, which shows the
+        // same population as the converted one.
+        //
+        //   U5/X1  RP17/RP18  manual: zero-ohm link at RP18, RP17 empty -> 0 V
+        //                     (automatic: 2.7k/4.7k -> 3.2 V)
+        //   U5/X4  RP4/RP3    zero-ohm link                            -> 0 V
+        //   U5/X5  RP13/RP14  one resistor, to +5 V                    -> 5 V
+        //   U5/X6  RP7/RP8    1.5k/1.5k 1 %                            -> 2.5 V
+        //   U5/X7  RP6/RP5    zero-ohm link                            -> 0 V
+        //   U6/X1  RP15/RP16  link to ground (schematic only)          -> 0 V
+        //   U6/X4  RP1/RP2    pull-up only (schematic only)            -> 5 V
+        //   U6/X5  R50/J11    pull-up, J11 open (schematic only)       -> 5 V
+        //   U6/X6  RP9/RP10   pull-up only (schematic only)            -> 5 V
+        //
+        // That the links tie their input to ground rather than +5 V rests on
+        // the gearbox pair, where the ROM needs a manual to read low, and on
+        // the links sitting in the same column of the array. The ROM agrees
+        // with the result: it treats a reading of F0h or more on the
+        // single-resistor inputs as "default" (0x407F, 0x4102) and a low
+        // reading on U5/X4 as a zero offset (0x5A19).
+        const LOW: u16 = 0;
+        const HIGH: u16 = 1023;
+        let u5 = &mut bus.p28_mux_inputs[P28_MUX_U5_ADCR1];
+        u5[P28_U5_GEARBOX_SELECT] = LOW;
+        u5[4] = LOW;
+        u5[5] = HIGH;
+        u5[7] = LOW;
+        let u6 = &mut bus.p28_mux_inputs[P28_MUX_U6_ADCR0];
+        u6[1] = LOW;
+        u6[4] = HIGH;
+        u6[5] = HIGH;
+        u6[6] = HIGH;
         // Initialize default SFR values
         // Datasheet SFR table: SSP resets to FFFFh. Every ROM loads its own
         // stack pointer; until then the stack is in unmapped external space,
