@@ -171,19 +171,28 @@ could-not-tell if any line is, else ok. The rules below are those of
 | warm idle | at least 10 engine cycles; each output opened within 2 of the cycle count; ignitions at least 3 per cycle | an output opened 0 times or more than 2 away from the cycle count; too few ignitions | fewer than 10 engine cycles in the stage (`MIN_IDLE_ENGINE_CYCLES`), or the run stopped before it |
 | idle, A/C on | the clutch was engaged (the line exists only with `ac = yes`) | it never was | (not applicable) |
 | full throttle sweep | always ok when the stage ran; it reports where fuel stopped and where VTEC switched on | never | the run stopped before the stage |
-| check-engine light | never lit after the bulb check and the read-out was reached | lit at any time between the bulb check and the read-out | not lit, but the run stopped before the read-out |
-| codes | lamp off, or steady with the connector grounded (a steady lamp during the read-out means no code is stored) | one or more codes blinked; each is shown with its name from the catalogue in `dtc.rs` | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
+| check-engine light | never lit after the bulb check and the read-out was reached | lit at any time between the bulb check and the read-out ("lit at t s"), or never out after power-on ("never went out after power-on (still lit at 6.0 s)") | not lit, but the run stopped before the read-out |
+| codes | nothing blinked (lamp off, or steady with the connector grounded) and the check-engine light was not lit after the bulb check: "none blinked" | one or more codes blinked, each shown with its name from the catalogue in `dtc.rs`; or nothing blinked although the check-engine light was lit after the bulb check ("the ROM is showing a fault it does not blink") | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
 
 The bulb check is the lamp lit from power-on until the first lit-to-dark edge
 in `key on`. A lamp that is still lit at the end of `key on` without having
 gone dark never ended its bulb check: it counts as lit after the bulb check,
-at the end of `key on` (`script::mil_lit_after_bulb_check`). Before this
-rule a fault the ROM stores inside the first two seconds held the lamp lit
-from power-on and the line read "never lit": the stock P28 with `vtec = no`
-(code 21 stored at 1.2 s) and on an automatic board in a manual car (code 19
-at 0.9 s) were judged do-not-burn on their codes only, and the P30 image on a
-P28 box (code 24, which the ROM never blinks) was worth burning. All three
-now fail on this line.
+at the end of `key on` (`script::mil_lit_after_bulb_check`), and the line
+reads "never went out after power-on (still lit at 6.0 s)". Before this rule
+a fault the ROM stores inside the first two seconds held the lamp lit from
+power-on and the line read "never lit": the stock P28 with `vtec = no` (code
+21 stored at 1.2 s) and on an automatic board in a manual car (code 19 at
+0.9 s) were judged do-not-burn on their codes only. Both now fail on this
+line. (The P30 image on a P28 box does not depend on the rule: its lamp goes
+out at 2.11 s and lights again at 2.21 s, "lit at 2.2 s".)
+
+A steady lamp at the read-out is not proof that nothing is stored. The stock
+P28 and P30 ROMs show it when nothing is stored (0x36C9, below), and the P30
+ROM also shows it with code 24 stored: with `214h.7` set the read-out routine
+skips the blink sequence (0x3634) and holds the lamp lit. So the `codes` line
+says only "none blinked", and when the check-engine light was lit after the
+bulb check a quiet read-out is a problem: "none blinked, although the
+check-engine light is on (the ROM is showing a fault it does not blink)".
 
 Lamp reading (`blink.rs`): with the connector grounded the ROM flashes each
 stored code; a blink lit at least 0.82 s is a tens digit and a shorter one is
@@ -272,7 +281,9 @@ wrong. `blink::decode` now returns `Steady` for a lamp lit without a break
 for at least `STEADY_MIN_SECONDS` (10 s) at the end of a window holding no
 complete run. Before this change it returned `Unreadable`, because the rise
 lands inside the window. The script test expects `Steady`, and for the
-verdict either `Off` or `Steady` means no code blinked.
+verdict either `Off` or `Steady` means no code blinked, which is not the same
+as no code stored (the P30 ROM holds the same steady lamp with code 24
+stored; "The bulb check" above and "The P30 box").
 
 ### Resolved: VTEC never engaged at 88 °C coolant
 
@@ -629,9 +640,19 @@ board is modelled, and what the ROM checks, is in `CPU_CORE.md`, "P30 box".
 |---|---|---|---|---|
 | `stock-p30` (P30 box, sensor fitted) | worth burning | none | the board's heartbeat keeps `2E8h` reloaded and its frames pass (`233h.7` clear, `232h.7` clear). VTEC at 5690 rpm, fuel stops at 8310 rpm | matches |
 | `stock-p30`, `knock_sensor = no` | do not burn: MIL lit at 8.6 s, in `cold idle` | **23** blinked and stored | 0x3D44..0x3D61 sets `9Ah.2` from frame bit 8. That the board sets bit 8 for an unplugged sensor is the model's assumption (bit 8 is the ROM's only path to code 23, and code 23 is documented as covering an unplugged sensor), so this run confirms the ROM's path, not the board | matches, by construction |
-| `stock-p30`, `ecu = p28` (no knock board) | do not burn: MIL lit again at 2.2 s, 0.1 s after the bulb check ended | stored: **24** (fault bit 23, `214h.7`); blinked: none | port A bit 2 never changes, so 0x27F7..0x2824 never reloads `2E8h` and sets `9Ah.3` from its first pass (0.06 s); code 24 is stored at about 2.2 s. With `214h.7` set the read-out routine skips the blink sequence (0x3634 `JBS 214h.7`) and holds the lamp lit, so the grounded connector shows what looks like the no-code display; the `codes` line therefore reads "none". Same result whatever the pull-ups give on bits 0..2 | **disagrees**: practice expects code 23. The ROM stores 24, which it never blinks, and keeps the MIL lit |
+| `stock-p30`, `ecu = p28` (no knock board) | do not burn: MIL lit again at 2.2 s, 0.1 s after the bulb check ended | stored: **24** (fault bit 23, `214h.7`); blinked: none | port A bit 2 never changes, so 0x27F7..0x2824 never reloads `2E8h` and sets `9Ah.3` from its first pass (0.06 s); code 24 is stored at about 2.2 s. With `214h.7` set the read-out routine skips the blink sequence (0x3634 `JBS 214h.7`) and holds the lamp lit, so the grounded connector shows what looks like the no-code display; the `codes` line reads "none blinked, although the check-engine light is on" and is a problem. Same result whatever the pull-ups give on bits 0..2 | **disagrees**: practice expects code 23. The ROM stores 24, which it never blinks, and keeps the MIL lit |
 
 The last row is the ROM's own behaviour; the model was not changed to bring
-out code 23. A P30 ROM in a P28 box keeps the check-engine light on and
+out code 23.
+
+**Residual risk in `knock_sensor = no` on a P30 box.** The board's answer to
+an unplugged sensor (frame bit 8) is inferred, not measured: bit 8 is the
+ROM's only path to code 23, and code 23 is documented as covering an
+unplugged sensor. The stock run therefore shows that the ROM's path works,
+not that a real board takes it. For a tuned ROM with the 0x3D44 check
+disabled, `ecu = p30`, `knock_sensor = no` is judged on that assumed board
+behaviour: if a real board signalled the missing sensor some other way (in
+the level bits, say, or by changing its heartbeat), such a ROM could react
+to it differently on the car than on the model. A P30 ROM in a P28 box keeps the check-engine light on and
 answers the service connector with a steady lamp, which a driver would read
 as "no code stored".

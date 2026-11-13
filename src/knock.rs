@@ -54,8 +54,10 @@ pub enum KnockBoard {
     FittedWithSensor,
 }
 
-/// Port A bits the knock board drives.
+/// Port A bits 0 and 1: the board's reply frame, one pair per CKP tooth.
 pub const KNOCK_PA_DATA: u8 = 0b011;
+/// Port A bit 2: the board's heartbeat, which 0x27F7..0x2824 requires to
+/// change at least once in about 100 ms.
 pub const KNOCK_PA_HEARTBEAT: u8 = 0b100;
 
 /// The reply frame, pair k (1..6) in bits `2(k-1)` (port A bit 0) and

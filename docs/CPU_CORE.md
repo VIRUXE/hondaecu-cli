@@ -732,7 +732,7 @@ bit on port C bit 3. What the board does with them is not known.
 | check | ROM | fault |
 |---|---|---|
 | heartbeat on port A bit 2 | 0x27F7..0x2824, every main-loop pass (about 10 ms, observed): when the bit differs from `232h.6`, the copy of its last level, `2E8h` is reloaded with 0Ah (0x2818), unless the frame is bad (`233h.7`) and `ADh` is at most 0Dh (0x280F..0x2815). `2E8h` counts down every pass (observed, by the instruction ending at 0x5214); at 0, `9Ah.3` is set. So the bit must change at least once in about 100 ms | `9Ah.3`, code 24 (index 20 = 18h) |
-| sensor | 0x3D44..0x3D61: with `214h.6` (code 23) and `214h.5` clear, `212h` & C3BCh zero, the board alive (`2E8h` non-zero) and the frame good (`233h.7` clear), C = `232h.7` | `9Ah.2`, code 23 (index 19 = 17h) |
+| sensor | 0x3D44..0x3D61: with knock control active (`233h.6` clear, 0x3D4A), `214h.6` (code 23) and `214h.5` clear, `212h` & C3BCh zero, the board alive (`2E8h` non-zero) and the frame good (`233h.7` clear), C = `232h.7` | `9Ah.2`, code 23 (index 19 = 17h) |
 
 Both checks are skipped while `227h.6` is clear (0x27F7, 0x3D44), and the
 heartbeat check also while code 24 is stored (`214h.7`, 0x27FA). The P28-230

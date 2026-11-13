@@ -155,10 +155,11 @@ fn case_6_no_vtec_stores_code_21() {
     // the lamp never goes out: lit at the end of `key on`.
     let (result, report, bench) = one_change("vtec", "no");
     assert!(
-        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: never went out after power-on")),
         "{report:#?}"
     );
     assert_eq!(result.mil_first_lit_after_bulb_check, Some(stage(&result, "key on").to));
+    assert!(result.mil_never_went_out);
     assert_eq!(result.lamp, Lamp::Codes(vec![21]));
     assert_eq!(report.codes, vec![21]);
     assert_eq!(stored_codes(&bench), vec![21]);
@@ -282,16 +283,26 @@ fn stock_p30_on_a_p28_box_holds_the_lamp_lit_and_blinks_nothing() {
     // with 214h.7 set the read-out routine skips the blink sequence (0x3634)
     // and holds the lamp lit, so the read-out looks like the no-code display
     // (docs/CHECK.md, "The P30 box"). The lamp lit after the bulb check is
-    // what makes this a problem.
+    // what makes this a problem, and it turns the quiet read-out into a
+    // problem on the codes line too.
     let (result, report, bench) = p30_check(&[("ecu", "p28")]);
     assert!(
         matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
         "{report:#?}"
     );
+    // Observed: the bulb check ends at 2.11 s and the lamp lights again at
+    // 2.21 s.
     let lit = result.mil_first_lit_after_bulb_check.unwrap();
-    assert!(lit < stage(&result, "key on").to + 1e-9, "{lit}");
+    assert!((lit - 2.21).abs() < 0.05, "{lit}");
+    assert!(!result.mil_never_went_out);
     assert_eq!(result.lamp, Lamp::Steady);
     assert!(report.codes.is_empty());
+    let codes = report.runs.lines.iter().find(|l| l.label == "codes").unwrap();
+    assert_eq!(codes.state, State::Problem);
+    assert_eq!(
+        codes.text,
+        "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)"
+    );
     assert_eq!(stored_codes(&bench), vec![24]);
     assert_knock_checks_enabled(&bench);
 }
@@ -345,10 +356,11 @@ fn case_7_gearbox_mismatch() {
             // Stored 0.9 s after power-on, inside the bulb check: the lamp
             // never goes out, lit at the end of `key on`.
             assert!(
-                matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+                matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: never went out after power-on")),
                 "{case}: {report:#?}"
             );
             assert_eq!(result.mil_first_lit_after_bulb_check, Some(stage(&result, "key on").to), "{case}");
+            assert!(result.mil_never_went_out, "{case}");
             assert_eq!(result.lamp, Lamp::Codes(vec![19]), "{case}");
             assert_eq!(stored_codes(&bench), vec![19], "{case}");
             // 216h.3 set: the ROM ran as an automatic.

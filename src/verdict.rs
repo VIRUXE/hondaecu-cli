@@ -254,6 +254,10 @@ fn sweep(result: &RunResult) -> Line {
 
 fn check_engine_light(result: &RunResult) -> Line {
     match result.mil_first_lit_after_bulb_check {
+        Some(t) if result.mil_never_went_out => problem(
+            "check-engine light",
+            format!("never went out after power-on (still lit at {t:.1} s)"),
+        ),
         Some(t) => problem("check-engine light", format!("lit at {t:.1} s, after the bulb check")),
         None if !reached_read_out(result) => could_not_tell("check-engine light", "the run stopped before this"),
         None => ok("check-engine light", "never lit after the bulb check"),
@@ -268,8 +272,16 @@ fn codes(result: &RunResult) -> Line {
         Lamp::Codes(v) if v.is_empty() => {
             could_not_tell("codes", "the lamp blinked but no code could be read")
         }
-        Lamp::Off => ok("codes", "none"),
-        Lamp::Steady => ok("codes", "none (lamp steady with the connector grounded: no code stored)"),
+        // A steady lamp is the stock ROMs' no-code display, but the P30 ROM
+        // shows it too with code 24 stored (214h.7 skips the blink sequence
+        // at 0x3634). With the lamp lit while running, "none blinked" does
+        // not mean "no fault".
+        Lamp::Off | Lamp::Steady if result.mil_first_lit_after_bulb_check.is_some() => problem(
+            "codes",
+            "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)",
+        ),
+        Lamp::Off => ok("codes", "none blinked"),
+        Lamp::Steady => ok("codes", "none blinked (lamp steady with the connector grounded)"),
         Lamp::Codes(v) => {
             let each: Vec<String> = v
                 .iter()
@@ -370,6 +382,7 @@ mod tests {
             unmapped: (0, 0, None),
             ppi_unsupported_mode: false,
             mil_first_lit_after_bulb_check: None,
+            mil_never_went_out: false,
             lamp: Lamp::Off,
             seconds: 90.0,
             unmodelled: Vec::new(),
@@ -633,6 +646,35 @@ mod tests {
     }
 
     #[test]
+    fn a_lamp_lit_while_running_makes_a_quiet_read_out_a_problem() {
+        for lamp in [Lamp::Off, Lamp::Steady] {
+            let mut c = clean();
+            c.lamp = lamp.clone();
+            c.mil_first_lit_after_bulb_check = Some(2.2);
+            let r = judge(&c, &setup());
+            let l = find(&r, "codes");
+            assert_eq!(l.state, State::Problem, "{lamp:?}");
+            assert_eq!(
+                l.text,
+                "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)"
+            );
+            // The first reason is still the check-engine light, in line order.
+            assert!(matches!(&r.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light")));
+        }
+    }
+
+    #[test]
+    fn a_lamp_that_never_went_out_says_so() {
+        let mut c = clean();
+        c.mil_first_lit_after_bulb_check = Some(6.0);
+        c.mil_never_went_out = true;
+        let r = judge(&c, &setup());
+        let l = find(&r, "check-engine light");
+        assert_eq!(l.state, State::Problem);
+        assert_eq!(l.text, "never went out after power-on (still lit at 6.0 s)");
+    }
+
+    #[test]
     fn check_engine_light() {
         let mut c = clean();
         c.mil_first_lit_after_bulb_check = Some(12.5);
@@ -646,16 +688,13 @@ mod tests {
     fn codes_line() {
         let r = judge(&clean(), &setup());
         assert_eq!(find(&r, "codes").state, State::Ok);
-        assert_eq!(find(&r, "codes").text, "none");
+        assert_eq!(find(&r, "codes").text, "none blinked");
 
         let mut c = clean();
         c.lamp = Lamp::Steady;
         let r = judge(&c, &setup());
         assert_eq!(find(&r, "codes").state, State::Ok);
-        assert_eq!(
-            find(&r, "codes").text,
-            "none (lamp steady with the connector grounded: no code stored)"
-        );
+        assert_eq!(find(&r, "codes").text, "none blinked (lamp steady with the connector grounded)");
         assert_eq!(r.exit_status(), 0);
 
         let mut c = clean();

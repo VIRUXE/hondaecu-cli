@@ -54,6 +54,10 @@ pub struct RunResult {
     pub unmapped: (u64, u64, Option<u16>),
     pub ppi_unsupported_mode: bool,
     pub mil_first_lit_after_bulb_check: Option<f64>,
+    /// The lamp never went out after power-on: lit from the bulb check to
+    /// the end of `key on`. `mil_first_lit_after_bulb_check` is then the end
+    /// of `key on`.
+    pub mil_never_went_out: bool,
     pub lamp: Lamp,
     pub seconds: f64,
     /// Car values the board model could not represent, with the reason
@@ -201,7 +205,8 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
     let edges = bench.mil_edges();
     let key_on_end = results.first().map_or(end, |s| s.to);
     let search_to = read_out.map_or(end, |r| r.0);
-    let mil_first_lit_after_bulb_check = mil_lit_after_bulb_check(&edges, key_on_end, search_to, end);
+    let (mil_first_lit_after_bulb_check, mil_never_went_out) =
+        mil_lit_after_bulb_check(&edges, key_on_end, search_to, end);
     let lamp = read_out_lamp(&edges, read_out, end);
 
     RunResult {
@@ -216,6 +221,7 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
         ),
         ppi_unsupported_mode: bench.bus.ppi.unsupported_mode,
         mil_first_lit_after_bulb_check,
+        mil_never_went_out,
         lamp,
         seconds: end,
         unmodelled,
@@ -226,22 +232,28 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
 /// `search_to`. The bulb check ends at the first lit-to-dark edge in `key
 /// on` (which ends at `key_on_end`). A lamp still lit at the end of `key on`
 /// without having gone dark never ended its bulb check: it counts as lit at
-/// `key_on_end`, provided the run went on past `key on` (`end`). Otherwise
-/// the search starts at the end of `key on`.
-fn mil_lit_after_bulb_check(edges: &[(f64, bool)], key_on_end: f64, search_to: f64, end: f64) -> Option<f64> {
+/// `key_on_end`, provided the run went on past `key on` (`end`), and the
+/// second value is true. Otherwise the search starts at the end of `key on`.
+fn mil_lit_after_bulb_check(
+    edges: &[(f64, bool)],
+    key_on_end: f64,
+    search_to: f64,
+    end: f64,
+) -> (Option<f64>, bool) {
     let went_dark = edges
         .windows(2)
         .find(|w| w[0].1 && !w[1].1 && w[1].0 <= key_on_end)
         .map(|w| w[1].0);
     let lit_at_key_on_end = edges.iter().rev().find(|e| e.0 <= key_on_end).is_some_and(|e| e.1);
     if went_dark.is_none() && lit_at_key_on_end && key_on_end < end {
-        return Some(key_on_end);
+        return (Some(key_on_end), true);
     }
     let bulb_check_end = went_dark.unwrap_or(key_on_end);
-    edges
+    let lit = edges
         .windows(2)
         .find(|w| !w[0].1 && w[1].1 && w[1].0 > bulb_check_end && w[1].0 < search_to)
-        .map(|w| w[1].0)
+        .map(|w| w[1].0);
+    (lit, false)
 }
 
 /// Port B and C levels at `t` from `log.board`, or `None` before the ROM
@@ -421,14 +433,14 @@ mod tests {
         // Lit at power-on and never dark again (a ROM holding a fault from
         // its first second): the bulb check never ended.
         let held = [(0.04, false), (0.05, true)];
-        assert_eq!(mil_lit_after_bulb_check(&held, 6.0, 70.0, 110.0), Some(6.0));
+        assert_eq!(mil_lit_after_bulb_check(&held, 6.0, 70.0, 110.0), (Some(6.0), true));
         // The usual bulb check, then a fault later.
         let later = [(0.04, true), (2.1, false), (8.5, true)];
-        assert_eq!(mil_lit_after_bulb_check(&later, 6.0, 70.0, 110.0), Some(8.5));
+        assert_eq!(mil_lit_after_bulb_check(&later, 6.0, 70.0, 110.0), (Some(8.5), false));
         // The usual bulb check and nothing after it.
-        assert_eq!(mil_lit_after_bulb_check(&later[..2], 6.0, 70.0, 110.0), None);
+        assert_eq!(mil_lit_after_bulb_check(&later[..2], 6.0, 70.0, 110.0), (None, false));
         // The run stopped inside key on: nothing to say yet.
-        assert_eq!(mil_lit_after_bulb_check(&held, 3.0, 3.0, 3.0), None);
+        assert_eq!(mil_lit_after_bulb_check(&held, 3.0, 3.0, 3.0), (None, false));
     }
 
     #[test]
