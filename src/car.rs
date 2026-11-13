@@ -48,6 +48,30 @@ fn gearbox_text(g: &Gearbox) -> &'static str {
     match g { Gearbox::Manual => "manual", Gearbox::Automatic => "automatic" }
 }
 
+/// The preset a `preset = <name>` value names.
+fn preset_value(value: &str) -> Result<&'static str, String> {
+    let mut v = value.trim();
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') { v = v[1..v.len() - 1].trim(); }
+    Setup::preset(v).map(|s| s.preset)
+}
+
+/// The preset a car file starts from, when it has a `preset = <name>` line.
+/// Errors are "line N: ...". `preset` is not one of `KEYS`.
+pub fn file_preset(text: &str) -> Result<Option<&'static str>, String> {
+    let mut found = None;
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.starts_with('#') { continue; }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim().eq_ignore_ascii_case("preset") {
+                let p = preset_value(value).map_err(|e| format!("line {}: {e}", i + 1))?;
+                found.get_or_insert(p);
+            }
+        }
+    }
+    Ok(found)
+}
+
 impl Setup {
     pub fn preset(name: &str) -> Result<Setup, String> {
         let name = name.trim().to_ascii_lowercase();
@@ -117,6 +141,10 @@ impl Setup {
             if line.is_empty() || line.starts_with('#') { continue; }
             let (key, value) = line.split_once('=')
                 .ok_or_else(|| format!("line {n}: expected `key = value`, got \"{line}\""))?;
+            if key.trim().eq_ignore_ascii_case("preset") {
+                preset_value(value).map_err(|e| format!("line {n}: {e}"))?;
+                continue;
+            }
             self.set(key, value).map_err(|e| format!("line {n}: {e}"))?;
         }
         Ok(())
@@ -131,7 +159,8 @@ impl Setup {
     /// A car file for saving: each given key as `key = value`, each defaulted key
     /// as a comment, so a re-run reports the same defaulted list.
     pub fn to_saved_file_text(&self) -> String {
-        let mut out = format!("# car file, started from preset {}
+        let mut out = format!("# car file
+preset = {}
 ", self.preset);
         for key in KEYS {
             if self.given.contains(key) {
@@ -206,7 +235,12 @@ mod tests {
         a.set("iacv", "none").unwrap();
         a.set("vtec", "no").unwrap();
         let text = a.to_saved_file_text();
-        assert!(text.starts_with("# car file, started from preset stock-p30"));
+        assert!(text.starts_with("# car file
+preset = stock-p30
+") || text.starts_with("# car file
+preset = stock-p30
+"));
+        assert_eq!(file_preset(&text).unwrap(), Some("stock-p30"));
         assert!(text.contains("iacv = none") && text.contains("vtec = no"));
         assert!(text.contains("# ecu = p30   (preset default)"));
         let mut b = Setup::preset("stock-p30").unwrap();
@@ -214,6 +248,33 @@ mod tests {
         assert_eq!(b.defaulted(), a.defaulted());
         assert_eq!(b.given, a.given);
         for key in KEYS { assert_eq!(a.value_text(key), b.value_text(key), "{key}"); }
+    }
+    #[test] fn a_preset_line_selects_the_starting_preset() {
+        let text = "preset = stock-p30
+";
+        assert_eq!(file_preset(text).unwrap(), Some("stock-p30"));
+        let mut s = Setup::preset(file_preset(text).unwrap().unwrap()).unwrap();
+        s.apply_file(text).unwrap();
+        let p30 = Setup::preset("stock-p30").unwrap();
+        for key in KEYS { assert_eq!(s.value_text(key), p30.value_text(key), "{key}"); }
+        assert_eq!(s.preset, "stock-p30");
+        assert_eq!(s.defaulted().len(), KEYS.len(), "preset is not a key");
+        // Quoted and mixed case, like other values.
+        assert_eq!(file_preset("PRESET = \"Stock-P28-Automatic\"
+").unwrap(), Some("stock-p28-automatic"));
+        // No line: as before.
+        assert_eq!(file_preset("vtec = no
+# preset = stock-p30
+").unwrap(), None);
+    }
+    #[test] fn an_unknown_preset_in_a_file_is_a_line_error() {
+        let e = file_preset("vtec = no
+preset = stock-p72
+").unwrap_err();
+        assert!(e.starts_with("line 2:") && e.contains("stock-p28-manual"), "{e}");
+        let mut s = Setup::preset("stock-p28-manual").unwrap();
+        assert!(s.apply_file("preset = nope
+").unwrap_err().starts_with("line 1:"));
     }
     #[test] fn an_unknown_preset_is_an_error_naming_the_known_ones() {
         assert!(Setup::preset("stock-p72").unwrap_err().contains("stock-p28-manual"));

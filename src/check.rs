@@ -4,7 +4,7 @@
 use std::io::{BufRead, Write};
 
 use crate::bench::Bench;
-use crate::car::{Setup, KEYS, PRESETS};
+use crate::car::{file_preset, Setup, KEYS, PRESETS};
 use crate::report;
 use crate::script;
 use crate::verdict;
@@ -81,12 +81,23 @@ fn build_setup(args: &Args, chosen_preset: Option<&str>) -> Result<Setup, String
         .car
         .as_deref()
         .filter(|c| PRESETS.contains(&c.trim().to_ascii_lowercase().as_str()));
-    let mut setup = Setup::preset(named_preset.or(chosen_preset).unwrap_or(default_preset(args)))?;
-    if let (Some(path), None) = (&args.car, named_preset) {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read car file {path}: {e}"))?;
-        // Windows Notepad saves UTF-8 with a byte-order mark.
-        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let file_text = match (&args.car, named_preset) {
+        (Some(path), None) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read car file {path}: {e}"))?;
+            // Windows Notepad saves UTF-8 with a byte-order mark.
+            Some((path, text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()))
+        }
+        _ => None,
+    };
+    // The file's own `preset` line decides the base for that file.
+    let from_file = match &file_text {
+        Some((path, text)) => file_preset(text).map_err(|e| format!("car file {path}: {e}"))?,
+        None => None,
+    };
+    let base = named_preset.or(from_file).or(chosen_preset).unwrap_or(default_preset(args));
+    let mut setup = Setup::preset(base)?;
+    if let Some((path, text)) = &file_text {
         setup.apply_file(text).map_err(|e| format!("car file {path}: {e}"))?;
     }
     for (key, value) in &args.sets {
@@ -583,6 +594,36 @@ mod tests {
         assert!(out2.contains("VERDICT: DO NOT BURN"));
         let header = |s: &str| s.lines().find(|l| l.starts_with("ROM:")).unwrap().split_once("(defaulted").unwrap().1.to_string();
         assert_eq!(header(&out2), header(&out), "the re-run reports the same defaulted list");
+    }
+
+    #[test]
+    fn a_saved_file_reruns_the_same_car_from_a_non_default_preset() {
+        let rom = temp_file(&vec![0xB4u8; 32768]);
+        let saved = unique_path("p30.txt");
+        let json1 = unique_path("first.json");
+        let json2 = unique_path("second.json");
+        // stock-p30; gearbox and egr answered, everything else takes the default.
+        let answers = ["stock-p30", "", "automatic", "", "", "", "", "no", "", "", "", "", "", saved.as_str()]
+            .join("\n")
+            + "\n";
+        let (_, out, err) = drive(&["check", &rom, "--report", &json1], &answers, true);
+        assert!(err.is_empty(), "{err}");
+        let file = std::fs::read_to_string(&saved).unwrap();
+        assert!(file.contains("preset = stock-p30"), "{file}");
+        assert!(file.contains("# knock_sensor = yes"), "{file}");
+
+        let (_, out2, err2) = drive(&["check", &rom, "--car", &saved, "--no-prompt", "--report", &json2], "", false);
+        assert!(err2.is_empty(), "{err2}");
+        let header = |s: &str| s.lines().find(|l| l.starts_with("ROM:")).unwrap().to_string();
+        assert_eq!(header(&out2), header(&out));
+        assert!(header(&out2).contains("Car: stock-p30"), "{}", header(&out2));
+        let setup_of = |path: &str| {
+            let j = std::fs::read_to_string(path).unwrap();
+            let start = j.find("\"setup\"").unwrap();
+            j[start..j.find("\"defaulted\"").unwrap()].to_string()
+        };
+        assert_eq!(setup_of(&json1), setup_of(&json2));
+        assert!(setup_of(&json2).contains("\"ecu\": \"p30\"") && setup_of(&json2).contains("\"knock_sensor\": \"yes\""));
     }
 
     #[test]

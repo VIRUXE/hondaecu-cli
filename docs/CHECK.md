@@ -47,11 +47,14 @@ earlier one:
 
 1. **Preset.** `--car stock-p28-manual | stock-p28-automatic | stock-p30`. With
    no `--car`, the preset is `stock-p30` when an `ecu` of `p30` is given with
-   `--ecu` or `--set`, else `stock-p28-manual`. (A car file that says
-   `ecu = p30` does not change the preset it starts from.)
+   `--ecu` or `--set`, else `stock-p28-manual`. A car file may name its own starting preset with a `preset = <name>` line
+   (one of the three above, else a `line N:` error); that line, not the rule
+   above, then decides the base for that file. `preset` is not one of the
+   twelve values and is never listed as defaulted. Without the line, a file
+   that says `ecu = p30` does not change the preset it starts from.
 2. **Car file.** `--car <path>` for anything that is not a preset name. Lines
    are `key = value`; `#` starts a comment; blank lines are ignored; values may
-   be quoted. A leading UTF-8 byte-order mark (Notepad writes one) is ignored.
+   be quoted. A file saved by `check` starts with `preset = <name>`. A leading UTF-8 byte-order mark (Notepad writes one) is ignored.
    A bad line is refused with its number and exit status 2.
 3. **Arguments.** `--set key=value`, repeatable, and the shorthands `--ecu`
    and `--board-gearbox`, in command-line order.
@@ -64,8 +67,9 @@ earlier one:
    takes the default. Afterwards it offers `Save these answers to a file?
    [path, or Enter to skip]` (not offered once the input has ended). The
    file keeps every key you answered as `key = value` and every key you took
-   the default for as a comment, `# key = value   (preset default)`, so
-   running it again with `--car` reports the same defaulted list.
+   the default for as a comment, `# key = value   (preset default)`, and its
+   first line is `preset = <name>`, so running it again with `--car` checks the
+   same car and reports the same defaulted list.
 
 A value the user did not supply is **defaulted**, and the report heading lists
 those keys: `(defaulted: ...)`, or `(defaulted: all values, from the preset)`
