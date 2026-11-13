@@ -147,9 +147,13 @@ launch-ROM tests need images that cannot be redistributed, so they are opt-in:
 | `p28-rom` | `HONDAECU_P28_ROM` | stock USDM P28-230 | `20b99338774dc41034229f6afd4c4a6ae8ac22339be26e5474b33ac3388c0d5a` |
 | `p30-rom` | `HONDAECU_P30_ROM` | stock JDM P30, mask 203 (the pgmfi wiki's `203stock.bin`) | `c3decae27ff4dec5587df26633107dc7fb1712c91ab501668311941cf8761dfa` |
 | `launch-rom` | `HONDAECU_LAUNCH_ROM` | launch-control test ROM | `f7c7aac6250af2ee4ae2a9f26b9b0fe68fd02ef668dd524f2d369c9a78482c8e` |
+| `hts-rom` | `HONDAECU_HTS_ROM` | Honda Tuning Suite D16Z6 base ROM (`docs/CHECK.md`, "HTS base ROM"); local only, see below | `3f1ba3ea948ecc68dc67446ee96f828112fb13e35c3c27f0761e278ed300e3d0` |
 
-`rom-fixtures` turns all three on, and `cargo test-rom` is `cargo test --release
---features rom-fixtures`. Without a feature its tests are listed as
+`rom-fixtures` turns the first three on, and `cargo test-rom` is `cargo test --release
+--features rom-fixtures`. `hts-rom` is not part of `rom-fixtures` and CI has
+no copy of its image: it is a local opt-in only, `cargo test --release
+--features rom-fixtures,hts-rom`, with `HONDAECU_HTS_ROM` defaulting to
+`../hts_D16Z6Baserom.bin`. Without a feature its tests are listed as
 `ignored, needs the ... ROM`, never as passed. With it, a variable that is
 unset or does not name a file fails every test that needs the image, so a
 green run means the ROM was there. `.cargo/config.toml` defaults the three

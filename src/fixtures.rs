@@ -7,17 +7,21 @@
 //   feature `p30-rom`     + HONDAECU_P30_ROM     the stock P30 mask-203 image
 //   feature `launch-rom`  + HONDAECU_LAUNCH_ROM  the launch-control image
 //   feature `rom-fixtures`                       all three
+//   feature `hts-rom`     + HONDAECU_HTS_ROM     the HTS D16Z6 base ROM (local
+//                                                only: not in `rom-fixtures`
+//                                                nor in CI)
 //
 // Without the feature those tests are reported as ignored, never as passed.
 // With it, a path that is unset or does not name a file fails the test: a
 // green run then means the ROM was really there. `.cargo/config.toml` gives
-// both variables a default next to the checkout; set them to override.
+// every variable a default next to the checkout; set them to override.
 
 use std::path::Path;
 
 pub const P28_ROM_ENV: &str = "HONDAECU_P28_ROM";
 pub const P30_ROM_ENV: &str = "HONDAECU_P30_ROM";
 pub const LAUNCH_ROM_ENV: &str = "HONDAECU_LAUNCH_ROM";
+pub const HTS_ROM_ENV: &str = "HONDAECU_HTS_ROM";
 
 /// Path of the stock P28-230 image. Panics if it is not configured or absent.
 pub fn p28_rom_path() -> String {
@@ -33,6 +37,12 @@ pub fn p30_rom_path() -> String {
 /// Path of the launch-control image. Panics if it is not configured or absent.
 pub fn launch_rom_path() -> String {
     required(LAUNCH_ROM_ENV, "the launch-control ROM")
+}
+
+/// Path of the Honda Tuning Suite D16Z6 base ROM (docs/CHECK.md, "HTS base
+/// ROM"). Panics if it is not configured or absent.
+pub fn hts_rom_path() -> String {
+    required(HTS_ROM_ENV, "the HTS D16Z6 base ROM")
 }
 
 fn required(var: &str, what: &str) -> String {

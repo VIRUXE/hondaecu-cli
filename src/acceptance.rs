@@ -307,6 +307,100 @@ fn stock_p30_on_a_p28_box_holds_the_lamp_lit_and_blinks_nothing() {
     assert_knock_checks_enabled(&bench);
 }
 
+fn hts_rom() -> String {
+    crate::fixtures::hts_rom_path()
+}
+
+#[test]
+#[cfg_attr(not(feature = "hts-rom"), ignore = "needs the HTS base ROM: enable feature hts-rom")]
+fn hts_base_rom_runs() {
+    // docs/CHECK.md, "HTS base ROM": the ROM fuels on the model. Its launch
+    // control can arm only as the engine first turns (222h.3, set from
+    // power-on, not yet cleared), and drops below 2001 rpm; the script
+    // cranks at 300 rpm and idles before it goes above 2000, so no stage
+    // meets it.
+    let (result, report, bench) = check_bench(Bench::from_file(&hts_rom()).unwrap(), &preset("stock-p28-manual"));
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+    // Launch flag 409h.3 clear at the end (written at 0x5BF7 / 0x5BFB).
+    assert_eq!(bench.bus.ram[0x409] & 0x08, 0, "409h.3");
+}
+
+/// The HTS base image (patched by `patch`) on a bench held at `rpm`, 90 kPa,
+/// `tps` %, 88 C, standing still, from power-on; after `idle_first` seconds
+/// at 800 rpm if that is non-zero. Returns the openings per output in the
+/// last 2 s and RAM 409h at the end.
+fn hts_bench(patch: &[(usize, u8)], idle_first: f64, rpm: f64, tps: f64) -> ([u64; 4], u8) {
+    let mut image = std::fs::read(hts_rom()).unwrap();
+    image.truncate(32768);
+    for &(addr, value) in patch {
+        image[addr] = value;
+    }
+    let mut bench = Bench::new(&image);
+    bench.engine.map_kpa = 90.0;
+    bench.engine.tps_pct = tps;
+    bench.engine.ect_celsius = 88.0;
+    bench.engine.iat_celsius = 30.0;
+    bench.engine.vbatt_volts = 14.2;
+    bench.engine.speed_kmh = 0.0;
+    if idle_first > 0.0 {
+        bench.engine.rpm = 800.0;
+        bench.engine.sync_sensors_to_bus(&mut bench.bus);
+        assert!(bench.run(idle_first));
+    }
+    bench.engine.rpm = rpm;
+    bench.engine.sync_sensors_to_bus(&mut bench.bus);
+    let before = bench.bus.injector_open_count;
+    assert!(bench.run(2.0));
+    let after = bench.bus.injector_open_count;
+    let opens = std::array::from_fn(|i| after[i] - before[i]);
+    (opens, bench.bus.ram[0x409])
+}
+
+#[test]
+#[cfg_attr(not(feature = "hts-rom"), ignore = "needs the HTS base ROM: enable feature hts-rom")]
+fn hts_base_rom_launch_control_cuts_fuel_above_2000_rpm_from_a_standstill() {
+    // docs/CHECK.md, "HTS base ROM". 0x5BBB..0x5BFB: with 6150h non-zero
+    // (FFh) and 615Dh non-zero (FFh) the launch flag 409h.3 is set whenever
+    // the routine runs with 222h.3 set (from power-on until shortly after the
+    // engine starts turning), and once set it stays while the period
+    // C4h is at most 3A9h (2001 rpm) and TPS D1h is at least 60h. 0x5B45
+    // then makes 3A9h the rev limit (0x1880), and with 6126h 00h the limit
+    // cuts fuel (0x189C..0x18A2, PSWL.5). An engine that is at 3000 rpm with
+    // the throttle open from power-on, as `trace` spins it, never leaves the
+    // launch limiter.
+    // Observed: one opening per output in the run (the flag is first set
+    // 0.06 s after power-on).
+    let (opens, flag) = hts_bench(&[], 0.0, 3000.0, 65.0);
+    assert!(opens.iter().all(|&n| n <= 1), "{opens:?}");
+    assert_ne!(flag & 0x08, 0, "409h.3");
+
+    // Below the limit it fuels: 1900 rpm, flag dropped.
+    let (opens, flag) = hts_bench(&[], 0.0, 1900.0, 65.0);
+    assert!(opens.iter().all(|&n| n >= 25), "{opens:?}");
+    assert_eq!(flag & 0x08, 0, "409h.3 at 1900 rpm");
+
+    // Throttle under the D1h gate: the flag drops and it fuels at 3000.
+    let (opens, flag) = hts_bench(&[], 0.0, 3000.0, 30.0);
+    assert!(opens.iter().all(|&n| n >= 40), "{opens:?}");
+    assert_eq!(flag & 0x08, 0, "409h.3 at 30 % TPS");
+
+    // Started and idled first, the engine is not launching: it fuels at 3000.
+    let (opens, flag) = hts_bench(&[], 2.0, 3000.0, 65.0);
+    assert!(opens.iter().all(|&n| n >= 40), "{opens:?}");
+    assert_eq!(flag & 0x08, 0, "409h.3 after idle");
+
+    // 6126h non-zero: the limiter no longer cuts fuel, only spark (E6h.0,
+    // set at 0x1898 with 6125h non-zero whatever 6126h is, keeps the
+    // ignition compare from being armed at 0x019B / 0x01E9 / 0x0251), so the
+    // injectors keep firing while the launch flag is still set. That is the
+    // lyonnel ROM's value.
+    let (opens, flag) = hts_bench(&[(0x6126, 0xFF)], 0.0, 3000.0, 65.0);
+    assert!(opens.iter().all(|&n| n >= 40), "{opens:?}");
+    assert_ne!(flag & 0x08, 0, "409h.3 with 6126h FFh");
+}
+
 #[test]
 #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
 fn case_5_bad_checksum_resets() {

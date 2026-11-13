@@ -656,3 +656,153 @@ the level bits, say, or by changing its heartbeat), such a ROM could react
 to it differently on the car than on the model. A P30 ROM in a P28 box keeps the check-engine light on and
 answers the service connector with a steady lamp, which a driver would read
 as "no code stored".
+
+## HTS base ROM
+
+`hondaecu/hts_D16Z6Baserom.bin`, the Honda Tuning Suite D16Z6 base ROM
+(SHA-256 `3f1ba3ea...300e3d0`; its bytes sum to E3h, not 0, and it does not
+reset for it). The design recorded that it "boots on the current P28 model
+and never opens an injector at 3000 rpm" (`trace ... injcount 3000 2` prints
+`INJ 0 0 0 0`), and that setting ROM byte `6126h` from `00` to `FF` (the
+lyonnel ROM's value) makes it inject. Neither of the two explanations the
+plan offered holds: the ROM fuels on the model, and the model was not
+changed. What stopped the injectors is the ROM's **launch control**, which
+the `trace` bench sets off by spinning the engine at 3000 rpm with the
+throttle at 65 % from the instant of power-on.
+
+**`check` says worth burning** (`stock-p28-manual`): fuel pump 2.1 s, all four
+injectors in cranking, `warm idle` 54/53/53/53 openings in 53.3 engine
+cycles, fuel stops at 7420 rpm and VTEC at 4755 rpm in `full throttle`, no
+code. Acceptance `hts_base_rom_runs` (feature `hts-rom`).
+
+**What `6126h` is.** The HTS code differs from the stock P28's here (the
+stock ROM's byte at `6126h` is calibration data, `D0`). HTS's rev limiter,
+0x186B..0x18A4 (the stock one is 0x1803..0x1846):
+
+```
+1871  MB   C, P4.0
+1874  JLT  187C
+1876  JBS  11Bh.7, 187C
+1879  CAL  5B45              ; HTS: limit in A, resume in DP (below)
+187C  JBR  124h.5, 1880      ; already cutting: compare with the resume value
+187F  L    A, DP
+1880  CMP  0C4h, A           ; C4h = engine period, rpm = 1875000 / period
+1883  LCB  A, 6125h          ; FFh
+1887  JEQ  189A
+1889  MOV  DP, #0E6h
+188C  LCB  A, 5F88h          ; 00h
+1890  JEQ  1896
+...
+1896  JGE  189A
+1898  SB   [DP].0            ; E6h.0: spark cut (0x019B, 0x01E9, 0x0251 do not
+                             ; arm the ignition compare while it is set)
+189A  JGE  18A6              ; under the limit
+189C  LCB  A, 6126h
+18A0  JNE  18E4              ; 6126h non-zero: no fuel cut
+18A2  SB   PSWL.5            ; -> 124h.5 (0x18F6): fuel cut
+```
+
+So `6126h` decides whether this limiter cuts fuel as well as spark: `00`
+cuts both, anything else spark only. The period scale is eCtune's
+(`Calibration.PeriodToRpm`, 1875000 / period; C4h read 0271h = 625 at
+3000 rpm).
+
+**The launch control.** 0x5B45 returns the limit. With RAM `409h.3` set it
+is 3A9h (937, **2001 rpm**), the larger period of that and the normal limit
+(`192h`); the resume value is the limit plus the word at `6029h`. `409h.3`
+is the launch flag, written at 0x5BBB..0x5BFB:
+
+- off (cleared) when option byte `6150h` is 00h; it is FFh in this ROM
+  (00h in lyonnel, which installs its own launch routine at 0x5F14 instead,
+  called from 0x1879);
+- with `615Dh` non-zero (FFh here) it is set whenever the routine runs with
+  `222h.3` set. `222h.3` (written at 0x3E0B) is set from power-on and stays
+  set while the crank is still (observed: still set after 1 s at 0 rpm); it
+  cleared 0.09 s after power-on with the engine turning at 3000 rpm, and was
+  clear after 2 s of idle. The flag was not set during 1 s at 0 rpm, and was
+  set on the first pass after the engine began to turn (0.0065 s later);
+- otherwise it is cleared when the period is above 3A9h (below 2001 rpm) or
+  throttle `D1h` is below 60h (D1h read 56h at 30 % and 9Eh at 65 % TPS on
+  the model), kept if already set, and else set only when `BBh` reaches
+  `6151h` or `615Eh` (chosen by coolant `D9h` against `615Fh`). `BBh`
+  follows MAP (2Ah at 30 kPa, 5Dh at 90, 66h at 100) and both thresholds
+  are FFh in this ROM, so that second way in is closed on an unboosted
+  engine: the tuning tool's values to fill in.
+
+So in this base ROM launch control arms only as the engine first turns, and
+holds the engine at 2000 rpm, by fuel and spark cut, until the revs fall
+below 2000 or the throttle closes below the D1h gate. Observed on the bench
+(acceptance `hts_base_rom_launch_control_cuts_fuel_above_2000_rpm_from_a_standstill`,
+90 kPa, 88 C, standing still, from power-on unless said):
+
+| bench | openings per output in 2 s | `409h.3` |
+|---|---|---|
+| 3000 rpm, 65 % TPS | 1 (the flag is first set 0.06 s after power-on) | set |
+| 1900 rpm, 65 % TPS | at least 25 | clear |
+| 3000 rpm, 30 % TPS | at least 40 | clear |
+| 2 s at 800 rpm, then 3000 rpm, 65 % TPS | at least 40 | clear |
+| 3000 rpm, 65 % TPS, `6126h` = FFh | at least 40 (spark cut only) | set |
+
+A car cannot be at 3000 rpm with the throttle open in the first tenth of a
+second after the key is turned, so a real P28 box would fuel this ROM: the
+zero-injection result was the `trace` bench's start (engine already at the
+asked rpm before the ROM's first pass), not the ROM and not the board
+model. `6126h` = `00` is not a defect: cutting fuel on a rev limiter is
+what the stock ROM does too. Setting it to `FF`, as earlier work did, did
+not "fix" anything; it moved the limiter to spark only, so the injectors
+counted on the bench kept firing while the launch limiter was still on.
+
+**For a user of `check`.** The report for this ROM is true as printed: the
+script cranks at 300 rpm and idles before it goes above 2000 rpm, so
+launch control never meets a stage, and nothing in the report claims it
+was checked. `check` does not exercise launch control at all (a standing
+start with the throttle held above 2000 rpm is not in the script); that is
+one of the things the `NOT JUDGED` line covers only in general. Anyone
+using `trace` on a ROM with launch control should idle the engine first,
+or read a dead output at speed as possibly the launch limiter.
+
+## Results on the images at hand, 2026-11
+
+Every 32 KB image in the workspace through `check --no-prompt`, release
+build of the commit that adds this section, paths relative to
+`hondaecu-cli`. The P30 images were run on both boxes, the others on the
+default P28 box with `stock-p28-manual`. Recorded, not acted on: none of
+these runs changed the model or the verdict rules.
+
+| command | exit | verdict line | first problem or could-not-tell line |
+|---|---|---|---|
+| `check ../P28-230.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4875 rpm) |
+| `check ../../ecu/bins/p30_203.bin --ecu p30` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 8305 rpm, VTEC at 5685 rpm) |
+| `check ../../ecu/bins/p30_203.bin --ecu p28` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check` |
+| `check ../../ecu/bins/p30_usdm_203.bin --ecu p30` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7505 rpm, VTEC at 5315 rpm) |
+| `check ../../ecu/bins/p30_usdm_203.bin --ecu p28` | 0 | `VERDICT: WORTH BURNING` | none (same figures as on the P30 box) |
+| `check ../../ecu/bins/p72.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check` |
+| `check ../test-roms/P28-ERMbaseline.bin` | 1 | `VERDICT: DO NOT BURN - settles after power-on: resets at 5.3 s, 10.6 s, ... 105.8 s (program address 237Dh)` (20 resets, every 5.3 s) | `settles after power-on ... resets at 5.3 s, ...` |
+| `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` | `check-engine light ....... lit at 2.7 s, after the bulb check` |
+| `check ../hts_D16Z6Baserom.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4755 rpm) |
+| `check ../../ecu/bins/p06.bin` | 2 | (refused) `cannot use ROM ../../ecu/bins/p06.bin: expected a 32768-byte ROM image (optionally followed by one 00 byte), got 32769 bytes` | n/a |
+| `check ../../ecu/bins/p1j.bin` | 2 | (refused) `... got 32860 bytes` | n/a |
+
+No run ended `COULD NOT TELL`. Things these runs show that nothing here
+explains yet:
+
+- **`p30_203.bin` on the P30 box** now reads fuel stop 8305 rpm and VTEC
+  5685 rpm; "What the stock P30 does" above gives 8310 and 5690, which is
+  what the same image shows today on the P28 box. 5 rpm is one step of the
+  sweep; which change moved it was not traced.
+- **`p72.bin`** on a P28 box behaves like the P30 image there: the lamp lights
+  again at 2.2 s and the read-out blinks nothing ("none blinked, although the
+  check-engine light is on"). Not traced; the P30's cause (the knock board's
+  missing heartbeat, code 24) is the obvious candidate. It was not run with
+  `--ecu p30`.
+- **`P28-ERMbaseline.bin`** resets every 5.3 s: the BRK at 0x237D follows a
+  countdown in RAM `F6h` (0x2371..0x2378). Its `idle, A/C on` line is also a
+  problem ("the A/C clutch was never engaged") and its lamp is lit from
+  2.2 s. Its bytes sum to F9h. Not traced.
+- **`lyonnel-2.0-launch-ok.bin`** lights the lamp at 2.7 s and blinks
+  nothing; its fuel pump prime is 2.6 s (2.1 s on the others). Its
+  `full throttle sweep` line reads "fuel never stopped below 9000 rpm":
+  true, but its limiter does not cut fuel (`6126h` = FFh, see "HTS base
+  ROM"), and a `trace` snapshot at 7500 rpm found the spark-cut flag `E6h.0`
+  set. A tuner reading that line as "no rev limiter" would be wrong; the
+  line reports fuel only.

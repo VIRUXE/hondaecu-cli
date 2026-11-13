@@ -19,5 +19,8 @@ p28-rom = []
 p30-rom = []
 launch-rom = []
 rom-fixtures = ["p28-rom", "p30-rom", "launch-rom"]
+# The HTS D16Z6 base ROM (HONDAECU_HTS_ROM). A local opt-in only: it is not
+# part of `rom-fixtures` and CI has no copy of it.
+hts-rom = []
 
 [dependencies]
