@@ -298,7 +298,9 @@ the last width.
   CYP → TRNS0, VSS → INT0 assignments are confirmed by the schematic.
 - Pulse widths are produced by the ROM's own tables from modeled sensor
   voltages. They are plausible, not validated against a datalog; in particular
-  the ECT/IAT/battery transfer functions in `engine.rs` are approximations.
+  the IAT and battery transfer functions in `engine.rs` are approximations.
+  The ECT curve is sourced (eCtune's thermistor curve, cross-checked against
+  the pgmfi wiki and the ROM's own coolant thresholds; see `ECT_VOLTS`).
 - The injector monitor's exact gating: sheet 7 shows a transistor on each
   injector's low side combined into P4.6, and the model raises one edge per
   opening, which satisfies the ROM; the analog behaviour is not modeled.

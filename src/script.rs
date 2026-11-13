@@ -413,6 +413,15 @@ mod tests {
         assert!(stage("full throttle")
             .fuel_stops_rpm
             .is_some_and(|rpm| (7000.0..=7500.0).contains(&rpm)));
+        // Observed: 4875 rpm. The window at 6432h (0x117B; hondaromeditor
+        // README: engage 4812 rpm when MAP is high, 5500 rpm regardless) sets
+        // 128h.1 when the log-rpm code 12Dh exceeds CDh (CMPB A, 12Dh at
+        // 0x1193), i.e. above 4812 rpm; the first code above it, CEh, is
+        // 4875 rpm. The warm-coolant gate is C1h < 44h (0x11C7), about
+        // 60 deg C on the sourced ECT curve.
+        assert!(stage("full throttle")
+            .vtec_on_rpm
+            .is_some_and(|rpm| (4812.0..=4950.0).contains(&rpm)));
         assert_eq!(r.mil_first_lit_after_bulb_check, None);
         // With the connector grounded and no code stored, the ROM holds the
         // MIL lit (0x36B1..0x36CA: 31Ah and 31Ch zero, option byte 6011h

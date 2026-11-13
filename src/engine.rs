@@ -37,6 +37,55 @@ fn iat_volts(celsius: f64) -> f64 {
     v0 + (v1 - v0) * (celsius - t0) / (t1 - t0)
 }
 
+/// Stock Honda OBD1 coolant sensor, (deg C, volts at the ECU).
+///
+/// Source: eCtune's `temperatureSensorCurve` (`ectune-cobrartp`,
+/// `source/eCtuneBin/Calibration.cs`), which gives deg C for each 8-bit ECU
+/// reading 00h..FFh and which eCtune applies to both ECT and IAT. Every 16th
+/// byte is kept (one-byte error at most against the full curve); its volts
+/// are the middle of that byte's ADC bin, `(4 b + 2) / 1023 * 5`.
+///
+/// Cross-checks: Ed Gibson's lab-mapped table on the pgmfi wiki
+/// ("Engine Coolant Temperature" page, '93 CRX, 0..100 deg C only) agrees
+/// within 1.3 deg C from 20 to 100 deg C; and the ROM's coolant thresholds
+/// on RAM C1h fall at plausible temperatures: 44h (VTEC allowed below it,
+/// 0x11C7) at 59.7 deg C, 3Bh (fail-safe) at 65.4, 2Eh at 75.1, 20h at 88.8
+/// (docs/CHECK.md). Not shared with `IAT_VOLTS`, whose AEM-attributed values
+/// differ from this curve.
+const ECT_VOLTS: [(f64, f64); 17] = [
+    (-26.2, 4.995), // FFh
+    (-18.1, 4.702), // F0h
+    (-9.4, 4.389),  // E0h
+    (-1.1, 4.076),  // D0h
+    (6.7, 3.763),   // C0h
+    (13.8, 3.451),  // B0h
+    (20.4, 3.138),  // A0h
+    (26.7, 2.825),  // 90h
+    (32.9, 2.512),  // 80h
+    (39.1, 2.199),  // 70h
+    (45.8, 1.887),  // 60h
+    (53.2, 1.574),  // 50h
+    (62.1, 1.261),  // 40h
+    (73.5, 0.948),  // 30h
+    (88.8, 0.635),  // 20h
+    (110.2, 0.323), // 10h
+    (141.0, 0.010), // 00h
+];
+
+/// Linear interpolation through `ECT_VOLTS`, clamped at both ends.
+fn ect_volts(celsius: f64) -> f64 {
+    let (first, last) = (ECT_VOLTS[0], ECT_VOLTS[ECT_VOLTS.len() - 1]);
+    if celsius <= first.0 {
+        return first.1;
+    }
+    if celsius >= last.0 {
+        return last.1;
+    }
+    let i = ECT_VOLTS.iter().position(|&(t, _)| t >= celsius).unwrap();
+    let ((t0, v0), (t1, v1)) = (ECT_VOLTS[i - 1], ECT_VOLTS[i]);
+    v0 + (v1 - v0) * (celsius - t0) / (t1 - t0)
+}
+
 /// TDC edges fall half a tooth after CKP teeth 0, 6, 12 and 18 of the cam
 /// revolution; CYP falls half a tooth after tooth `CYP_AFTER_TOOTH`.
 ///
@@ -108,9 +157,8 @@ impl EngineState {
         let tps_counts = (self.tps_pct / 100.0 * 818.0 + 102.0).clamp(0.0, 1023.0) as u16;
         bus.adc_inputs[P28_ADC_TPS] = tps_counts;
 
-        // ECT: U5/X2. High temperature lowers the NTC voltage.
-        // High temp = low resistance = low voltage = low ADC count
-        let ect_counts = (1023.0 - ((self.ect_celsius + 40.0) / 160.0 * 900.0)).clamp(0.0, 1023.0) as u16;
+        // ECT: U5/X2, through the sourced thermistor curve (`ECT_VOLTS`).
+        let ect_counts = (ect_volts(self.ect_celsius) / 5.0 * 1023.0).clamp(0.0, 1023.0) as u16;
         bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ECT_SELECT] = ect_counts;
 
         // IAT: U6/X2.
@@ -244,6 +292,34 @@ mod tests {
         assert_eq!(iat_volts(27.0), 2.340);
         // Halfway between 18 C (2.808 V) and 27 C (2.340 V).
         assert!((iat_volts(22.5) - 2.574).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ect_table_interpolates_and_clamps() {
+        assert_eq!(ect_volts(-40.0), 4.995);
+        assert_eq!(ect_volts(160.0), 0.010);
+        assert_eq!(ect_volts(88.8), 0.635);
+        // Halfway between 62.1 C (1.261 V) and 73.5 C (0.948 V).
+        assert!((ect_volts(67.8) - 1.1045).abs() < 1e-9);
+    }
+
+    /// The ROM allows VTEC only while RAM C1h, the high byte of the U5/X2
+    /// sample, is below 44h (0x11C7). A warm engine must read below that;
+    /// a freezing one far above it.
+    #[test]
+    fn a_warm_engine_reads_low_on_u5_x2() {
+        let count_at = |celsius: f64| {
+            let mut bus = Bus::new();
+            let mut engine = EngineState::new();
+            engine.ect_celsius = celsius;
+            engine.sync_sensors_to_bus(&mut bus);
+            bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ECT_SELECT]
+        };
+        let vtec_gate = 0x44 * 4;
+        assert!(count_at(88.0) < vtec_gate, "{}", count_at(88.0));
+        assert!(count_at(0.0) > 3 * vtec_gate, "{}", count_at(0.0));
+        // The sampled table lands on the source curve's own byte at 88.8 C.
+        assert_eq!(count_at(88.8) >> 2, 0x20);
     }
 
     /// The distributor is scheduled on the machine-cycle clock. However the

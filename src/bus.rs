@@ -726,7 +726,7 @@ impl Bus {
     /// Read from the external data bus (`EXTERNAL_DATA_START..=0xFFFF`).
     fn read_external(&mut self, addr: u16) -> u8 {
         let driven = match addr {
-            P28_INPUT_PORT => Some(self.p28_input_port),
+            P28_INPUT_PORT => Some(self.p28_input_port_as_read()),
             _ => p28_ppi_register(addr).and_then(|reg| {
                 self.drive_p28_feedback();
                 self.ppi.read(reg)
@@ -856,8 +856,30 @@ impl Bus {
         self.adc_inputs[P28_ADC_IACV_CURRENT] = (self.iacv_sense * 1023.0) as u16;
     }
 
-    /// The VTEC oil-pressure switch is closed (pin D6 grounded), its state
-    /// without VTEC oil pressure.
+    /// The byte the ROM reads at `P28_INPUT_PORT`: `p28_input_port` (the
+    /// switches' rest state) with the VTEC oil-pressure switch open while the
+    /// solenoid is powered. A Honda VTEC pressure switch is normally closed
+    /// and opens under the oil pressure the solenoid admits; the ROM checks
+    /// exactly that at 0x3D34..0x3D40 (`9Ah.1`, code 22). "Powered" is the
+    /// expression `drive_p28_feedback` uses for the solenoid feedback.
+    ///
+    /// Assumption: the switch opens the instant the solenoid is driven. Real
+    /// oil pressure takes time to build; how much delay the ROM's check
+    /// tolerates is not established.
+    fn p28_input_port_as_read(&self) -> u8 {
+        let powered =
+            self.vtec_solenoid_connected && self.p28_outputs().is_some_and(|out| out.vtec_solenoid);
+        if powered {
+            self.p28_input_port & !P28_IN_VTEC_PRESSURE_SW_CLOSED
+        } else {
+            self.p28_input_port
+        }
+    }
+
+    /// The VTEC oil-pressure switch's rest state is closed (pin D6
+    /// grounded): its state without VTEC oil pressure. While the solenoid is
+    /// powered the ROM reads it open regardless (`p28_input_port_as_read`);
+    /// a rest state of open models a broken or absent switch.
     pub fn vtec_pressure_switch_closed(&self) -> bool {
         self.p28_input_port & P28_IN_VTEC_PRESSURE_SW_CLOSED != 0
     }
@@ -1605,6 +1627,31 @@ mod tests {
         assert_eq!(bus.read_data_u8(P28_INPUT_PORT) & P28_IN_VTEC_PRESSURE_SW_CLOSED, 0);
         // The ROM's image of an open switch is 211h.1 = 1.
         assert_ne!((bus.p28_input_port ^ P28_INPUT_ACTIVE_LOW) & 0x02, 0);
+    }
+
+    #[test]
+    fn vtec_pressure_switch_reads_open_while_the_solenoid_is_powered() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x3F00, 0x90);
+        let rest = bus.p28_input_port;
+
+        bus.write_data_u8(0x2F00, P28_PC_VTEC_SOLENOID);
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT), rest & !P28_IN_VTEC_PRESSURE_SW_CLOSED);
+        assert!(bus.vtec_pressure_switch_closed(), "rest state unchanged");
+
+        bus.write_data_u8(0x2F00, 0x00);
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT), rest, "solenoid off: rest state");
+
+        bus.vtec_solenoid_connected = false;
+        bus.write_data_u8(0x2F00, P28_PC_VTEC_SOLENOID);
+        assert_eq!(bus.read_data_u8(P28_INPUT_PORT), rest, "unplugged solenoid: no oil pressure");
+
+        bus.set_vtec_pressure_switch_closed(false);
+        for (connected, pc) in [(false, P28_PC_VTEC_SOLENOID), (true, P28_PC_VTEC_SOLENOID), (true, 0x00)] {
+            bus.vtec_solenoid_connected = connected;
+            bus.write_data_u8(0x2F00, pc);
+            assert_eq!(bus.read_data_u8(P28_INPUT_PORT) & P28_IN_VTEC_PRESSURE_SW_CLOSED, 0);
+        }
     }
 
     #[test]

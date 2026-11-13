@@ -46,13 +46,16 @@ complete run. Before this change it returned `Unreadable`, because the rise
 lands inside the window. The script test expects `Steady`, and for the
 verdict either `Off` or `Steady` means no code blinked.
 
-### VTEC never engages at 88 °C coolant
+### Resolved: VTEC never engaged at 88 °C coolant
 
-`vtec_on_rpm` is `None` in `full throttle` (2000 to 9000 rpm, 100 % TPS,
+`vtec_on_rpm` was `None` in `full throttle` (2000 to 9000 rpm, 100 % TPS,
 100 km/h): port C bit 0 never went high during the run. The ROM's VTEC
 decision at 0x11BE..0x11E2 drops to `RB P1.0` (0x11E2) at 0x11C7,
-`CMPB 0C1h, #044h / JGE`: RAM `C1h` must be below 44h. `C1h` follows the
-ECT input. Held at 6000 rpm, 100 % TPS, 100 km/h after a warm boot:
+`CMPB 0C1h, #044h / JGE`: RAM `C1h` must be below 44h. `C1h` is the high
+byte of the U5/X2 sample (`3C8h`), passed through the slew filter at 0x5248,
+which follows the raw byte with a two-count dead band (it settles 2 below a
+rising input and 2 above a falling one). Held at 6000 rpm, 100 % TPS,
+100 km/h after a warm boot, on the old model:
 
 | `ect_celsius` | `C1h` | PC0 went high |
 |---|---|---|
@@ -60,13 +63,89 @@ ECT input. Held at 6000 rpm, 100 % TPS, 100 km/h after a warm boot:
 | 95 | 43h | yes |
 | 110 | 2Eh | yes (and later off again via 0x11B9, not traced) |
 
-`EngineState::sync_sensors_to_bus` maps ECT linearly
-(`1023 - (ect + 40) / 160 * 900` counts), a placeholder rather than Honda's
-thermistor curve. On that line 88 °C sits on the cold side of the ROM's VTEC
-gate, which needs about 94 °C or more. This is a model limitation, not a ROM
-fault; the brief's test does not assert VTEC, so neither the model nor the
-script's 88 °C was changed. A verdict on VTEC from this script would be
-wrong until the ECT curve is replaced.
+The cause was the model: `EngineState::sync_sensors_to_bus` mapped ECT on a
+straight line (`1023 - (ect + 40) / 160 * 900` counts), a placeholder that
+put 88 °C on the cold side of the ROM's gate.
+
+**Curve now used** (`ECT_VOLTS` / `ect_volts` in `engine.rs`): eCtune's
+`temperatureSensorCurve` (`ectune-cobrartp/source/eCtuneBin/Calibration.cs`),
+which gives °C for each 8-bit ECU reading and which eCtune applies to both
+ECT and IAT. Every 16th byte is kept (at most one byte off the full curve),
+at the middle of that byte's ADC bin.
+
+**Cross-checks.**
+
+- The pgmfi wiki, "Engine Coolant Temperature"
+  (`hondabase.com/pgmfi/wiki/library/engine-coolant-temperature`): Ed
+  Gibson's table for a '93 CRX, sensor resistance measured in a lab from 0 to
+  100 °C and ECU bytes mapped by applying equivalent resistances on the car.
+  It agrees with eCtune within 1.3 °C from 20 to 100 °C (3.2 °C at worst,
+  near 8 °C); below 0 °C it has no data. The page's attachment is the Honda
+  shop-manual resistance chart. Gibson's table was not used as the model
+  because it stops at 0 °C, and the DTC 6 stimulus (`dtc.rs`, -40 °C must
+  read above 900 counts) needs the cold end.
+- The ROM's own coolant thresholds on `C1h`, read on the curve:
+
+  | `C1h` | where | eCtune | Gibson |
+  |---|---|---|---|
+  | 44h | VTEC allowed below it (0x11C7) | 59.7 °C | 60.5 °C |
+  | 3Bh | fail-safe value on a sensor fault (0x3BB8) | 65.4 °C | 66.6 °C |
+  | 35h | purge allowed below it (0x4338) | 69.6 °C | 70.8 °C |
+  | 34h | 0x0DAC, 0x190B and others | 70.3 °C | 71.5 °C |
+  | 2Eh | 0x0D8B, 0x0D64 and others | 75.1 °C | 75.8 °C |
+  | 20h | 0x06C9 | 88.8 °C | 88.9 °C |
+
+  A VTEC gate near 60 °C fits the usual statement of Honda's VTEC
+  conditions (engine warm, about 60 °C); that statement is not separately
+  sourced here.
+
+**Now observed.** At 88 °C `C1h` = 23h (`trace ... snap 800 2 C0 C1`; the raw
+byte is 21h, and the filter settles 2 above it coming down from the
+fail-safe 3Bh). In the script VTEC switches on at **4875 rpm** in
+`full throttle`: the low-cam window (0x117B, `DP = 6432h`) sets `128h.1`
+when the log-rpm code `12Dh` exceeds CDh (4812 rpm), and the first code
+above it, CEh, is 4875 rpm. The README of the P28-230 source project gives
+4812 rpm for this window.
+
+**VTEC pressure switch.** Once VTEC engaged, the run first stored code 22
+(VTEC system): the MIL lit at 35.43 s, about 3 s after VTEC came on, with
+fault word `212h..215h` = `00 00 20 00` (bit 21). The ROM's check at
+0x3D34..0x3D40 takes `C = 211h.1` (`211h = DATA[4700h] XOR 1Ah`, so 1 =
+switch open): with `21Fh.2` clear (VTEC off) an open switch sets `9Ah.1`,
+with `21Fh.2` set (VTEC on) a *closed* one does. A Honda VTEC pressure
+switch is normally closed and opens under the oil pressure the solenoid
+admits; the model's switch was static, never opened by the solenoid, because
+no run had reached VTEC before. `Bus` now presents the switch open at
+`4700h` while the solenoid is powered (`vtec_solenoid_connected` and PC0,
+the same condition as the solenoid feedback); `p28_input_port` stays the
+switch's rest state, so a switch set open still reads open. Assumption: the
+switch opens the instant the solenoid is driven; real oil pressure takes
+time to build, and how much delay the ROM's check tolerates is not
+established (see the monitors table in `CPU_CORE.md`). With it the script
+runs clean: VTEC at 4875 rpm, no MIL after the bulb check, `Lamp::Steady`.
+
+No other stock-ROM test moved.
+
+### Open: `IAT_VOLTS` disagrees with the curve eCtune uses for IAT
+
+eCtune applies the same `temperatureSensorCurve` to ECT and IAT. The
+intake-air table in `engine.rs` (`IAT_VOLTS`, from the pgmfi wiki's
+"Intake Air Temperature Sensor" page, values attributed there to AEM) reads
+much colder than that curve for the same voltage:
+
+| `IAT_VOLTS` | volts | byte | eCtune |
+|---|---|---|---|
+| 1 °C | 3.900 | C7h | 3.4 °C |
+| 18 °C | 2.808 | 8Fh | 27.1 °C |
+| 27 °C | 2.340 | 77h | 36.4 °C |
+| 51 °C | 1.404 | 47h | 58.0 °C |
+| 66 °C | 0.936 | 2Fh | 74.3 °C |
+| 83 °C | 0.468 | 17h | 99.9 °C |
+| 100 °C | 0.000 | 00h | 141.0 °C |
+
+So the voltage the model gives for 27 °C air is what eCtune's curve reads as
+36.4 °C; the gap grows toward the hot end.
+Which is right for this sensor is not settled; `IAT_VOLTS` is unchanged.
 
 ### Also observed (all within the brief's assertions)
 

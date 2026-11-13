@@ -861,6 +861,7 @@ through the register aliases; ten instructions in this ROM use the form.
 | injector test circuit, TRNS2 / P4.6 | bit cleared at 0x4BCF before an opening, tested at 0x0637 / 0x1486 | `9Ch.6`, code 16 | one edge whenever an injector output opens (`Bus::injectors_connected`) |
 | heartbeat, TRNS3 / P4.7 | 0x2964 counts RAM `2EBh` down from `FFh` while no edge arrives | none stored; `230h.6` lights the MIL (0x4293) unless U5/X3 reads `FCh` or more | an edge every 10 ms (`Bus::heartbeat_present`) |
 | VTEC solenoid, port A bit 5 | 0x3D0C..0x3D21 | `9Ah.0`, code 21 | follows PC0 (`vtec_solenoid_connected`) |
+| VTEC oil-pressure switch, `4700h` bit 1 | 0x3D34..0x3D40: `211h.1` (1 = open) must be 0 with VTEC off (`21Fh.2` clear) and 1 with it on | `9Ah.1`, code 22 | `p28_input_port` is the switch's rest state (closed); the ROM reads it open while the solenoid is powered (`vtec_solenoid_connected` and PC0, `Bus::p28_input_port_as_read`). Assumption: it opens the instant the solenoid is driven; real oil pressure takes time to build, and how much delay the ROM's check tolerates is not established |
 | O2 heater, port A bit 6 | 0x2094..0x20CB: 0 with the heater off, 1 with it on | `9Bh.2`, code 27 | follows PC2 (`o2_heater_connected`) |
 | lock-up solenoid, port A bit 4 | 0x3C98..0x3CA5, automatic only | `99h.6`, code 19 | inverse of PB4 |
 | IACV current, AI4 | 0x3C52..0x3C71 | `99h.3`, code 14 | see below (`iacv_connected`) |
