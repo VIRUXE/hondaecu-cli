@@ -30,13 +30,27 @@ pub const CODE_GAP_MIN_SECONDS: f64 = 2.0;
 /// `edges`: (seconds, lit) changes; `from`..`to` is the read window, opened when
 /// the service connector was grounded. Codes are distinct, ascending.
 ///
-/// Only edges inside the window count; the lamp's state at `from` is whatever
-/// the last edge at or before `from` left it (dark if there is none). A blink
-/// or gap already under way at `from` is measured from `from`. The stretch
-/// still open at `to` is never counted, so a run without its closing gap is
-/// dropped.
+/// A run counts only if its first blink rises inside the window and the dark
+/// stretch before that rise lasted at least `CODE_GAP_MIN_SECONDS`. That
+/// stretch may have begun before `from` (dark since power-on counts as long
+/// enough). So a lamp lit at `from` (a bulb check, or a blink cut by `from`)
+/// is never a blink, and blinks after a too-short dark stretch are skipped
+/// until a qualifying gap appears. At `to`, a lit stretch still open is never
+/// counted, and a run counts only if the dark stretch after it has lasted a
+/// full gap, so a run cut by `to` is dropped.
+///
+/// Lit for the whole window is `Steady`; no rise inside the window and not
+/// lit throughout is `Off`; rises but no complete qualifying run is
+/// `Unreadable`.
 pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
-    let mut lit = edges.iter().take_while(|e| e.0 <= from).last().map_or(false, |e| e.1);
+    let before = edges.iter().rposition(|e| e.0 <= from);
+    let mut lit = before.map_or(false, |i| edges[i].1);
+    // When the lamp last went dark; a lamp dark since power-on (the first
+    // edge, or none) counts as having been dark forever.
+    let mut dark_since = match before {
+        Some(i) if i > 0 && !lit => edges[i].0,
+        _ => f64::NEG_INFINITY,
+    };
     let inside: Vec<&(f64, bool)> = edges.iter().filter(|e| e.0 > from && e.0 < to).collect();
     if inside.is_empty() {
         return if lit { Lamp::Steady } else { Lamp::Off };
@@ -44,28 +58,42 @@ pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
 
     let mut codes: Vec<u32> = Vec::new();
     let (mut tens, mut ones) = (0u32, 0u32);
-    let mut since = from;
+    let mut counting = false;
+    let mut saw_rise = false;
+    let mut lit_since = from;
     for &&(t, now_lit) in &inside {
-        let length = t - since;
-        if lit {
-            if length >= LONG_BLINK_MIN_SECONDS {
-                tens += 1;
-            } else {
-                ones += 1;
+        if now_lit && !lit {
+            saw_rise = true;
+            let qualifies = t - dark_since >= CODE_GAP_MIN_SECONDS;
+            if counting && qualifies && tens + ones > 0 {
+                codes.push(tens * 10 + ones);
             }
-        } else if length >= CODE_GAP_MIN_SECONDS && tens + ones > 0 {
-            codes.push(tens * 10 + ones);
-            (tens, ones) = (0, 0);
+            if qualifies {
+                (tens, ones) = (0, 0);
+            }
+            counting |= qualifies;
+            lit_since = t;
+        } else if !now_lit && lit {
+            if counting {
+                if t - lit_since >= LONG_BLINK_MIN_SECONDS {
+                    tens += 1;
+                } else {
+                    ones += 1;
+                }
+            }
+            dark_since = t;
         }
         lit = now_lit;
-        since = t;
     }
     // Still dark at `to`: the gap that ends the last run counts once it has
-    // lasted long enough. A blink still lit at `to` is never counted.
-    if !lit && to - since >= CODE_GAP_MIN_SECONDS && tens + ones > 0 {
+    // lasted long enough.
+    if !lit && counting && tens + ones > 0 && to - dark_since >= CODE_GAP_MIN_SECONDS {
         codes.push(tens * 10 + ones);
     }
 
+    if !saw_rise {
+        return Lamp::Off;
+    }
     if codes.iter().any(|&c| c > 99) {
         return Lamp::Unreadable;
     }
@@ -167,10 +195,41 @@ mod tests {
         assert_eq!(decode(&edges, 0.0, 10.0), Lamp::Unreadable);
     }
 
+    #[test]
+    fn a_window_opening_during_a_bulb_check_ignores_it() {
+        let (mut edges, end) = lamp_showing(&[(1, 4), (1, 4)]);
+        for e in edges.iter_mut() {
+            e.0 += 10.0;
+        }
+        edges.splice(0..1, [(0.0, true), (8.0, false)]);
+        assert_eq!(decode(&edges, 3.0, end + 10.0), Lamp::Codes(vec![14]));
+    }
+
+    #[test]
+    fn a_window_opening_after_the_long_blink_does_not_read_4() {
+        let (edges, end) = lamp_showing(&[(1, 4), (1, 4)]);
+        let from = edges[2].0 + PAUSE / 2.0;
+        assert_eq!(decode(&edges, from, end), Lamp::Codes(vec![14]));
+    }
+
+    #[test]
+    fn a_window_opening_inside_a_short_blink_does_not_read_5() {
+        let (edges, end) = lamp_showing(&[(1, 4), (1, 4)]);
+        let from = edges[3].0 + SHORT / 2.0;
+        assert_eq!(decode(&edges, from, end), Lamp::Codes(vec![14]));
+    }
+
+    #[test]
+    fn a_window_opening_mid_run_with_no_later_repeat_is_unreadable() {
+        let (edges, end) = lamp_showing(&[(1, 4)]);
+        let from = edges[2].0 + PAUSE / 2.0;
+        assert_eq!(decode(&edges, from, end), Lamp::Unreadable);
+    }
+
     /// The stock P28 on the bench, connector grounded from reset, the part
     /// named by `unplug` taken off, 800 rpm for 30 s. The bulb check ends at
     /// about 5.4 s, so the window opens at 6 s.
-    fn stock_p28_lamp(unplug: impl FnOnce(&mut Bench)) -> Lamp {
+    fn stock_p28_lamp(from: f64, unplug: impl FnOnce(&mut Bench)) -> Lamp {
         let setup = crate::car::Setup::preset("stock-p28-manual").unwrap();
         let mut bench = Bench::from_file(&crate::fixtures::p28_rom_path()).unwrap();
         bench.engine.rpm = 800.0;
@@ -180,13 +239,29 @@ mod tests {
         let jumper = crate::wiring::Switches { service_connector: true, ..Default::default() };
         crate::wiring::apply_switches(&mut bench.bus, &setup, &jumper);
         bench.run(30.0);
-        decode(&bench.mil_edges(), 6.0, bench.seconds())
+        decode(&bench.mil_edges(), from, bench.seconds())
     }
 
     #[test]
     #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
     fn stock_p28_with_the_iacv_unplugged_blinks_14() {
-        let lamp = stock_p28_lamp(|bench| bench.bus.iacv_connected = false);
+        let lamp = stock_p28_lamp(6.0, |bench| bench.bus.iacv_connected = false);
+        assert_eq!(lamp, Lamp::Codes(vec![14]));
+    }
+
+    // Window opens where the caller cannot choose: inside the bulb check
+    // (lit 0.04 to 5.37 s) and inside the long blink of a run (8.14 to 9.46 s).
+    #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+    fn stock_p28_reads_14_when_the_window_opens_during_the_bulb_check() {
+        let lamp = stock_p28_lamp(2.0, |bench| bench.bus.iacv_connected = false);
+        assert_eq!(lamp, Lamp::Codes(vec![14]));
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+    fn stock_p28_reads_14_when_the_window_opens_inside_a_run() {
+        let lamp = stock_p28_lamp(9.0, |bench| bench.bus.iacv_connected = false);
         assert_eq!(lamp, Lamp::Codes(vec![14]));
     }
 
@@ -195,7 +270,7 @@ mod tests {
     fn stock_p28_with_the_o2_heater_unplugged_blinks_one_code() {
         // The ROM stores index 27 for this fault and blinks 41, which is
         // Honda's number for the O2 sensor heater.
-        let lamp = stock_p28_lamp(|bench| bench.bus.o2_heater_connected = false);
+        let lamp = stock_p28_lamp(6.0, |bench| bench.bus.o2_heater_connected = false);
         assert_eq!(lamp, Lamp::Codes(vec![41]));
     }
 }
