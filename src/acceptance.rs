@@ -479,7 +479,8 @@ fn erm_rom() -> String {
 }
 
 /// The ERM image with its byte sum brought to 0 by one byte in the erased
-/// fill at 0x6761..0x7C49 (no code reads it): FFh + 07h, the sum being F9h.
+/// fill at 0x6761..0x7C49: 0x7000, which no instruction in the listing
+/// addresses (only the checksum reads it), from FFh to 06h, the sum being F9h.
 fn erm_with_good_checksum() -> Vec<u8> {
     let mut image = std::fs::read(erm_rom()).unwrap();
     image.truncate(32768);
