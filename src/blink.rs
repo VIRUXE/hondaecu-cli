@@ -7,7 +7,12 @@
 pub enum Lamp {
     /// Dark for the whole window.
     Off,
-    /// Lit for the whole window.
+    /// Lit for the whole window, or lit without a break for at least
+    /// `STEADY_MIN_SECONDS` up to the end of a window holding no complete
+    /// run. With the service connector grounded, this is how the stock P28
+    /// ROM shows "no codes stored": at 0x36B1..0x36CA, with the connector
+    /// bit `210h.7` set, the stored-fault words `31Ah` and `31Ch` zero and
+    /// option byte `6011h` zero, it sets carry and writes it to PC4 (MIL lit).
     Steady,
     /// Distinct code numbers, ascending.
     Codes(Vec<u8>),
@@ -26,6 +31,9 @@ pub enum Lamp {
 pub const LONG_BLINK_MIN_SECONDS: f64 = 0.82;
 /// A dark gap at least this long ends a code.
 pub const CODE_GAP_MIN_SECONDS: f64 = 2.0;
+/// A lamp lit without a break this long at the end of the window, with no
+/// complete run in it, is `Steady`; far longer than the 1.33 s long blink.
+pub const STEADY_MIN_SECONDS: f64 = 10.0;
 
 /// `edges`: (seconds, lit) changes; `from`..`to` is the read window, opened when
 /// the service connector was grounded. Codes are distinct, ascending.
@@ -40,8 +48,9 @@ pub const CODE_GAP_MIN_SECONDS: f64 = 2.0;
 /// full gap, so a run cut by `to` is dropped.
 ///
 /// Lit for the whole window is `Steady`; no rise inside the window and not
-/// lit throughout is `Off`; rises but no complete qualifying run is
-/// `Unreadable`.
+/// lit throughout is `Off`. Rises but no complete qualifying run is `Steady`
+/// when the lamp has been lit without a break for `STEADY_MIN_SECONDS` at
+/// `to`, else `Unreadable`. Any complete run makes it `Codes`.
 pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
     let before = edges.iter().rposition(|e| e.0 <= from);
     let mut lit = before.map_or(false, |i| edges[i].1);
@@ -100,7 +109,13 @@ pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
     let mut codes: Vec<u8> = codes.into_iter().map(|c| c as u8).collect();
     codes.sort_unstable();
     codes.dedup();
-    if codes.is_empty() { Lamp::Unreadable } else { Lamp::Codes(codes) }
+    if !codes.is_empty() {
+        Lamp::Codes(codes)
+    } else if lit && to - lit_since >= STEADY_MIN_SECONDS {
+        Lamp::Steady
+    } else {
+        Lamp::Unreadable
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +185,37 @@ mod tests {
         assert_eq!(decode(&[(0.0, true)], 5.0, 30.0), Lamp::Steady);
         // The bulb check's edge falls before the window.
         assert_eq!(decode(&[(0.0, false), (1.0, true)], 5.0, 30.0), Lamp::Steady);
+    }
+
+    #[test]
+    fn a_lamp_lit_just_after_the_window_opens_and_kept_lit_is_steady() {
+        // The stock ROM's "no codes stored" with the connector grounded.
+        let edges = [(0.0, true), (2.0, false), (50.07, true)];
+        assert_eq!(decode(&edges, 50.0, 90.0), Lamp::Steady);
+    }
+
+    #[test]
+    fn a_short_lit_tail_after_incomplete_blinks_is_unreadable() {
+        // Blinks 1 s after a bulb check (too soon to start a run), then lit
+        // for the last 3 s of the window.
+        let edges = [
+            (0.0, true),
+            (5.0, false),
+            (6.0, true),
+            (6.0 + SHORT, false),
+            (6.0 + SHORT + PAUSE, true),
+            (6.0 + 2.0 * SHORT + PAUSE, false),
+            (17.0, true),
+        ];
+        assert_eq!(decode(&edges, 5.5, 20.0), Lamp::Unreadable);
+    }
+
+    #[test]
+    fn a_complete_code_then_a_long_lit_tail_is_codes() {
+        let (mut edges, end) = lamp_showing(&[(1, 4)]);
+        edges.push((end, true));
+        let to = end + STEADY_MIN_SECONDS * 2.0;
+        assert_eq!(decode(&edges, 0.0, to), Lamp::Codes(vec![14]));
     }
 
     #[test]
