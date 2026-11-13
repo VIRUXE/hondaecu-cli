@@ -446,9 +446,3 @@ No source disagreed with `car.rs`, so no preset value changed. The wiki's P28
 page gives other ROM addresses for its option bytes (60E6h, 60E7h, 60F2h);
 they do not match this image, whose options are at 6001h..600Ah, but the RAM
 flag it names for VTEC (`216h.4`) does.
-
-### Documentation now out of date
-
-"Which values change the run today" above and the "Static wiring" assumption
-predate this section: `gearbox` now reaches the board (the A/T position
-switch). They were left for the parallel review of this file.

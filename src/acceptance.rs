@@ -33,6 +33,19 @@ fn stored_codes(bench: &Bench) -> Vec<u8> {
     (0..32).filter(|n| word & (1 << n) != 0).map(|n| n as u8 + 1).collect()
 }
 
+/// The gates of both code-19 checks are open at the end of the run: 216h.3
+/// set (automatic; 0x3C92 for 0x3C98, 0x5F5C for 0x3CAF), 214h.2 clear
+/// (code 19 not yet stored; 0x3C95, 0x5F5F) and 227h.2 clear (0x3C8F,
+/// 0x3CA9). So "no code 19" means the checks ran and passed, not that they
+/// were skipped. Read at the end only: the script gives no per-instruction
+/// view.
+fn assert_lockup_checks_enabled(bench: &Bench, case: &str) {
+    let r = &bench.bus.ram;
+    assert_ne!(r[0x216] & 0x08, 0, "{case}: 216h.3");
+    assert_eq!(r[0x214] & 0x04, 0, "{case}: 214h.2");
+    assert_eq!(r[0x227] & 0x04, 0, "{case}: 227h.2");
+}
+
 fn preset(name: &str) -> Setup {
     Setup::preset(name).unwrap()
 }
@@ -57,8 +70,8 @@ fn case_2_stock_p28_automatic_is_worth_burning() {
     assert_eq!(result.lamp, Lamp::Steady);
     assert_eq!(stored_codes(&bench), Vec::<u8>::new());
     // 0x55C5..0x55D0 copies the gearbox strap (U5/X1, RAM 3C7h bit 7) into
-    // 216h.3: the ROM ran as an automatic.
-    assert_ne!(bench.bus.ram[0x216] & 0x08, 0);
+    // 216h.3: the ROM ran as an automatic, with the code-19 checks enabled.
+    assert_lockup_checks_enabled(&bench, "automatic");
     // The car is really driven as an automatic: with D4 selected the routine
     // at 0x32A8..0x3387 engaged lock-up solenoid A (MB P0.4, C at 0x3387,
     // copied to port B) at some point, and the lock-up feedback checks at
@@ -88,7 +101,8 @@ fn case_7_gearbox_disagreement_is_recorded() {
     // Automatic board, manual car: no position switch, so 211h.5/6/7 all
     // read 0 and the lock-up routine (0x32A8: P/N, 0x32AB: D3, 0x32AE: D4)
     // never commands lock-up; 22Fh.0 stays clear and PB4 low, and lock-up B's
-    // duty 381h stays 0. The checks that store code 19 compare each driver's
+    // duty 381h is 0 at the end (a development probe saw it 0 throughout but
+    // for the RAM test's 55h/AAh pattern at 0x529E..0x52A2). The checks that store code 19 compare each driver's
     // feedback with that off command: 0x3C98..0x3CA5 (port A bit 4, 99h.6)
     // and 0x3CAF..0x3CDD (4700h bit 3, 9Ch.7). The model's feedback follows
     // the driver whether or not a solenoid is on the end of it, so both pass.
@@ -109,5 +123,14 @@ fn case_7_gearbox_disagreement_is_recorded() {
         assert_eq!(stored_codes(&bench), Vec::<u8>::new(), "{case}");
         let lockup_engaged = bench.log.board.iter().any(|&(_, b, _)| b & P28_PB_LOCKUP_SOLENOID != 0);
         assert!(!lockup_engaged, "{case}");
+        // Lock-up B's duty (381h, the compare value of the software PWM on
+        // P4.3 at 0x0337) is 0 at the end: solenoid B is not being driven.
+        // Read at the end only; the script gives no per-instruction view.
+        assert_eq!(bench.bus.ram[0x381], 0, "{case}: 381h");
+        if board == "automatic" {
+            assert_lockup_checks_enabled(&bench, &case);
+        } else {
+            assert_eq!(bench.bus.ram[0x216] & 0x08, 0, "{case}: 216h.3");
+        }
     }
 }

@@ -573,11 +573,11 @@ no longer reports it as the A/C clutch.
 | `4700h`.0 | starter, pin B9: 1 = powered (sheet 2, P30); **tested** | raw at 0x2212 into `9Fh.0`; 0x3A0C, 0x3A21, 0x3BDC, 0x4278, 0x42A0, 0x483C |
 | `4700h`.1 | VTEC pressure switch, pin D6: 1 = grounded (sheet 2, P30); **tested** | 0x0AB8, 0x3D34, 0x5EAB |
 | `4700h`.2 | A/C switch, pin B5: 1 = grounded (P30; the label on sheet 2 is illegible); **tested** | 0x2A93, 0x2C47, 0x4306, 0x4431, 0x4838, 0x5D1E |
-| `4700h`.3 | feedback from the driver of A/T lock-up solenoid B, U16 (sheet 8) | raw at 0x3CC6 only |
+| `4700h`.3 | feedback from the driver of A/T lock-up solenoid B, U16 (sheet 8). Modelled: reads the inverse of P4.3 (`Bus::p28_input_port_as_read`); see the monitor table | raw at 0x3CC6 only |
 | `4700h`.4 | brake switch, pin D2: 0 = powered (sheet 2, P30) | 0x0D61, 0x2946, 0x295C, 0x43F6, 0x4479, 0x47DE, 0x4830 |
-| `4700h`.5 | A/T park and neutral, pin B7: 1 = grounded (sheet 2, P30) | 0x0D58, 0x2A97, 0x2B05, 0x2BA2, 0x2E81, 0x32A8, 0x3BE4, 0x440F, 0x45CE, 0x47AB, 0x482C, 0x4858, 0x59E5, 0x5CF8 |
-| `4700h`.6 | A/T "gear drive 3" (sheet 2) | 0x32AB, 0x32D7, 0x3301, 0x3353, 0x33BE, 0x33D2, 0x4828 |
-| `4700h`.7 | A/T "gear drive 4" (sheet 2) | 0x32AE, 0x32FE, 0x4824 |
+| `4700h`.5 | A/T park and neutral, pin B7: 1 = grounded (sheet 2, P30). Driven by `wiring::apply_switches` for `gearbox = automatic`: set while the stage is not in gear | 0x0D58, 0x2A97, 0x2B05, 0x2BA2, 0x2E81, 0x32A8, 0x3BE4, 0x440F, 0x45CE, 0x47AB, 0x482C, 0x4858, 0x59E5, 0x5CF8 |
+| `4700h`.6 | A/T "gear drive 3" (sheet 2), 1 = selected (0x32AB reads it as D3). `wiring::apply_switches` never selects it | 0x32AB, 0x32D7, 0x3301, 0x3353, 0x33BE, 0x33D2, 0x4828 |
+| `4700h`.7 | A/T "gear drive 4" (sheet 2), 1 = selected (0x32AE reads it as D4). Driven by `wiring::apply_switches` for `gearbox = automatic`: set while the stage is in gear | 0x32AE, 0x32FE, 0x4824 |
 | port A.0, .1 | knock-board connector FC1 through resistors R110..R113 (sheet 5) | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` |
 | port A.2 | knock-board connector FC1 through R109/R114 (sheet 5) | raw at 0x2800 into `232h.6` |
 | port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28). Sheet 3 takes the switch to the 82C55, pin not legible | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
@@ -599,10 +599,20 @@ with the park/neutral bit and vehicle speed, and that routine's result is
 PB4, the A/T lock-up solenoid -- which fits the schematic's "gear drive"
 labels. Bit 3 is read once, raw, at 0x3CC6.
 
+The polarity of bits 5, 6 and 7 (1 = that position, kept uninverted in
+`211h`) is read from the ROM: 0x32A8..0x32AE tests `211h.5`, `.6`, `.7` in
+that order as park/neutral, D3 and D4, and 0x0D55..0x0D79 applies an
+automatic's in-gear idle compensation only with `211h.5` clear. For a manual
+car `wiring::apply_switches` leaves all three at 0 (no position switch); for
+an automatic it selects park/neutral out of gear and D4 in gear. D3 is never
+selected: the script has no per-stage gear.
+
 Port A bits 4, 5 and 6 are not free inputs in the model: they are the
 lock-up, VTEC-solenoid and O2-heater driver feedbacks, and
 `Bus::drive_p28_feedback` sets them from the outputs on every read (see the
-monitor table below). `Bus::set_vtec_pressure_switch_closed` drives `4700h`
+monitor table below). Neither is `4700h` bit 3, the lock-up B driver
+feedback: `Bus::p28_input_port_as_read` presents it as the inverse of the
+P4.3 pin, and the bit 3 stored in `p28_input_port` is ignored. `Bus::set_vtec_pressure_switch_closed` drives `4700h`
 bit 1.
 
 `Bus::p28_input_port` and `Bus::ppi.pins[PORT_A]` hold the two bytes as the ROM
@@ -864,6 +874,7 @@ through the register aliases; ten instructions in this ROM use the form.
 | VTEC oil-pressure switch, `4700h` bit 1 | 0x3D34..0x3D40: `211h.1` (1 = open) must be 0 with VTEC off (`21Fh.2` clear) and 1 with it on | `9Ah.1`, code 22 | `p28_input_port` is the switch's rest state (closed); the ROM reads it open while the solenoid is powered (`vtec_solenoid_connected` and PC0, `Bus::p28_input_port_as_read`). Assumption: it opens the instant the solenoid is driven; real oil pressure takes time to build, and how much delay the ROM's check tolerates is not established |
 | O2 heater, port A bit 6 | 0x2094..0x20CB: 0 with the heater off, 1 with it on | `9Bh.2`, code 27 | follows PC2 (`o2_heater_connected`) |
 | lock-up solenoid, port A bit 4 | 0x3C98..0x3CA5, automatic only | `99h.6`, code 19 | inverse of PB4 |
+| lock-up solenoid B, `4700h` bit 3 | 0x3CAF..0x3CDD, automatic only (0x5F5C: `216h.3` set, `214h.2` clear; 0x3CA9: `227h.2` clear). P4.3 is a software PWM, high while the counter `380h` (0..63h) is below the duty `381h` (0x0336..0x0338); the bit must be 1 with the counter at or above the duty and 0 with it more than 10 below | `9Ch.7`, code 19 | inverse of the P4.3 pin. Assumption: P4.3 is the line into U16 and the feedback inverts it like lock-up A's; both inferred from this check, the P4.3-to-U16 trace not made on the schematic. The stock ROM keeps `381h` at 0, so only the "off" half is exercised by a run |
 | IACV current, AI4 | 0x3C52..0x3C71 | `99h.3`, code 14 | see below (`iacv_connected`) |
 
 The wiki's engine-simulator page agrees with the set: its author had to fit
