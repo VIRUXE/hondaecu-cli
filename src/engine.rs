@@ -246,6 +246,33 @@ mod tests {
         assert!((iat_volts(22.5) - 2.574).abs() < 1e-9);
     }
 
+    /// The distributor is scheduled on the machine-cycle clock. However the
+    /// caller's instruction-sized steps fall, one second of cycles carries
+    /// one second of teeth: 12 CKP and 2 TDC per crank revolution.
+    #[test]
+    fn distributor_cadence_follows_the_machine_cycle_clock() {
+        use crate::bus::CPU_HZ;
+
+        for rpm in [800.0, 3000.0, 6000.0, 9000.0] {
+            let mut bus = Bus::new();
+            let mut engine = EngineState::new();
+            engine.rpm = rpm;
+
+            // Steps from the shortest instruction (2 cycles) to the longest (47).
+            let (mut cycles, mut step) = (0u64, 2u64);
+            while cycles < CPU_HZ {
+                engine.check_distributor_pulses(&mut bus, cycles, CPU_HZ);
+                step = if step >= 47 { 2 } else { step + 5 };
+                cycles += step;
+            }
+
+            let revs = rpm / 60.0;
+            let (ckp, tdc) = (engine.ckp_pulse_count as f64, engine.tdc_pulse_count as f64);
+            assert!((ckp - revs * 12.0).abs() <= 1.0, "{rpm} rpm: {ckp} CKP edges in a second");
+            assert!((tdc - revs * 2.0).abs() <= 1.0, "{rpm} rpm: {tdc} TDC edges in a second");
+        }
+    }
+
     #[test]
     fn battery_and_iat_land_on_analog_mux_u6() {
         let mut bus = Bus::new();

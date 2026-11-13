@@ -59,8 +59,10 @@ flowchart TD
 
 - **Table-driven MSM66207 core**: Whole instruction patterns are decoded with
   `DD`-aware byte/word selection. Machine-cycle counts come from the manual's
-  internal-memory timing table, including taken-branch penalties; a small set
-  of indirect data-access surcharges remains unmodeled.
+  instruction list for every addressing variant, on-chip and external, with
+  taken-branch penalties. Interrupt entry is charged 17 cycles, a figure
+  derived from the manual's `RTI` and `VCAL` counts because no available
+  document states it.
 - **One 5 MHz machine-cycle clock domain**: CPU execution, timers, distributor
   scheduling, replay time, and pulse-width conversion share the same modeled
   clock. Host instructions per second are only a performance measurement.

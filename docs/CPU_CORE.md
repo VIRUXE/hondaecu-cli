@@ -214,7 +214,8 @@ pop:  SSP <- SSP + 2; value <- (SSP)
 
 On maskable interrupt entry, hardware saves `PC`, `A`, `LRB`, and `PSW` in
 that order, then clears MIE. The `RTI` instruction restores `PSW`, `LRB`, `A`,
-and `PC` in that order and advances SSP by eight bytes.
+and `PC` in that order and advances SSP by eight bytes. Entry is charged 17
+machine cycles and `RTI` 15 (section 9).
 
 This is specified directly by the 66K instruction manual's RTI page (3-126).
 It matters to normal execution: every P28 ISR selects its own LRB. Saving only
@@ -674,11 +675,45 @@ asm662/bin/dasm662 P28-230.bin out.asm
 ## 9. Current state and known gaps
 
 Every execution command reaches the table-driven core through
-`interpreter.rs`. Instruction timing now uses the manual's internal-memory
-machine-cycle counts and taken-branch penalties, and CPU/peripheral/replay time
-shares a 5 MHz machine-cycle clock. A few documented pointer-indirect
-surcharges remain optimistic, so this is a substantially improved timing model,
-not a claim of cycle-perfect hardware emulation.
+`interpreter.rs`. CPU, peripheral and replay time share a 5 MHz machine-cycle
+clock, and each instruction is charged the count in the `Int` column of the
+instruction manual's Instruction List (Tables 3-1 to 3-37, pp. 3-179 onward).
+`decoder::int_cycles` reproduces that column from three parts:
+
+- two cycles per instruction byte;
+- the addressing mode of the memory operand: `[DP]` two more, `S8[USP]` one
+  more, nothing for register, direct, `off N8` and `N16[X1]` operands;
+- the operation: nothing for moves, one for exchanges, increments and memory
+  shifts, fixed amounts for multiply/divide, ROM-table reads, bit writes and
+  control transfers. Arithmetic, logic and compare cost one more when the
+  second operand is `A` or `off N8`, and in the one-byte `A, erN` form.
+
+A taken conditional branch costs four more.
+
+Operands in external data memory cost the manual's `Ext` counts
+(`decoder::ext_cycles`). The columns are additive: each place that can be
+external -- the register bank, the `off N8` page, `[DP]`, `S8[USP]`,
+`N16[X1]`, the system stack -- has its own cost, and `exec` adds the cost of
+each one whose address is at or above `EXTERNAL_DATA_START` when the
+instruction starts. With `w` the operand width in bytes:
+
+| use of the place | extra cycles |
+|---|---|
+| read only, or store only (`L`, `ST`, into `A` or a CPU register, a register or `N8` into memory, bit tests, pointers fetched from memory) | `2w` |
+| written through the object prefix (`MOV obj, A`, `MOV obj, #imm`, `CLR`, exchanges, shifts, increments, `<alu> obj, A`, compares included) | `4w` |
+| `<alu> obj, #imm` | `4w + 1` |
+| a bit written into a byte (`SB`, `RB`, `SBR`, `RBR`, `MB obj, C`) | 6 |
+| the place is `off N8` | one more |
+| system stack, per word pushed or popped | 4 |
+
+`<alu> obj, off N8` is printed the other way round (`2w` for the object,
+`4w + 1` for the source) and is encoded as printed. On the P28 the only
+external data are the 82C55 and the switch buffer, which the stock ROM reaches
+with `LB A, [DP]`, `STB A, [DP]` and `MB C, [DP].bit`: two cycles more each.
+
+Taking a maskable interrupt costs 17 machine cycles, 33 with an external
+stack (`interrupts::INTERRUPT_ENTRY_CYCLES`), and the timers run through
+them. This figure is derived, not quoted; see known gap 8.
 
 The four timers follow the user's manual: 3-bit clock select and the auto
 reload, clock output, capture register and realtime output modes. The
@@ -732,6 +767,38 @@ through the active LRB page, not plain address `N8`.
 7. Scenario names, DTC metadata, and synthetic evaluators are research aids,
    not firmware-level proof of a DTC, failsafe, calibration strategy, or
    physical output. TCP datalog compatibility remains experimental.
+8. Instruction timing is the manual's for every form in its Instruction
+   List, on-chip and external, with these reservations:
+   - **Interrupt entry is derived.** No available MSM66201/66207 document
+     gives the number of cycles the hardware takes to enter an interrupt
+     (user's manual ch. 17, pp. 163-170; pages 132-146 and everything after
+     172 are missing from the scan). The 17 used here follows from the
+     instruction manual's own counts: `RTI` undoes the same four-word frame
+     in 15 cycles, 2 of them its opcode fetch, and fetching a vector costs 4
+     (`VCAL` is 11 where `RT` is 7). The successor nX-8/500S core, which
+     saves the same registers, is documented two apart as well: 14 to enter,
+     12 for `RTI` (MSM66573 Family User's Manual, p. 16-9). NMI is not
+     modeled at all.
+   - **Three `Ext` cells follow the rule instead of the page.** `ADDB A,
+     [DP]` prints a dash (p. 3-16). Page 3-6 (`<alu> obj, A`, word) is
+     missing from the scan, so its `off N8` and `S8[USP]` rows are taken
+     from the pattern of the byte page. For `MOVB off N8, A` Table 3-4 gives
+     11 and page 3-95 gives 13, the value of the row beneath it; 11 is used.
+   - **`PUSHU` and `SMOVI`** are in the opcode table but not in the manual's
+     list. `PUSHU` is charged like `PUSHS`, `SMOVI` two cycles per byte, and
+     neither has an `Ext` cost.
+9. Found while reading the tables, not fixed, and not used by the stock ROM:
+   - The manual lists `XOR A, erN` (Table 3-26); the opcode table generated
+     from `66207.op` has no entry for it, so it would not decode.
+   - `N'16[X1]` / `N'16[X2]` operands (`MOV N'16[X1], #N16` and the like)
+     take their displacement from the instruction's first 16-bit field.
+     `exec` adds the second one, the immediate, so these 18 forms address
+     the wrong word. The timing code uses the right field.
+   - `J`/`CAL` through `[erN]` or `[DP]`: the manual's cycle counts and its
+     description of simple indirect addressing (p. 1-7) say the register
+     holds the target. `exec` reads the target from the data word the
+     register points at, which is what `[[DP]]` means. Not checked against
+     the instruction pages for `J` and `CAL`.
 
 ### Faults and the monitors the ROM depends on
 

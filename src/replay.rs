@@ -96,27 +96,7 @@ impl ReplayEngine {
             Self::apply_frame_to_engine(frame, &mut engine);
             engine.sync_sensors_to_bus(&mut bus);
 
-            // Convert the frame interval to modeled 5 MHz machine cycles.
-            let frame_cycles = dt_ms * (crate::bus::CPU_HZ / 1000);
-            let start_cycle = cpu.cycles;
-
-            while cpu.cycles - start_cycle < frame_cycles {
-                let before = cpu.cycles;
-                let instruction = Interpreter::step(&mut cpu, &mut bus);
-                if cpu.halted {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "ROM execution stopped during replay at {:#06X}: {}",
-                            instruction.pc, instruction.mnemonic
-                        ),
-                    ));
-                }
-
-                let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
-                let d_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
-                InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, t_irq | d_irq);
-            }
+            Self::run_frame(&mut cpu, &mut bus, &mut engine, dt_ms)?;
 
             let res = ReplayResultFrame {
                 timestamp_ms: frame.timestamp_ms,
@@ -159,6 +139,41 @@ impl ReplayEngine {
             println!("Exported replay results to '{}'", out_path);
         }
 
+        Ok(())
+    }
+
+    /// Run the ECU for one stimulus frame of `dt_ms` milliseconds.
+    ///
+    /// The budget is counted in modeled 5 MHz machine cycles, the clock the
+    /// CPU, the timers and the distributor all share. The frame ends with the
+    /// first instruction that reaches the budget, so it can overshoot by one
+    /// instruction and an interrupt entry.
+    fn run_frame(
+        cpu: &mut Cpu,
+        bus: &mut Bus,
+        engine: &mut EngineState,
+        dt_ms: u64,
+    ) -> io::Result<()> {
+        let frame_cycles = dt_ms * (crate::bus::CPU_HZ / 1000);
+        let start_cycle = cpu.cycles;
+
+        while cpu.cycles - start_cycle < frame_cycles {
+            let before = cpu.cycles;
+            let instruction = Interpreter::step(cpu, bus);
+            if cpu.halted {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "ROM execution stopped during replay at {:#06X}: {}",
+                        instruction.pc, instruction.mnemonic
+                    ),
+                ));
+            }
+
+            let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
+            let d_irq = engine.check_distributor_pulses(bus, cpu.cycles, crate::bus::CPU_HZ);
+            InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);
+        }
         Ok(())
     }
 
@@ -983,6 +998,40 @@ mod tests {
     use crate::engine::EngineState;
     use crate::interpreter::Interpreter;
     use crate::interrupts::InterruptController;
+
+    /// A replay frame spends its interval on the 5 MHz machine-cycle clock
+    /// and the peripherals stay on that clock, interrupt entries included.
+    /// No ROM image needed: the program is a tight loop with an INT1 handler.
+    #[test]
+    fn a_replay_frame_spends_its_interval_on_the_machine_cycle_clock() {
+        use crate::bus::{IRQ_INT1, SFR_IE};
+
+        let mut bus = Bus::new();
+        bus.rom[0x0100..0x0102].copy_from_slice(&[0xCB, 0xFE]); // SJ $: 8 cycles
+        bus.rom[0x0026..0x0028].copy_from_slice(&[0x00, 0x02]); // INT1 vector
+        bus.rom[0x0200] = 0x02; // RTI: 15 cycles
+        bus.write_data_u16(SFR_IE, 1 << IRQ_INT1);
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x0100;
+        cpu.ssp = 0x047E;
+        cpu.set_mie(true);
+        let mut engine = EngineState::new();
+        engine.rpm = 3000.0;
+
+        ReplayEngine::run_frame(&mut cpu, &mut bus, &mut engine, 50).expect("frame runs");
+
+        // 50 ms is 250 000 cycles. The last step can be an RTI followed by
+        // the next interrupt entry: 15 + 17 cycles.
+        assert!(
+            (250_000..250_000 + 32).contains(&cpu.cycles),
+            "frame ran {} machine cycles",
+            cpu.cycles
+        );
+        assert_eq!(bus.elapsed_cycles, cpu.cycles, "peripheral time is CPU time");
+        // TDC reaches INT1 twice per crank revolution: 100 a second at 3000 rpm.
+        assert_eq!(engine.tdc_pulse_count, 5);
+        assert_eq!(cpu.ssp, 0x047E, "every interrupt taken was returned from");
+    }
 
     #[test]
     fn finds_p28_runtime_entry_after_the_hardware_checks() {

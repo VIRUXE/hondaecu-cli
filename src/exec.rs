@@ -12,9 +12,9 @@
 //     JLT = CF, JGE = !CF, JGT = !CF && !ZF, JLE = CF || ZF.
 //   * `LC`/`CMPC` read code space; everything else reads data space.
 
-use crate::bus::Bus;
+use crate::bus::{Bus, EXTERNAL_DATA_START};
 use crate::cpu::Cpu;
-use crate::decoder::{decode, Decoded};
+use crate::decoder::{decode, Decoded, Place};
 use crate::operand::{table, Arg, Mem, Parsed, Reg};
 
 #[derive(Debug)]
@@ -252,6 +252,41 @@ impl<'a> Exec<'a> {
             // Immediates and branch targets are never write destinations.
             _ => {}
         }
+    }
+
+    // ---- external-memory timing -----------------------------------------
+
+    /// Address a `Place` resolves to with the registers as they stand.
+    fn place_addr(&mut self, place: Place) -> u16 {
+        let f = self.d.fields;
+        match place {
+            Place::Bank => self.cpu.bank_base(),
+            Place::OffPage => self.cpu.off_page(f.n8),
+            Place::OffPageAlt => self.cpu.off_page(f.n8_alt),
+            Place::AtDp => self.reg(Reg::Dp),
+            Place::UspIdx => self.reg(Reg::Usp).wrapping_add(f.s8 as u16),
+            Place::X1Idx => self.reg(Reg::X1).wrapping_add(f.n16),
+            Place::X2Idx => self.reg(Reg::X2).wrapping_add(f.n16),
+            Place::X1IdxAlt => self.reg(Reg::X1).wrapping_add(f.n16_alt),
+            Place::X2IdxAlt => self.reg(Reg::X2).wrapping_add(f.n16_alt),
+        }
+    }
+
+    /// Cycles the manual's EXT columns add for this instruction: the cost of
+    /// each operand that is in external data memory, and of the system stack
+    /// if that is. Must run before the instruction changes any register.
+    fn external_cycles(&mut self) -> u16 {
+        let ext = self.d.ext;
+        let mut cycles = 0;
+        for (place, cost) in ext.operands.into_iter().flatten() {
+            if self.place_addr(place) >= EXTERNAL_DATA_START {
+                cycles += cost;
+            }
+        }
+        if ext.stack != 0 && self.cpu.ssp >= EXTERNAL_DATA_START {
+            cycles += ext.stack;
+        }
+        cycles
     }
 
     // ---- flag helpers ----------------------------------------------------
@@ -774,6 +809,10 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> Result<Decoded, ExecError> {
         d: d.clone(),
         branch_taken: false,
     };
+    // Operands in external data memory cost the manual's EXT count. Where
+    // they are is decided now, before the instruction moves a pointer.
+    let external = ex.external_cycles();
+    ex.cpu.cycles += external as u64;
     ex.run(parsed)?;
     // Read the flag before touching `cpu` again so the reborrow held by `ex`
     // ends cleanly.
@@ -799,6 +838,113 @@ mod tests {
         // Keep r0..r7 away from the memory-mapped CPU registers at 0x00.
         cpu.lrb = 0x20;
         (cpu, Bus::new())
+    }
+
+    /// Machine cycles `step` charges for one instruction, against the
+    /// instruction manual's INT column, for one representative of each path:
+    /// arithmetic, memory operands, branches both ways, call, return and RTI.
+    #[test]
+    fn step_charges_the_manuals_machine_cycles() {
+        // (encoding, DD, ZF, DP, mnemonic, cycles)
+        let cases: &[(&[u8], bool, bool, u16, &str, u64)] = &[
+            (&[0x86, 0x34, 0x12], true, false, 0x0300, "ADD A, #N16", 6),
+            (&[0x08], true, false, 0x0300, "ADD A, er0", 3),
+            (&[0xF4, 0x40], false, false, 0x0300, "LB A, off N8", 4),
+            (&[0xE2], false, false, 0x0300, "L A, [DP]", 4),
+            (&[0xB2, 0x8A], true, false, 0x0300, "MOV [DP], A", 6),
+            (&[0xB2, 0x16], true, false, 0x0300, "INC [DP]", 7),
+            (&[0xC2, 0xB7], false, false, 0x0300, "ROLB [DP]", 7),
+            // Conditional branches: fall through, then taken (+4).
+            (&[0xC9, 0x10], false, false, 0x0300, "JEQ rel8", 4),
+            (&[0xC9, 0x10], false, true, 0x0300, "JEQ rel8", 8),
+            (&[0xE8, 0x40, 0x10], false, false, 0x0300, "JBS off N8.0, rel8", 6),
+            // DPL counts 01h -> 00h and falls through; 02h -> 01h and loops.
+            (&[0x30, 0x10], false, false, 0x0301, "JRNZ DP, rel8", 7),
+            (&[0x30, 0x10], false, false, 0x0302, "JRNZ DP, rel8", 11),
+            (&[0x31, 0x10], false, false, 0x0300, "SCAL rel8", 9),
+            (&[0x32, 0x00, 0x30], false, false, 0x0300, "CAL addr16", 9),
+            (&[0x01], false, false, 0x0300, "RT", 7),
+            (&[0x02], false, false, 0x0300, "RTI", 15),
+        ];
+
+        for (code, dd, zf, dp, mnemonic, cycles) in cases {
+            let (mut cpu, mut bus) = cpu_with_local_bank();
+            cpu.dd = *dd;
+            cpu.zf = *zf;
+            cpu.ssp = 0x0400;
+            bus.write_data_u16(0x0084, *dp); // DP in pointing-register set 0
+            bus.rom[..code.len()].copy_from_slice(code);
+
+            let decoded = step(&mut cpu, &mut bus)
+                .unwrap_or_else(|e| panic!("`{mnemonic}` must execute: {e}"));
+
+            assert_eq!(decoded.mnemonic, *mnemonic);
+            assert_eq!(cpu.cycles, *cycles, "machine cycles for `{mnemonic}`");
+        }
+    }
+
+    /// `step` charges the manual's EXT count for whichever of an instruction's
+    /// places is in external data memory: the object, the `off N8` page, the
+    /// register bank, the system stack. The first three rows are the forms
+    /// the stock P28 ROM uses on the 82C55 and the switch buffer.
+    #[test]
+    fn external_operands_cost_the_manuals_ext_cycles() {
+        const ON_CHIP: u16 = 0x0020; // LRB: page 1, bank at 0100h
+        const OFF_CHIP: u16 = 0x00A0; // LRB: page 5, bank at 0500h
+        // (encoding, LRB, DP, SSP, mnemonic, cycles)
+        let cases: &[(&[u8], u16, u16, u16, &str, u64)] = &[
+            (&[0xF2], ON_CHIP, 0x0300, 0x0400, "LB A, [DP]", 4),
+            (&[0xF2], ON_CHIP, 0x4700, 0x0400, "LB A, [DP]", 6),
+            (&[0xD2], ON_CHIP, 0x0300, 0x0400, "STB A, [DP]", 4),
+            (&[0xD2], ON_CHIP, 0x2F00, 0x0400, "STB A, [DP]", 6),
+            (&[0xC2, 0x2A], ON_CHIP, 0x0300, 0x0400, "MB C, [DP].2", 7),
+            (&[0xC2, 0x2A], ON_CHIP, 0x0F00, 0x0400, "MB C, [DP].2", 9),
+            // Read-modify-write of an external word.
+            (&[0xB2, 0x16], ON_CHIP, 0x0300, 0x0400, "INC [DP]", 7),
+            (&[0xB2, 0x16], ON_CHIP, 0x2F00, 0x0400, "INC [DP]", 15),
+            // Two places: neither, the object, the `off N8` source, both.
+            (&[0xC2, 0xF3, 0x40], ON_CHIP, 0x0300, 0x0400, "XORB [DP], off N8", 9),
+            (&[0xC2, 0xF3, 0x40], ON_CHIP, 0x2F00, 0x0400, "XORB [DP], off N8", 11),
+            (&[0xC2, 0xF3, 0x40], OFF_CHIP, 0x0300, 0x0400, "XORB [DP], off N8", 14),
+            (&[0xC2, 0xF3, 0x40], OFF_CHIP, 0x2F00, 0x0400, "XORB [DP], off N8", 16),
+            // The register bank is memory too.
+            (&[0xB2, 0x48], ON_CHIP, 0x0300, 0x0400, "MOV er0, [DP]", 6),
+            (&[0xB2, 0x48], ON_CHIP, 0x2F00, 0x0400, "MOV er0, [DP]", 10),
+            (&[0xB2, 0x48], OFF_CHIP, 0x0300, 0x0400, "MOV er0, [DP]", 10),
+            (&[0xB2, 0x48], OFF_CHIP, 0x2F00, 0x0400, "MOV er0, [DP]", 14),
+            (&[0x90, 0x35], ON_CHIP, 0x0300, 0x0400, "MUL", 27),
+            (&[0x90, 0x35], OFF_CHIP, 0x0300, 0x0400, "MUL", 35),
+            // A pointer fetched from memory.
+            (&[0xB4, 0x40, 0x22], ON_CHIP, 0x0300, 0x0400, "J [off N8]", 8),
+            (&[0xB4, 0x40, 0x22], OFF_CHIP, 0x0300, 0x0400, "J [off N8]", 13),
+            // The system stack.
+            (&[0x32, 0x00, 0x30], ON_CHIP, 0x0300, 0x0400, "CAL addr16", 9),
+            (&[0x32, 0x00, 0x30], ON_CHIP, 0x0300, 0xFFFE, "CAL addr16", 13),
+            (&[0x02], ON_CHIP, 0x0300, 0x0400, "RTI", 15),
+            (&[0x02], ON_CHIP, 0x0300, 0xFFF0, "RTI", 31),
+            // `N'16[X1]` takes its displacement from the first 16-bit field,
+            // not from the immediate that follows (X1 is zero here).
+            (&[0xB0, 0x00, 0x03, 0x98, 0x00, 0x47], ON_CHIP, 0x0300, 0x0400, "MOV N'16[X1], #N16", 12),
+            (&[0xB0, 0x00, 0x47, 0x98, 0x00, 0x03], ON_CHIP, 0x0300, 0x0400, "MOV N'16[X1], #N16", 20),
+        ];
+
+        for (code, lrb, dp, ssp, mnemonic, cycles) in cases {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new();
+            cpu.lrb = *lrb;
+            cpu.ssp = *ssp;
+            bus.write_data_u16(0x0084, *dp); // DP in pointing-register set 0
+            bus.rom[..code.len()].copy_from_slice(code);
+
+            let decoded = step(&mut cpu, &mut bus)
+                .unwrap_or_else(|e| panic!("`{mnemonic}` must execute: {e}"));
+
+            assert_eq!(decoded.mnemonic, *mnemonic);
+            assert_eq!(
+                cpu.cycles, *cycles,
+                "`{mnemonic}` with LRB = {lrb:04X}h, DP = {dp:04X}h, SSP = {ssp:04X}h"
+            );
+        }
     }
 
     #[test]

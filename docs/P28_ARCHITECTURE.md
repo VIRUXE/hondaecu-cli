@@ -40,7 +40,8 @@ flowchart TD
 ### CPU Specifications
 - **Architecture**: OKI MSM66207 16-bit Microcontroller
 - **Clock Model**: 10 MHz oscillator and 5 MHz machine-cycle rate. Instructions
-  consume the manual's internal-memory machine-cycle counts; this is not 5 MIPS.
+  consume the manual's machine-cycle counts (2 to 47 on-chip, more for
+  operands on the external bus); this is not 5 MIPS.
 - **Data Bus**: 16-bit internal architecture
 - **PSW Status Word** (per the OKI MSM66201 Instruction Manual):
   - `SCB` (Bits 0–2): **System Control Base** — selects which pointing-register
