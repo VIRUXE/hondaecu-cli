@@ -206,7 +206,7 @@ Addresses are stock `P28-230`. RAM addresses are absolute.
 | VSS | speed | P3.2 / INT0 | 0x01D3 period capture |
 
 The emulator steps the distributor in half teeth: CKP on the tooth, TDC half a
-tooth after teeth 0/6/12/18, CYP half a tooth after tooth 2. Those phases are
+tooth after teeth 0/6/12/18, CYP half a tooth after tooth 3. Those phases are
 a working choice that the ROM accepts; the real reluctor phasing has not been
 measured.
 

@@ -170,13 +170,16 @@ impl<'a> Exec<'a> {
             }
             Mem::IdxUsp => { let u = self.reg(Reg::Usp); u.wrapping_add(f.s8 as u16) }
             Mem::IdxReg(r) => self.reg(r).wrapping_add(f.n16),
+            // The base word goes through `load`, not straight to the bus:
+            // the P28 indexes its fault tables with `LCB A, 6C99h[ACC]`
+            // (B5 06 AB 99 6C), where "RAM 06h" is the accumulator itself.
             Mem::IdxMemN8 => {
-                let base = self.bus.read_data_u16(f.n8 as u16);
+                let base = self.load(f.n8 as u16, false);
                 base.wrapping_add(f.n16)
             }
             Mem::IdxMemOff => {
                 let a = self.cpu.off_page(f.n8);
-                let base = self.bus.read_data_u16(a);
+                let base = self.load(a, false);
                 base.wrapping_add(f.n16)
             }
             Mem::Abs16 => f.n16,
@@ -1031,6 +1034,22 @@ mod tests {
         bus.rom[..code.len()].copy_from_slice(code);
         cpu.pc = 0;
         step(cpu, bus).expect("instruction must execute")
+    }
+
+    /// `LCB A, 6C99h[ACC]` (B5 06 AB 99 6C) indexes a code table with the
+    /// accumulator: the "RAM 06h" base is the live register, not the unused
+    /// RAM byte behind it. The P28 maps a fault index to its code this way.
+    #[test]
+    fn table_read_indexed_by_the_accumulator_uses_the_live_register() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        bus.rom[0x6C99] = 0x0B;
+        bus.rom[0x6C99 + 0x24] = 0x0F;
+        cpu.dd = false;
+        cpu.a = 0x0024;
+
+        exec_one(&mut cpu, &mut bus, &[0xB5, 0x06, 0xAB, 0x99, 0x6C]);
+
+        assert_eq!(cpu.a & 0xFF, 0x0F);
     }
 
     /// SLL/SRL/SRA and their byte forms change CF only (Tables 3-9, 3-10).

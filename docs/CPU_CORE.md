@@ -335,8 +335,20 @@ inputs. Bomarc schematic 37820-P28-A51 sheet 3 gives the wiring:
 Confirmed endpoints are U6/X0 primary HEGO, U6/X3 barometric pressure,
 U5/X0 ELD, U5/X2 ECT, and U5/X3 a boot-check input whose external meaning is
 unresolved. The direct inputs confirmed so far are AI3 optional EGR, AI6 MAP,
-and AI7 TPS. The scenario model still has an IAT field, but its P28 ADC/mux
-endpoint is not yet asserted.
+and AI7 TPS.
+
+Four more inputs are identified from the ROM and the pgmfi wiki, not from the
+schematic:
+
+| input | signal | evidence |
+|---|---|---|
+| U6/X7 (RAM `3C5h` → `C3h`) | battery voltage, 10.4 eight-bit counts per volt | the tables indexed by `C3h` (injector dead time at `61D6h`, IACV compensation at `69F6h`) have breakpoints at `54h`, `69h`, `7Eh`, `93h`, `A7h`: 8, 10, 12, 14, 16 V. The wiki's P30 map labels `C3h` "IACV"; that is wrong |
+| U6/X2 (RAM `3C0h` → `C0h`) | intake air temperature | wiki P30 map; range-checked at 0x3BF5. `engine.rs` uses the wiki's sensor voltage table |
+| U5/X1 (RAM `3C7h`) | gearbox configuration resistors RP17/RP18 | 0x55C5..0x55D0 copies bit 7 into `216h.3`, the wiki's "1 = automatic" flag; bit 6 is inverted into `216h.2` and `216h.0`. ROM mask 230 is the manual P28-A00, so the model presents 0 V. Mid scale, the old default, made the ROM run as an automatic |
+| AI4 | IACV coil current | sampled by the timer-1 handler at 0x0136; see "IACV current loop" below |
+
+The battery model used to sit on AI5, which the ROM reads at 0x1052 and
+0x3D64 for something else that is still unidentified.
 
 The stock sampler at `0x52DE..0x52F7` derives the select index from `P2 >> 5`,
 stores ADCR1H at `0x03C6[index]` and ADCR0H at `0x03BE[index]`, then advances
@@ -499,12 +511,11 @@ with the A/T gear-position bit and vehicle speed, and that routine's result is
 PB4, the A/T lock-up solenoid. They are automatic-transmission inputs; which
 ones is not established. Bit 3 is read once, raw, at 0x3CC6.
 
-Port A bit 5 is not a free input in the model. The ROM compares the VTEC
-solenoid feedback with its own command (0x3D0C..0x3D21), so
-`Bus::drive_p28_feedback` holds the bit low while PC0 drives a connected
-solenoid and high otherwise; `Bus::vtec_solenoid_connected = false` unplugs
-it. The O2-heater (PA6) and lock-up (PA4) feedbacks are not modeled.
-`Bus::set_vtec_pressure_switch_closed` drives `4700h` bit 1.
+Port A bits 4, 5 and 6 are not free inputs in the model: they are the
+lock-up, VTEC-solenoid and O2-heater driver feedbacks, and
+`Bus::drive_p28_feedback` sets them from the outputs on every read (see the
+monitor table below). `Bus::set_vtec_pressure_switch_closed` drives `4700h`
+bit 1.
 
 `Bus::p28_input_port` and `Bus::ppi.pins[PORT_A]` hold the two bytes as the ROM
 reads them. They reset to `1Ah` and `38h`, the values the ROM stores as `00h`.
@@ -638,25 +649,89 @@ through the active LRB page, not plain address `N8`.
 3. The P28 external devices -- the switch-input buffer at DATA[`0x4700`] and
    the 82C55 at `0x0F00..0x3F00` -- are modeled. Their signal names come from
    the pgmfi wiki and from ROM behaviour, not the schematic; three input bits
-   are unnamed, only the VTEC solenoid feedback is closed-loop, and address
-   mirrors are not decoded.
-4. At 800 rpm and light load the ROM raises a fault within a second and
-   lights the MIL. The flag is `99h.3`, set at 0x3C71, which the pgmfi wiki's
-   P30 map calls the IAC error (its patch at 0x3C6E disables it). The check at
-   0x3C52..0x3C6E looks up two limits from RAM `C3h` (tables at `6B24h` and
-   `6B2Ah`) and faults when `25Ah` lies between them. `C3h` is the sample
-   stored at `3C5h`, i.e. analog mux U6 input X7, which `engine.rs` does not
-   drive, so it sits at the mid-scale default. What that input is on the board
-   is not established; the wiki labels `C3h` "IACV".
+   are unnamed and address mirrors are not decoded.
+4. The feedback paths described under "Faults and the monitors the ROM
+   depends on" are models of what the ROM checks, with stated assumptions:
+   the IACV sense gain and filter, which edge of the ignition pulse reaches
+   TRNS1, the injector monitor node, and the source and rate of the TRNS3
+   heartbeat. With them a healthy board idles with no stored fault; without
+   them the stock ROM stores codes 14, 15 and 16 and cuts fuel.
 5. Executor flag semantics have only been checked against the manual for the
    instructions the boot and injection paths exposed. A full audit against the
    summary tables (manual pp. 3-179 onward) is outstanding.
-6. The IAT analog endpoint and several U5/U6 positions remain unresolved. ADC
+6. Several U5/U6 positions and direct input AI5 remain unidentified. ADC
    scan-mode details beyond the stock sampler's observed behavior are
    simplified.
 7. Scenario names, DTC metadata, and synthetic evaluators are research aids,
    not firmware-level proof of a DTC, failsafe, calibration strategy, or
    physical output. TCP datalog compatibility remains experimental.
+
+### Faults and the monitors the ROM depends on
+
+The stock ROM does not just drive its loads; it watches most of them, and it
+stops fuelling when the ignition monitor fails. Until these monitors were
+modeled, the emulator only kept injecting because of an executor bug (below).
+
+**How a fault is stored.** Each check leaves a one-bit result in RAM
+`98h..9Dh`. The pass at 0x49CF.. walks those bits with an index in `r7`,
+debounces each against a per-fault count from the table at `6C68h`, and
+looks the fault code up in the table at `6C99h` (both read as
+`LCB A, table[ACC]`). 0x51B9 then sets bit `code - 1` in the 32-bit value at
+`212h..215h` (and its copies at `112h` and `31Ah`). So `213h.5` is code 14,
+`213h.6` code 15, `213h.7` code 16. Code 27 is what the O2-heater check
+stores; how that becomes the blink code a driver sees was not traced.
+
+**Executor bug this exposed.** `LCB A, 6C99h[ACC]` is encoded `B5 06 AB 99 6C`:
+the index is "the word at RAM `06h`", and `06h` is the accumulator. The
+executor read plain RAM there, got 0, and returned table entry 0 for every
+index. Every fault was therefore debounced with the first count and stored as
+code 11, and five other tables (`60BCh`, `6417h`, `638Bh`, `6D12h`, `5B2Eh`)
+were read at entry 0 too. `exec.rs` now resolves the base
+through the register aliases; ten instructions in this ROM use the form.
+
+**The monitors.**
+
+| monitor | ROM check | fault | model |
+|---|---|---|---|
+| ignition output, TRNS1 / P4.5 | 0x0698 `RB TRNSIT.1` after each firing | `9Ch.3`, code 15; fuel is cut | one edge per falling edge of TM3IO (`Bus::igniter_connected`) |
+| injector test circuit, TRNS2 / P4.6 | bit cleared at 0x4BCF before an opening, tested at 0x0637 / 0x1486 | `9Ch.6`, code 16 | one edge whenever an injector output opens (`Bus::injectors_connected`) |
+| heartbeat, TRNS3 / P4.7 | 0x2964 counts RAM `2EBh` down from `FFh` while no edge arrives | none stored; `230h.6` lights the MIL (0x4293) unless U5/X3 reads `FCh` or more | an edge every 10 ms (`Bus::heartbeat_present`) |
+| VTEC solenoid, port A bit 5 | 0x3D0C..0x3D21 | `9Ah.0`, code 21 | follows PC0 (`vtec_solenoid_connected`) |
+| O2 heater, port A bit 6 | 0x2094..0x20CB: 0 with the heater off, 1 with it on | `9Bh.2`, code 27 | follows PC2 (`o2_heater_connected`) |
+| lock-up solenoid, port A bit 4 | 0x3C98..0x3CA5, automatic only | `99h.6`, code 19 | inverse of PB4 |
+| IACV current, AI4 | 0x3C52..0x3C71 | `99h.3`, code 14 | see below (`iacv_connected`) |
+
+The wiki's engine-simulator page agrees with the set: its author had to fit
+real injector loads, an igniter feed "to prevent code 15", and a real IACV.
+The heartbeat is the least understood: a pulse train plus the mid-scale
+reference on U5/X3 that the boot check at 0x530C demands fits the ECU's backup
+IC proving it is alive, but nothing here identifies the source. Its rate is
+arbitrary; the ROM needs one edge in about five seconds.
+
+**IACV current loop.** The IACV is not open-loop PWM. Timer 1's realtime
+output (TM1IO, P3.5) carries a fixed `A00h`-count, 2.048 ms period; the handler
+at 0x0114 holds the pin low for RAM `C8h` counts and samples AI4 at the end of
+that phase. The controller at 0x286D scales the sample into `3CEh`, compares
+it with the target current in `25Ah` (from the table at `6968h`) and moves
+`C8h` between `F0h` and `580h`. If the on-time sticks at a limit while the
+target lies between the two battery-dependent limits at `6B2Ah` and `6B24h`,
+0x3C52 raises the fault.
+
+`Bus::iacv_pwm_edge` closes the loop with `I = duty x Vbatt / R`. Its gain,
+`P28_IACV_SENSE_PER_VOLT`, is not a board constant: the two limit tables bound
+it to roughly 0.10..0.20 of full scale per volt and 0.14 was picked inside
+that window. `iacv_duty_cycle_pct` is now measured from the pin; it used to be
+a constant zero.
+
+**Crank signal phasing.** The per-tooth handler counts teeth since the last
+TDC edge in RAM `D2h` and expects a TDC edge exactly when the count is 5
+(0x0417). On the tooth where it sees CYP, 0x04B5 requires the count to be 3,
+else it stores code 9. With the model's TDC edge after tooth 0, CYP must fall
+after tooth 3; it was after tooth 2, which stored code 9 after about five
+seconds. The half-tooth offsets remain a working choice. One loose end: the
+main loop at 0x37C2 sets `9Ch.0` whenever it finds a TDC edge pending, which
+happens constantly with the edges half a tooth apart; it never accumulates
+into a stored fault, but on a real distributor the edges may sit closer.
 
 ### Boot-latch correction: `0x0320` is not the source
 

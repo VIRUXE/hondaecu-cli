@@ -380,7 +380,8 @@ impl EcuTestSuite {
         for &volts in &voltages {
             engine.vbatt_volts = volts;
             engine.sync_sensors_to_bus(&mut bus);
-            let vbatt_adc = bus.read_data_u16(0x6A); // ADCR5
+            // Battery voltage is analog mux U6 input X7.
+            let vbatt_adc = bus.p28_mux_inputs[0][7];
             results.push(TestResult {
                 name: format!("Battery Dead-Time Trim [{:.1}V]", volts),
                 passed: true,

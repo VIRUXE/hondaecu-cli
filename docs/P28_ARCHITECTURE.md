@@ -90,8 +90,10 @@ Bomarc sheet 3 shows two CD4051 muxes sharing `P2.5=A`, `P2.6=B`, and
 | direct AI6 | — | MAP |
 | direct AI7 | — | TPS |
 
-The scenario model has an IAT field, but its P28 mux/ADC endpoint remains
-unresolved and is not currently driven into an asserted hardware channel.
+Identified from the ROM and the pgmfi wiki rather than the schematic: battery
+voltage on U6/X7, IAT on U6/X2, the gearbox configuration resistors on U5/X1
+and IACV coil current on direct AI4. Evidence is in
+[`CPU_CORE.md`](CPU_CORE.md), "P28 external analog mux".
 
 At `0x52DE..0x52F7`, the stock ROM derives the selector from `P2 >> 5`, stores
 ADCR0H at `0x03BE[index]` and ADCR1H at `0x03C6[index]`, and advances the shared

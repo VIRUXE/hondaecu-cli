@@ -14,9 +14,10 @@ documented RAM/SFR bit or physical-output mapping and compares it with a stated
 expectation.
 
 The stock-P28 analog path currently supports MAP on direct AI6, TPS on AI7,
-ECT on U5/X2→ADCR1, and primary HEGO on U6/X0→ADCR0. The IAT endpoint is
-unresolved, so changing `iat_celsius` does not currently prove a hardware input
-or ROM response. `vtec_active` and IACV duty depend on emulator-side or unresolved board
+ECT on U5/X2→ADCR1, primary HEGO on U6/X0→ADCR0, IAT on U6/X2 and battery
+voltage on U6/X7 (the last two identified from the ROM and the pgmfi wiki, not
+the schematic). IACV duty is measured from the ROM's own PWM output against a
+modeled valve. `vtec_active` depends on emulator-side or unresolved board
 mappings. Injector telemetry is measured on the modeled output stage described
 in [`INJECTION.md`](INJECTION.md).
 
@@ -33,7 +34,7 @@ in [`INJECTION.md`](INJECTION.md).
 | **`error-tps-short`** | TPS ADC input is forced low under high MAP. | Candidate DTC 7 and substitution behavior; 0% TPS alone is not proof of a short. |
 | **`error-ckp-distributor-loss`** | Scripted RPM drops to zero, stopping generated distributor edges. | Candidate CKP/TDC timeout response; the stimulus does not prove fuel or spark cut. |
 | **`error-vtec-oil-pressure-loss`** | High RPM/TPS is scripted while an emulator pressure-switch flag remains open. | Candidate DTC 22 only after the switch/output board mapping is established. |
-| **`error-alt-low-voltage`** | Battery input drops to 8.5 V. | Investigate voltage compensation; this input is not the confirmed U5/X0 ELD signal. |
+| **`error-alt-low-voltage`** | Battery input (U6/X7) drops to 8.5 V. | Investigate voltage compensation; this input is not the confirmed U5/X0 ELD signal. |
 | **`error-o2-lean-stuck`** | Primary HEGO input remains at 0.02 V. | Candidate DTC 1/43 and trim-state response; establish closed-loop prerequisites and delay. |
 
 ---
@@ -49,7 +50,7 @@ in [`INJECTION.md`](INJECTION.md).
 | **`launch-control-2step`** | Dedicated 2-Step stimulus: idle → WOT stab → stationary RPM bounce → clutch drop/launch → 1st gear pull → off-throttle abort | Compare ECU outputs across stationary, rolling and abort phases on a ROM that contains launch control. |
 | **`vtec-hysteresis`** | RPM oscillates around a scripted 4800-RPM point. | Inspect candidate VTEC state only after board mapping is established. |
 | **`electrical-load-idle`** | Scripted 800-RPM idle while load flags and voltage cycle. | Inspect IACV/injector response; output mappings remain provisional. |
-| **`heat-soak-start`** | Restart inputs with ECT 98°C and IAT 60°C. | Inspect fuel/timing changes; IAT is not wired to a confirmed ADC endpoint. |
+| **`heat-soak-start`** | Restart inputs with ECT 98°C and IAT 60°C. | Inspect fuel/timing changes; the IAT endpoint (U6/X2) is from the pgmfi wiki, not the schematic. |
 | **`dyno-pull`** | Scripted WOT sweep from 2000 to 8200 RPM. | Inspect ROM table access and output transitions; scripted RPM does not prove VTEC. |
 | **`cold-start`** | Scripted -10°C start and warm-up to 85°C. | Inspect ECT-dependent output/state changes; no enrichment constant is assumed. |
 
@@ -168,8 +169,7 @@ You can export log files from **Honda Tuning Suite (HTS)**, **Crome**, **Neptune
 ### CSV Header Requirement
 
 Every input column below is a stimulus. Its presence cannot verify a limiter,
-fuel cut, VTEC transition, DTC, or failsafe. In particular, the current IAT
-field has no confirmed P28 analog endpoint.
+fuel cut, VTEC transition, DTC, or failsafe.
 ```csv
 timestamp_ms,rpm,map_kpa,tps_pct,ect_celsius,iat_celsius,o2_volts,vbatt_volts,speed_kmh
 0,800,30.0,0.0,85.0,25.0,0.45,14.2,0.0

@@ -3,21 +3,56 @@
 use crate::bus::{
     Bus, IRQ_INT0, IRQ_INT1, P28_ADC_MAP, P28_ADC_TPS, P28_CKP_CAPTURE_TIMER,
     P28_MUX_U5_ADCR1, P28_MUX_U6_ADCR0, P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT,
+    P28_U6_IAT_SELECT, P28_U6_VBATT_SELECT, P28_VBATT_COUNTS_PER_VOLT,
 };
+
+/// Stock Honda IAT sensor, (deg C, volts at the ECU), from the pgmfi wiki's
+/// "Intake Air Temperature Sensor" page (values attributed there to AEM).
+const IAT_VOLTS: [(f64, f64); 12] = [
+    (-10.0, 4.992),
+    (-5.0, 4.368),
+    (1.0, 3.900),
+    (9.0, 3.276),
+    (18.0, 2.808),
+    (27.0, 2.340),
+    (38.0, 1.872),
+    (51.0, 1.404),
+    (66.0, 0.936),
+    (83.0, 0.468),
+    (95.0, 0.156),
+    (100.0, 0.0),
+];
+
+/// Linear interpolation through `IAT_VOLTS`, clamped at both ends.
+fn iat_volts(celsius: f64) -> f64 {
+    let (first, last) = (IAT_VOLTS[0], IAT_VOLTS[IAT_VOLTS.len() - 1]);
+    if celsius <= first.0 {
+        return first.1;
+    }
+    if celsius >= last.0 {
+        return last.1;
+    }
+    let i = IAT_VOLTS.iter().position(|&(t, _)| t >= celsius).unwrap();
+    let ((t0, v0), (t1, v1)) = (IAT_VOLTS[i - 1], IAT_VOLTS[i]);
+    v0 + (v1 - v0) * (celsius - t0) / (t1 - t0)
+}
 
 /// TDC edges fall half a tooth after CKP teeth 0, 6, 12 and 18 of the cam
 /// revolution; CYP falls half a tooth after tooth `CYP_AFTER_TOOTH`.
+///
+/// The half-tooth offsets are a working choice, but the spacing between the
+/// two is the ROM's: its per-tooth handler counts teeth since the last TDC
+/// edge in RAM D2h (0x0417..0x0466) and, on the tooth where it sees CYP,
+/// requires that count to be 3 (0x04B5), else it raises `9Dh.2` (fault index
+/// 2Bh, code 9). A TDC edge after tooth 0 is seen at tooth 1 (count 0), so
+/// CYP has to be seen at tooth 4, i.e. fall after tooth 3.
 const TDC_AFTER_TOOTH: u32 = 0;
-const CYP_AFTER_TOOTH: u32 = 2;
+const CYP_AFTER_TOOTH: u32 = 3;
 
 /// Honda's speed sensor gives four pulses per turn of a 637 rev/km speedometer
 /// drive. Used only to give INT0 a plausible rate; not derived from the ROM.
 const VSS_PULSES_PER_KM: f64 = 4.0 * 637.0;
 
-// Existing battery-monitor model. Its board net has not yet been traced with
-// the same confidence as MAP/TPS/EGR, so it is intentionally not a public P28
-// wiring constant.
-const ADC_VBATT_MODEL_CHANNEL: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct EngineState {
@@ -62,8 +97,8 @@ impl EngineState {
 
     /// Update the P28 board's analog inputs from physical sensor parameters.
     /// U5/U6 are external CD4051s selected by P2.5..P2.7. MAP and TPS use
-    /// confirmed direct pins; the existing battery model remains on AI5 while
-    /// that board net awaits a full trace.
+    /// confirmed direct pins; battery voltage and IAT are on U6 (see the
+    /// `P28_U6_*` constants for the evidence).
     pub fn sync_sensors_to_bus(&self, bus: &mut Bus) {
         // MAP: P5.6/AI6 (10..250 kPa -> 0.5V..4.5V -> 102..920 counts)
         let map_counts = ((self.map_kpa - 10.0) / 240.0 * 818.0 + 102.0).clamp(0.0, 1023.0) as u16;
@@ -78,16 +113,18 @@ impl EngineState {
         let ect_counts = (1023.0 - ((self.ect_celsius + 40.0) / 160.0 * 900.0)).clamp(0.0, 1023.0) as u16;
         bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ECT_SELECT] = ect_counts;
 
-        // The IAT field remains available to scenarios and telemetry, but its
-        // final P28 mux/ADC endpoint is not yet verified from the schematic.
+        // IAT: U6/X2.
+        let iat_counts = (iat_volts(self.iat_celsius) / 5.0 * 1023.0).clamp(0.0, 1023.0) as u16;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_IAT_SELECT] = iat_counts;
 
         // Primary HEGO: conditioned by U22, then U6/X0.
         let o2_counts = (self.o2_volts / 5.0 * 1023.0).clamp(0.0, 1023.0) as u16;
         bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_HEGO_SELECT] = o2_counts;
 
-        // Battery monitor: retain the existing AI5 model pending a full net trace.
-        let vbatt_counts = (self.vbatt_volts / 20.0 * 1023.0).clamp(0.0, 1023.0) as u16;
-        bus.adc_inputs[ADC_VBATT_MODEL_CHANNEL] = vbatt_counts;
+        // Battery voltage: U6/X7, 10.4 eight-bit counts per volt.
+        let vbatt_counts =
+            (self.vbatt_volts * P28_VBATT_COUNTS_PER_VOLT * 4.0).clamp(0.0, 1023.0) as u16;
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] = vbatt_counts;
 
         // VSS is a conditioned digital pulse input on the P28, not an ADC
         // channel. `speed_kmh` remains available to scenarios and telemetry.
@@ -192,5 +229,33 @@ impl EngineState {
         let next = due + period;
         self.next_vss_cycle = Some(if next <= now { now + period } else { next });
         1 << IRQ_INT0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iat_table_interpolates_and_clamps() {
+        assert_eq!(iat_volts(-40.0), 4.992);
+        assert_eq!(iat_volts(120.0), 0.0);
+        assert_eq!(iat_volts(27.0), 2.340);
+        // Halfway between 18 C (2.808 V) and 27 C (2.340 V).
+        assert!((iat_volts(22.5) - 2.574).abs() < 1e-9);
+    }
+
+    #[test]
+    fn battery_and_iat_land_on_analog_mux_u6() {
+        let mut bus = Bus::new();
+        let mut engine = EngineState::new();
+        engine.vbatt_volts = 12.0;
+        engine.iat_celsius = 27.0;
+        engine.sync_sensors_to_bus(&mut bus);
+
+        // 12 V at 10.4 eight-bit counts per volt is 7Ch, the ROM's 12 V
+        // table breakpoint region (7Dh/7Eh).
+        assert_eq!(bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] >> 2, 0x7C);
+        assert_eq!(bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_IAT_SELECT], 478);
     }
 }

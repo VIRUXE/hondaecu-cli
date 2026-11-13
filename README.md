@@ -96,8 +96,9 @@ path with live mux inputs, but it is not a physical-ECU validator.
 
 - U6 feeds ADCR0 and U5 feeds ADCR1. Confirmed endpoints are U6/X0 HEGO,
   U6/X3 barometric pressure, U5/X0 ELD, U5/X2 ECT, U5/X3 an unresolved
-  boot-check signal, direct AI3 optional EGR, AI6 MAP, and AI7 TPS. The P28 IAT
-  endpoint is still unresolved.
+  boot-check signal, direct AI3 optional EGR, AI6 MAP, and AI7 TPS. Battery
+  voltage (U6/X7), IAT (U6/X2), the gearbox configuration input (U5/X1) and
+  IACV current (AI4) are identified from the ROM and the pgmfi wiki.
 - The stock sampler at `0x52DE..0x52F7` stores ADCR0 high bytes at
   `0x03BE[index]` and ADCR1 high bytes at `0x03C6[index]` while advancing the
   shared selector.

@@ -976,8 +976,8 @@ mod tests {
     use super::ReplayEngine;
     use crate::bus::{
         Bus, P28_INPUT_ACTIVE_LOW, P28_IN_AC_SWITCH, P28_IN_STARTER, P28_MUX_U5_ADCR1,
-        P28_PA_SERVICE_CONNECTOR, P28_PPI_A_ACTIVE_LOW, P28_U5_BOOT_CHECK_SELECT, SFR_P0,
-        SFR_P1,
+        P28_PA_SERVICE_CONNECTOR, P28_PPI_A_ACTIVE_LOW, P28_U5_BOOT_CHECK_SELECT,
+        P28_U5_GEARBOX_SELECT, SFR_P0, SFR_P1,
     };
     use crate::cpu::Cpu;
     use crate::engine::EngineState;
@@ -1149,7 +1149,8 @@ mod tests {
         );
         // Both input bytes are stored polarity-corrected; the reset levels are
         // the ones that read back as "nothing asserted".
-        assert_eq!(bus.ram[0x0210], 0x00, "82C55 port A image");
+        // Bits 4..6 are driver feedback and follow the outputs.
+        assert_eq!(bus.ram[0x0210] & 0x8F, 0x00, "82C55 port A image");
         assert_eq!(bus.ram[0x0211], 0x00, "switch-input buffer image");
         assert_ne!(bus.ram[0x00EB], 0x4D, "port readback fault must not latch");
     }
@@ -1165,7 +1166,8 @@ mod tests {
         };
 
         assert_eq!(bus.ram[0x0211], 0xC4 ^ P28_INPUT_ACTIVE_LOW);
-        assert_eq!(bus.ram[0x0210], 0xA1 ^ P28_PPI_A_ACTIVE_LOW);
+        // Bits 4..6 are driver feedback, set by the board model.
+        assert_eq!((bus.ram[0x0210] ^ P28_PPI_A_ACTIVE_LOW) & 0x8F, 0xA1 & 0x8F);
         assert_eq!((bus.external_unmapped_reads, bus.external_unmapped_writes), (0, 0));
     }
 
@@ -1229,24 +1231,33 @@ mod tests {
         }
     }
 
-    /// Port B bit 7 is the fuel-pump relay: with the key on and the engine
-    /// stopped the ROM runs it for two seconds and then drops it.
+    /// Port B bit 7 is the fuel-pump relay and port C bit 4 the MIL: with the
+    /// key on and the engine stopped the ROM runs the pump and lights the lamp
+    /// for two seconds, then drops both and leaves them off.
     #[test]
     fn stock_p28_primes_the_fuel_pump_for_two_seconds() {
-        let mut edges = Vec::new();
-        let Some(bus) = observe_stock_p28(0.0, 3.0, |_| {}, |bus, t| {
-            record_edges(&mut edges, bus.p28_outputs().map(|out| out.fuel_pump), t);
+        let (mut pump, mut mil) = (Vec::new(), Vec::new());
+        let Some(bus) = observe_stock_p28(0.0, 8.0, |_| {}, |bus, t| {
+            let out = bus.p28_outputs();
+            record_edges(&mut pump, out.map(|out| out.fuel_pump), t);
+            // Skip the microseconds between the 82C55 mode word and the
+            // ROM's first port C write.
+            if t > 0.01 {
+                record_edges(&mut mil, out.map(|out| out.mil), t);
+            }
         }) else {
             return;
         };
 
-        assert_eq!(edges.len(), 2, "pump edges: {edges:?}");
-        assert!(edges[0].1 && edges[0].0 < 0.1, "on from reset: {edges:?}");
-        assert!(
-            !edges[1].1 && (1.8..=2.3).contains(&edges[1].0),
-            "off after the prime: {edges:?}"
-        );
-        assert!(!bus.fuel_pump_active);
+        for (what, edges) in [("pump", &pump), ("MIL", &mil)] {
+            assert_eq!(edges.len(), 2, "{what} edges: {edges:?}");
+            assert!(edges[0].1 && edges[0].0 < 0.1, "{what} on from reset: {edges:?}");
+            assert!(
+                !edges[1].1 && (1.8..=2.3).contains(&edges[1].0),
+                "{what} off after two seconds: {edges:?}"
+            );
+        }
+        assert!(!bus.fuel_pump_active && !bus.mil_check_engine_light);
     }
 
     #[test]
@@ -1333,20 +1344,104 @@ mod tests {
         assert!(!closed, "closed switch must not");
     }
 
+    /// The fault words at 212h..215h: bit n of the 32-bit value is the ROM's
+    /// fault code n + 1 (0x51B9 stores code - 1 as a bit index).
+    fn latched_faults(bus: &Bus) -> u32 {
+        u32::from_le_bytes([bus.ram[0x212], bus.ram[0x213], bus.ram[0x214], bus.ram[0x215]])
+    }
+
+    /// A healthy board at idle: nothing latched, lamp out after the bulb
+    /// check, pump running, fuel flowing, and the ROM's IACV current loop
+    /// settled on its target inside its on-time limits.
+    #[test]
+    fn stock_p28_idles_without_faults() {
+        let mut mil = Vec::new();
+        let Some(bus) = observe_stock_p28(800.0, 6.0, |_| {}, |bus, t| {
+            record_edges(&mut mil, bus.p28_outputs().map(|out| out.mil), t);
+        }) else {
+            return;
+        };
+
+        assert_eq!(latched_faults(&bus), 0, "latched fault bits");
+        let late: Vec<_> = mil.iter().filter(|&&(t, _)| t > 0.5).collect();
+        assert!(late.is_empty(), "MIL after the bulb check: {mil:?}");
+        assert!(!bus.mil_check_engine_light && bus.fuel_pump_active);
+        assert!(bus.injector_open_count.iter().all(|&n| n > 20), "{:?}", bus.injector_open_count);
+
+        let word = |a: usize| (bus.ram[a] as i32) | (bus.ram[a + 1] as i32) << 8;
+        let (target, measured) = (word(0x25A), word(0x3CE));
+        assert!(
+            (target - measured).abs() < target / 20,
+            "IACV current {measured:#06X} against target {target:#06X}"
+        );
+        assert!(
+            (9.0..=56.0).contains(&bus.iacv_duty_cycle_pct),
+            "IACV duty {}",
+            bus.iacv_duty_cycle_pct
+        );
+        // 14.2 V battery at 10.4 counts per volt, and the manual gearbox.
+        assert_eq!(bus.ram[0x00C3], 0x93, "battery voltage image");
+        assert_eq!(bus.ram[0x0216] & 0x08, 0, "216h.3: automatic gearbox flag");
+    }
+
+    /// Mid scale on the gearbox configuration input is an automatic.
+    #[test]
+    fn stock_p28_reads_the_gearbox_configuration_input() {
+        let Some(bus) = observe_stock_p28(
+            800.0,
+            0.5,
+            |bus| bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = 650,
+            |_, _| {},
+        ) else {
+            return;
+        };
+
+        assert_ne!(bus.ram[0x0216] & 0x08, 0);
+    }
+
+    /// Each load the ROM monitors, unplugged in turn, latches its own fault
+    /// and lights the MIL. Code 15 also stops injection.
+    #[test]
+    fn stock_p28_latches_a_fault_for_each_unplugged_load() {
+        type Unplug = fn(&mut Bus);
+        let cases: [(&str, Unplug, u32, bool); 4] = [
+            ("IACV", |bus| bus.iacv_connected = false, 14, true),
+            ("igniter", |bus| bus.igniter_connected = false, 15, false),
+            ("injectors", |bus| bus.injectors_connected = false, 16, true),
+            ("O2 heater", |bus| bus.o2_heater_connected = false, 27, true),
+        ];
+        for (what, unplug, code, keeps_injecting) in cases {
+            let mut opens_at_4s = [0u64; 4];
+            let Some(bus) = observe_stock_p28(800.0, 6.5, unplug, |bus, t| {
+                if t < 4.0 {
+                    opens_at_4s = bus.injector_open_count;
+                }
+            }) else {
+                return;
+            };
+
+            assert_eq!(latched_faults(&bus), 1 << (code - 1), "{what}: fault bits");
+            assert!(bus.mil_check_engine_light, "{what}: MIL");
+            assert_eq!(
+                bus.injector_open_count != opens_at_4s,
+                keeps_injecting,
+                "{what}: injection after the fault"
+            );
+        }
+    }
+
     /// Port C bit 4 is the MIL and port A bit 7 the service check connector:
-    /// the lamp is lit for the bulb check at reset, and with the connector
-    /// grounded the ROM blinks it. (This operating point raises the IAC fault
-    /// `99h.3` because analog mux input U6/X7 is not modeled -- see
-    /// docs/CPU_CORE.md, known limits -- which is what gives the ROM a code
-    /// to blink; without the jumper the lamp is simply on.)
+    /// with a fault stored the lamp is on steadily, and with the connector
+    /// grounded the ROM blinks the code out instead.
     #[test]
     fn stock_p28_blinks_the_mil_with_the_service_connector_grounded() {
         let mil_edges = |jumper: bool| {
             let mut edges = Vec::new();
             observe_stock_p28(
                 800.0,
-                6.0,
+                if jumper { 16.0 } else { 7.0 },
                 |bus| {
+                    bus.iacv_connected = false;
                     if jumper {
                         bus.ppi.pins[crate::ppi82c55::PORT_A as usize] |= P28_PA_SERVICE_CONNECTOR;
                     }
@@ -1359,11 +1454,30 @@ mod tests {
             return;
         };
 
-        let at_reset = steady.iter().rfind(|&&(t, _)| t < 0.05).map(|&(_, lit)| lit);
-        assert_eq!(at_reset, Some(true), "bulb check at reset: {steady:?}");
-        let late = |edges: &[(f64, bool)]| edges.iter().filter(|&&(t, _)| t > 1.0).count();
-        assert_eq!(late(&steady), 0, "no jumper, steady lamp: {steady:?}");
-        assert!(late(&blinking) >= 3, "jumper, blinking lamp: {blinking:?}");
+        // The IACV fault latches a little after five seconds.
+        let after = |edges: &[(f64, bool)]| edges.iter().filter(|&&(t, _)| t > 5.0).count();
+        assert_eq!(after(&steady), 1, "no jumper, lamp comes on and stays: {steady:?}");
+        assert!(steady.last().unwrap().1);
+        assert!(after(&blinking) >= 4, "jumper, blinking lamp: {blinking:?}");
+    }
+
+    /// Without the TRNS3 heartbeat the ROM lights the MIL after about five
+    /// seconds without storing a fault.
+    #[test]
+    fn stock_p28_lights_the_mil_when_the_heartbeat_stops() {
+        let mut mil = Vec::new();
+        let Some(bus) = observe_stock_p28(
+            800.0,
+            7.0,
+            |bus| bus.heartbeat_present = false,
+            |bus, t| record_edges(&mut mil, bus.p28_outputs().map(|out| out.mil), t),
+        ) else {
+            return;
+        };
+
+        let (t, lit) = *mil.last().unwrap();
+        assert!(lit && (4.0..=6.5).contains(&t), "MIL edges: {mil:?}");
+        assert_eq!(latched_faults(&bus), 0);
     }
 
     #[test]

@@ -66,6 +66,9 @@ pub const P28_PB_PURGE_OFF: u8 = 1 << 1;
 pub const P28_PB_ALTERNATOR_CONTROL: u8 = 1 << 2;
 /// Port B bit 3: radiator fan, low = on (wiki P30).
 pub const P28_PB_FAN_OFF: u8 = 1 << 3;
+/// Port B bit 4: A/T lock-up solenoid A via IC15, high = on (wiki 82C55; the
+/// ROM writes its own lock-up flag `22Fh.0` straight to it at 0x3387).
+pub const P28_PB_LOCKUP_SOLENOID: u8 = 1 << 4;
 /// Port B bit 7: fuel-pump relay, low = on. The wiki only traces this pin to
 /// the 7U016 custom IC; the function is from the ROM, which holds it low for
 /// two seconds after reset, while the starter input is set, and while the
@@ -253,6 +256,31 @@ pub const SFR_TCON3: u16 = 0x43;
 /// cylinder 1 and injection never sequences.
 pub const SFR_TRNS: u16 = 0x46;
 
+/// Transition detector that watches the ignition output (TRNS1, P4.5). After
+/// each firing the ROM does `RB TRNSIT.1` at 0x0698 and raises `9Ch.3`
+/// (fault index 24h, code 15, "ignition output signal") if no edge was
+/// latched.
+pub const P28_TRNS_IGNITION_MONITOR: u8 = 1;
+/// Transition detector that watches the injector drivers (TRNS2, P4.6): the
+/// injector test circuit of USDM boards. The ROM clears the bit just before
+/// it opens an injector (0x4BCF) and expects it set by the next crank event
+/// (0x0637, 0x1486), else `9Ch.6` (fault index 27h, code 16).
+pub const P28_TRNS_INJECTOR_MONITOR: u8 = 2;
+/// Transition detector the ROM uses as a heartbeat input (TRNS3, P4.7). At
+/// 0x2964 it read-clears the bit on every pass and counts down RAM 2EBh from
+/// FFh while no edge arrives; at zero it sets `230h.6`, which lights the MIL
+/// (0x4293) unless mux input U5/X3 reads FCh or more. The same U5/X3 input
+/// must sit at mid scale or above FCh for the boot check at 0x530C. A
+/// mid-scale reference plus a pulse train that proves something is alive
+/// fits the ECU's backup IC, but the source is not identified.
+pub const P28_TRNS_HEARTBEAT: u8 = 3;
+/// Interval between modeled heartbeat edges. Arbitrary: the ROM only needs
+/// one inside its roughly five-second window.
+const P28_HEARTBEAT_CYCLES: u32 = (CPU_HZ / 100) as u32;
+/// Timer whose realtime output (TM3IO, P3.7) is the ignition signal: the CKP
+/// capture handler at 0x014D schedules its edges from crank teeth.
+pub const P28_IGNITION_TIMER: usize = 3;
+
 pub const SFR_ADSCAN: u16 = 0x58;
 pub const SFR_ADSEL: u16  = 0x59;
 pub const SFR_ADCR0: u16  = 0x60;
@@ -270,6 +298,47 @@ pub const P28_U5_ECT_SELECT: usize = 2;
 pub const P28_U5_BOOT_CHECK_SELECT: usize = 3;
 pub const P28_U6_HEGO_SELECT: usize = 0;
 pub const P28_U6_BARO_SELECT: usize = 3;
+
+// Mux positions identified from the ROM and the pgmfi wiki rather than the
+// schematic.
+/// U5/X1: gearbox configuration resistors (RP17/RP18 on the wiki's
+/// auto/manual page). The ROM copies bit 7 of this sample into `216h.3`
+/// (0x55C5..0x55D0), which the wiki's P30 map calls "1 = automatic", so a
+/// manual ECU presents less than half scale here. Bit 6 is inverted into
+/// `216h.2` and `216h.0`.
+pub const P28_U5_GEARBOX_SELECT: usize = 1;
+/// U6/X2: intake air temperature (wiki P30 map, RAM 3C0h; the ROM
+/// range-checks it at 0x3BF5 and filters it into C0h).
+pub const P28_U6_IAT_SELECT: usize = 2;
+/// U6/X7: battery voltage. The sample lands in RAM 3C5h and is copied to C3h
+/// (0x3B3B). The ROM's tables indexed by C3h -- injector dead time at 61D6h,
+/// IACV compensation at 69F6h -- have their breakpoints at 54h, 69h, 7Eh,
+/// 93h, A7h..., i.e. 8, 10, 12, 14, 16 V at `P28_VBATT_COUNTS_PER_VOLT`.
+/// (The wiki's P30 map labels C3h "IACV"; it is not.)
+pub const P28_U6_VBATT_SELECT: usize = 7;
+/// 8-bit ADC counts per volt of battery voltage, from the table breakpoints
+/// above. That is a divider of about 1/4.9 in front of the 5 V converter.
+pub const P28_VBATT_COUNTS_PER_VOLT: f64 = 10.4;
+
+/// AI4: IACV coil current. The timer-1 handler samples it at the end of each
+/// conducting phase (0x0136) and the controller at 0x286D steers the PWM
+/// on-time until it matches the target in 25Ah.
+pub const P28_ADC_IACV_CURRENT: usize = 4;
+/// Timer whose realtime output (TM1IO, P3.5) is the IACV PWM. The pin is low
+/// for the phase the controller regulates (RAM C8h, 0F0h..580h timer counts)
+/// and high for the rest of the fixed A00h-count, 2.048 ms period.
+pub const P28_IACV_PWM_TIMER: usize = 1;
+/// IACV current-sense gain, as a fraction of ADC full scale per volt of
+/// battery at 100 % duty. This is the one free parameter of the valve model
+/// and it is NOT a measured board constant. The ROM bounds it: its IACV fault
+/// check (0x3C52) treats targets up to the table at 6B24h (about 0.055/V) as
+/// reachable with the on-time limited to 55 %, which needs at least 0.10/V,
+/// and expects to regulate down to the table at 6B2Ah with the on-time at
+/// its 9.4 % floor, which allows at most about 0.20/V. 0.14 sits inside.
+pub const P28_IACV_SENSE_PER_VOLT: f64 = 0.14;
+/// Fraction of the remaining error the sensed current closes per PWM period:
+/// a first-order stand-in for the coil's L/R and the sense filter. Assumed.
+const P28_IACV_SENSE_FILTER: f64 = 0.25;
 
 /// Direct (unmultiplexed) P5 analog inputs on the P28 board.
 pub const P28_ADC_EGR: usize = 3;
@@ -335,7 +404,31 @@ pub struct Bus {
     pub injector_open_count: [u64; 4],
     /// `elapsed_cycles` at the most recent injector opening, if any.
     pub injector_last_open_cycle: Option<u64>,
+    /// Conducting fraction of the last complete IACV PWM period, measured on
+    /// the timer-1 realtime output.
     pub iacv_duty_cycle_pct: f32,
+    /// The IACV is plugged in. Unplugged, no current flows and AI4 reads 0.
+    pub iacv_connected: bool,
+    /// The O2 sensor heater is plugged in; its driver feedback (82C55 port A
+    /// bit 6) then follows the port C bit 2 driver.
+    pub o2_heater_connected: bool,
+    /// The injectors are plugged in, so the injector test circuit sees each
+    /// opening.
+    pub injectors_connected: bool,
+    /// The igniter is plugged in, so the ignition monitor sees each firing.
+    pub igniter_connected: bool,
+    /// Falling edges seen on TM3IO, i.e. ignition events commanded by the ROM.
+    pub ignition_event_count: u64,
+    /// Whatever drives the TRNS3 heartbeat is alive (see
+    /// `P28_TRNS_HEARTBEAT`).
+    pub heartbeat_present: bool,
+    heartbeat_accum: u32,
+    /// Sensed IACV current as a fraction of ADC full scale.
+    iacv_sense: f64,
+    /// TM1IO level and the time it last changed.
+    iacv_pin: (bool, u64),
+    /// Length of the last conducting (pin low) phase, in machine cycles.
+    iacv_low_cycles: u64,
     pub elapsed_cycles: u64,
     injector_started_at: [Option<u64>; 4],
     /// State of the four injector drivers, bit n = output n, active low
@@ -388,8 +481,8 @@ pub struct Bus {
     /// power-steering switch not grounded -- whether that switch really rests
     /// open is not established. Ports B and C are the board's latched outputs,
     /// which the ROM shadows in the otherwise unused P0 and P1 latches.
-    /// Port A bit 5 is not a free input: `drive_p28_feedback` sets it from
-    /// the VTEC solenoid driver on every read.
+    /// Port A bits 4, 5 and 6 are not free inputs: `drive_p28_feedback` sets
+    /// them from the lock-up, VTEC and O2-heater drivers on every read.
     pub ppi: Ppi82c55,
     /// External-bus reads / writes that no modeled device decoded. The stock
     /// P28 ROM performs none; a non-zero count means a ROM or a test reached
@@ -424,6 +517,16 @@ impl Bus {
             injector_last_open_cycle: None,
             injector_outputs: 0x0F,
             iacv_duty_cycle_pct: 0.0,
+            iacv_connected: true,
+            o2_heater_connected: true,
+            injectors_connected: true,
+            igniter_connected: true,
+            ignition_event_count: 0,
+            heartbeat_present: true,
+            heartbeat_accum: 0,
+            iacv_sense: 0.0,
+            iacv_pin: (false, 0),
+            iacv_low_cycles: 0,
             elapsed_cycles: 0,
             injector_started_at: [None; 4],
             fuel_pump_active: false,
@@ -452,6 +555,9 @@ impl Bus {
             serial_rx_queue: Vec::new(),
             serial_tx_queue: Vec::new(),
         };
+        // P28-A00 (ROM mask 230) is a manual-gearbox ECU: the configuration
+        // input reads 0 V. See `P28_U5_GEARBOX_SELECT`.
+        bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = 0;
         // Initialize default SFR values
         // Datasheet SFR table: SSP resets to FFFFh. Every ROM loads its own
         // stack pointer; until then the stack is in unmapped external space,
@@ -594,19 +700,74 @@ impl Bus {
         }
     }
 
-    /// Board feedback into 82C55 port A. Bit 5 senses the VTEC solenoid line:
-    /// low while the port C bit 0 driver powers a connected solenoid. The ROM
-    /// checks it against its own command at 0x3D0C..0x3D21, so leaving the bit
-    /// static would fault as soon as the ROM switched VTEC.
+    /// Board feedback into 82C55 port A. Three bits sense the ROM's own
+    /// drivers, and the ROM checks each against its command, so leaving them
+    /// static faults as soon as the ROM switches the load:
+    ///
+    /// * bit 5, VTEC solenoid line: low while port C bit 0 powers a connected
+    ///   solenoid (checked at 0x3D0C..0x3D21);
+    /// * bit 6, O2 heater: high while port C bit 2 (active low) powers a
+    ///   connected heater (0x2094..0x20CB wants 0 with the heater off and 1
+    ///   with it on);
+    /// * bit 4, lock-up solenoid driver: the inverse of port B bit 4
+    ///   (0x3C98..0x3CA5, automatic gearbox only).
+    ///
+    /// The polarities of bits 4 and 6 are read from those checks, not from
+    /// the board.
     fn drive_p28_feedback(&mut self) {
-        let powered = self.vtec_solenoid_connected
-            && self.p28_outputs().is_some_and(|out| out.vtec_solenoid);
+        let outputs = self.p28_outputs();
+        let vtec = self.vtec_solenoid_connected && outputs.is_some_and(|out| out.vtec_solenoid);
+        let heater = self.o2_heater_connected && outputs.is_some_and(|out| out.o2_heater);
+        let lockup = self
+            .ppi
+            .output(ppi82c55::PORT_B)
+            .is_some_and(|b| b & P28_PB_LOCKUP_SOLENOID != 0);
+
         let pins = &mut self.ppi.pins[ppi82c55::PORT_A as usize];
-        if powered {
-            *pins &= !P28_PA_VTEC_SOLENOID_OFF;
-        } else {
-            *pins |= P28_PA_VTEC_SOLENOID_OFF;
+        let mut drive = |mask: u8, level: bool| {
+            if level {
+                *pins |= mask;
+            } else {
+                *pins &= !mask;
+            }
+        };
+        drive(P28_PA_VTEC_SOLENOID_OFF, !vtec);
+        drive(P28_PA_O2_HEATER_FEEDBACK, heater);
+        drive(P28_PA_LOCKUP_FEEDBACK, !lockup);
+    }
+
+    /// TM1IO changed level. Measure the conducting (low) phase and, once per
+    /// period, move the sensed valve current toward what that duty would
+    /// carry at the present battery voltage: `I = duty * Vbatt / R`, scaled
+    /// by `P28_IACV_SENSE_PER_VOLT`.
+    fn iacv_pwm_edge(&mut self, level: bool) {
+        let (was, since) = self.iacv_pin;
+        if level == was {
+            return;
         }
+        let phase = self.elapsed_cycles.saturating_sub(since);
+        self.iacv_pin = (level, self.elapsed_cycles);
+        if level {
+            // Rising edge: the conducting phase just ended.
+            self.iacv_low_cycles = phase;
+            return;
+        }
+        let period = self.iacv_low_cycles + phase;
+        if period == 0 {
+            return;
+        }
+        let duty = self.iacv_low_cycles as f64 / period as f64;
+        self.iacv_duty_cycle_pct = (duty * 100.0) as f32;
+
+        let vbatt = (self.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] >> 2) as f64
+            / P28_VBATT_COUNTS_PER_VOLT;
+        let steady = if self.iacv_connected {
+            (duty * vbatt * P28_IACV_SENSE_PER_VOLT).min(1.0)
+        } else {
+            0.0
+        };
+        self.iacv_sense += (steady - self.iacv_sense) * P28_IACV_SENSE_FILTER;
+        self.adc_inputs[P28_ADC_IACV_CURRENT] = (self.iacv_sense * 1023.0) as u16;
     }
 
     /// The VTEC oil-pressure switch is closed (pin D6 grounded), its state
@@ -855,6 +1016,14 @@ impl Bus {
         self.ram[SFR_TRNS as usize] |= 0x01;
     }
 
+    /// Latch a falling edge on TRNS`n` (P4.4 + n), if the ROM has given that
+    /// pin to its transition detector.
+    fn transition_edge(&mut self, n: u8) {
+        if self.ram[SFR_P4SF as usize] & (0x10 << n) != 0 {
+            self.ram[SFR_TRNS as usize] |= 1 << n;
+        }
+    }
+
     /// Injector output stage of the P28, as the stock ROM drives it.
     ///
     /// P2.0..P2.3 are not the injector pins. The ROM prepares the *next*
@@ -882,6 +1051,7 @@ impl Bus {
         let old = self.injector_outputs;
         let new = self.ram[SFR_P2 as usize] & 0x0F;
         self.injector_outputs = new;
+        let mut opened = false;
         for bit in 0..4 {
             let mask = 1u8 << bit;
             match (old & mask != 0, new & mask != 0) {
@@ -889,6 +1059,11 @@ impl Bus {
                     self.injector_started_at[bit] = Some(self.elapsed_cycles);
                     self.injector_open_count[bit] += 1;
                     self.injector_last_open_cycle = Some(self.elapsed_cycles);
+                    // The driver pulling its injector low is the falling
+                    // edge the injector test circuit reports on TRNS2. That
+                    // the monitored node is the injector low side is the
+                    // model's reading of 0x4BCF/0x0637, not a board trace.
+                    opened = true;
                 }
                 (false, true) => {
                     if let Some(start) = self.injector_started_at[bit].take() {
@@ -901,6 +1076,9 @@ impl Bus {
                 }
                 _ => {}
             }
+        }
+        if opened && self.injectors_connected {
+            self.transition_edge(P28_TRNS_INJECTOR_MONITOR);
         }
     }
 
@@ -967,6 +1145,14 @@ impl Bus {
     pub fn tick_timers(&mut self, cycles: u32) -> u16 {
         let started_at = self.elapsed_cycles;
         self.elapsed_cycles = self.elapsed_cycles.wrapping_add(cycles as u64);
+
+        self.heartbeat_accum += cycles;
+        if self.heartbeat_accum >= P28_HEARTBEAT_CYCLES {
+            self.heartbeat_accum %= P28_HEARTBEAT_CYCLES;
+            if self.heartbeat_present {
+                self.transition_edge(P28_TRNS_HEARTBEAT);
+            }
+        }
 
         // (counter SFR, reload SFR, control SFR, IRQ bit)
         const TIMERS: [(u16, u16, u16, u16); 4] = [
@@ -1076,6 +1262,19 @@ impl Bus {
                         irq_flags |= 1 << *irq_bit;
                         let trout = (tcon >> 3) & 1;
                         self.ram[*tcon_sfr as usize] = (tcon & !TCON_TROUT) | (trout << 2);
+                        if i == P28_IACV_PWM_TIMER {
+                            self.iacv_pwm_edge(trout != 0);
+                        }
+                        // One falling edge of the ignition output per firing
+                        // reaches the monitor. Which edge of the pulse the
+                        // board feeds back is not known; there is exactly one
+                        // of each per firing, which is all the ROM counts.
+                        if i == P28_IGNITION_TIMER && tcon & TCON_TROUT != 0 && trout == 0 {
+                            self.ignition_event_count += 1;
+                            if self.igniter_connected {
+                                self.transition_edge(P28_TRNS_IGNITION_MONITOR);
+                            }
+                        }
                         if i == 0 && tcon & TCON_TROUT == 0 && trout != 0 {
                             strobe_injectors = true;
                         }
@@ -1232,14 +1431,15 @@ mod tests {
     #[test]
     fn p28_ppi_answers_at_its_four_addresses_only() {
         let mut bus = Bus::new();
-        // Bit 5 is the VTEC solenoid feedback, high while the driver is off.
-        bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xE3;
+        // Bits 4..6 are driver feedback: with these outputs the lock-up and
+        // VTEC drivers are off (1, 1) and so is the O2 heater (0).
+        bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xB3;
         // The ROM's init sequence at 0x51E4.
         bus.write_data_u8(0x3F00, 0x90);
         bus.write_data_u8(0x1F00, 0xEB);
         bus.write_data_u8(0x2F00, 0x44);
 
-        assert_eq!(bus.read_data_u8(0x0F00), 0xE3);
+        assert_eq!(bus.read_data_u8(0x0F00), 0xB3);
         assert_eq!(bus.read_data_u8(0x1F00), 0xEB);
         assert_eq!(bus.read_data_u8(0x2F00), 0x44);
         assert_eq!(bus.p28_board_outputs(), (0xEB, 0x44));
@@ -1309,6 +1509,65 @@ mod tests {
         assert_eq!(bus.read_data_u8(P28_INPUT_PORT) & P28_IN_VTEC_PRESSURE_SW_CLOSED, 0);
         // The ROM's image of an open switch is 211h.1 = 1.
         assert_ne!((bus.p28_input_port ^ P28_INPUT_ACTIVE_LOW) & 0x02, 0);
+    }
+
+    #[test]
+    fn iacv_current_follows_pwm_duty_and_battery_voltage() {
+        let mut bus = Bus::new();
+        // 12.5 V on the battery input.
+        bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] = 130 * 4;
+        // 40 % conducting (pin low), 2000-cycle period, long enough to settle.
+        let mut drive = |bus: &mut Bus, periods: u32| {
+            for _ in 0..periods {
+                bus.elapsed_cycles += 800;
+                bus.iacv_pwm_edge(true);
+                bus.elapsed_cycles += 1200;
+                bus.iacv_pwm_edge(false);
+            }
+        };
+        drive(&mut bus, 60);
+
+        assert!((bus.iacv_duty_cycle_pct - 40.0).abs() < 0.01);
+        let expected = 0.4 * 12.5 * P28_IACV_SENSE_PER_VOLT * 1023.0;
+        let sensed = bus.adc_inputs[P28_ADC_IACV_CURRENT] as f64;
+        assert!((sensed - expected).abs() < 2.0, "{sensed} against {expected}");
+
+        bus.iacv_connected = false;
+        drive(&mut bus, 60);
+        assert_eq!(bus.adc_inputs[P28_ADC_IACV_CURRENT], 0, "unplugged valve");
+    }
+
+    #[test]
+    fn transition_detectors_latch_only_on_pins_the_rom_assigned() {
+        let mut bus = Bus::new();
+        bus.transition_edge(P28_TRNS_INJECTOR_MONITOR);
+        assert_eq!(bus.ram[SFR_TRNS as usize], 0, "P4.6 is still a plain port pin");
+
+        // The P28 setting: P4.2..P4.7 are secondary-function pins.
+        bus.write_data_u8(SFR_P4SF, 0xFC);
+        bus.transition_edge(P28_TRNS_INJECTOR_MONITOR);
+        bus.transition_edge(P28_TRNS_IGNITION_MONITOR);
+        assert_eq!(bus.ram[SFR_TRNS as usize], 0x06);
+    }
+
+    #[test]
+    fn driver_feedback_bits_follow_the_82c55_outputs() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x3F00, 0x90);
+        let port_a = |bus: &mut Bus| bus.read_data_u8(0x0F00);
+
+        // Lock-up off, O2 heater off (port C bit 2 high).
+        bus.write_data_u8(0x1F00, 0x00);
+        bus.write_data_u8(0x2F00, P28_PC_O2_HEATER_OFF);
+        assert_eq!(port_a(&mut bus) & 0x50, P28_PA_LOCKUP_FEEDBACK);
+
+        // Lock-up on, heater on.
+        bus.write_data_u8(0x1F00, P28_PB_LOCKUP_SOLENOID);
+        bus.write_data_u8(0x2F00, 0x00);
+        assert_eq!(port_a(&mut bus) & 0x50, P28_PA_O2_HEATER_FEEDBACK);
+
+        bus.o2_heater_connected = false;
+        assert_eq!(port_a(&mut bus) & P28_PA_O2_HEATER_FEEDBACK, 0, "unplugged heater");
     }
 
     #[test]
