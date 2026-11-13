@@ -315,6 +315,7 @@ const P28_HEARTBEAT_CYCLES: u32 = (CPU_HZ / 100) as u32;
 /// output transistor.
 pub const P28_IGNITION_TIMER: usize = 3;
 
+pub const SFR_WDT: u16 = 0x11;
 pub const SFR_ADSCAN: u16 = 0x58;
 pub const SFR_ADSEL: u16  = 0x59;
 pub const SFR_ADCR0: u16  = 0x60;
@@ -476,6 +477,9 @@ pub struct Bus {
     /// Length of the last conducting (pin low) phase, in machine cycles.
     iacv_low_cycles: u64,
     pub elapsed_cycles: u64,
+    /// `elapsed_cycles` at the most recent write to the watchdog timer
+    /// register (SFR 0x11); `None` until the ROM first writes it.
+    pub watchdog_last_service_cycle: Option<u64>,
     injector_started_at: [Option<u64>; 4],
     /// State of the four injector drivers, bit n = output n, active low
     /// (0 = injector open). See `latch_injector_outputs`.
@@ -574,6 +578,7 @@ impl Bus {
             iacv_pin: (false, 0),
             iacv_low_cycles: 0,
             elapsed_cycles: 0,
+            watchdog_last_service_cycle: None,
             injector_started_at: [None; 4],
             fuel_pump_active: false,
             mil_check_engine_light: false,
@@ -1028,7 +1033,9 @@ impl Bus {
         self.ram[idx] = val;
 
         // SFR side-effects
-        if addr == SFR_ADSCAN {
+        if addr == SFR_WDT {
+            self.watchdog_last_service_cycle = Some(self.elapsed_cycles);
+        } else if addr == SFR_ADSCAN {
             // ADSCAN.4 is the start/scan bit. Conversion is deliberately not
             // completed in this write: the firmware clears IRQH.4 immediately
             // after starting and then waits for hardware to set it again.

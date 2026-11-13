@@ -158,21 +158,12 @@ impl ReplayEngine {
         let start_cycle = cpu.cycles;
 
         while cpu.cycles - start_cycle < frame_cycles {
-            let before = cpu.cycles;
-            let instruction = Interpreter::step(cpu, bus);
-            if cpu.halted {
+            if let Err(stop) = crate::bench::step_machine(cpu, bus, engine, true) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "ROM execution stopped during replay at {:#06X}: {}",
-                        instruction.pc, instruction.mnemonic
-                    ),
+                    format!("ROM execution stopped during replay: {stop}"),
                 ));
             }
-
-            let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
-            let d_irq = engine.check_distributor_pulses(bus, cpu.cycles, crate::bus::CPU_HZ);
-            InterruptController::handle_pending_interrupts(cpu, bus, t_irq | d_irq);
         }
         Ok(())
     }
@@ -185,24 +176,19 @@ impl ReplayEngine {
             return Ok(());
         };
 
+        // The engine is stopped during power-on: no crank or VSS edges.
+        let mut engine = EngineState::new();
         for _ in 0..5_000_000 {
             if cpu.pc == ready_pc {
                 return Ok(());
             }
 
-            let before = cpu.cycles;
-            let instruction = Interpreter::step(cpu, bus);
-            if cpu.halted {
+            if let Err(stop) = crate::bench::step_machine(cpu, bus, &mut engine, false) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "ROM execution stopped during boot at {:#06X}: {}",
-                        instruction.pc, instruction.mnemonic
-                    ),
+                    format!("ROM execution stopped during boot: {stop}"),
                 ));
             }
-            let irq = bus.tick_timers((cpu.cycles - before) as u32);
-            InterruptController::handle_pending_interrupts(cpu, bus, irq);
         }
 
         Err(io::Error::new(
@@ -279,6 +265,7 @@ impl ReplayEngine {
                 .filter(|&a| a < bus.ram.len()).collect();
             let mut pram: Vec<u8> = wram.iter().map(|&a| bus.ram[a]).collect();
             let ready = Self::runtime_ready_pc(&bus.rom);
+            let mut idle_engine = EngineState::new();
             for _ in 0..8_000_000u64 {
                 if Some(cpu.pc) == ready || cpu.halted { break; }
                 let pc = cpu.pc;
@@ -289,8 +276,8 @@ impl ReplayEngine {
                     println!("PCW {:04X} A={:04X} LRB={:04X} DP={:04X} X1={:04X} cf={}",
                         pc, cpu.a, cpu.lrb, dp, x1, cpu.cf as u8);
                 }
-                let before = cpu.cycles;
-                Interpreter::step(&mut cpu, &mut bus);
+                // A stop halts the CPU, which ends the loop above.
+                let _ = crate::bench::step_machine(&mut cpu, &mut bus, &mut idle_engine, false);
                 if mode == "bootram" {
                     for (i, &a) in wram.iter().enumerate() {
                         let now = bus.ram[a];
@@ -300,8 +287,6 @@ impl ReplayEngine {
                         }
                     }
                 }
-                let irq = bus.tick_timers((cpu.cycles - before) as u32);
-                InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
             }
             return Ok(());
         }
@@ -317,13 +302,9 @@ impl ReplayEngine {
 
         Self::boot_to_runtime(&mut cpu, &mut bus)?;
 
-        let step = |cpu: &mut Cpu, bus: &mut Bus, engine: &mut EngineState| -> crate::interpreter::DisasmInstruction {
-            let before = cpu.cycles;
-            let ins = Interpreter::step(cpu, bus);
-            let t = bus.tick_timers((cpu.cycles - before) as u32);
-            let d = engine.check_distributor_pulses(bus, cpu.cycles, hz);
-            InterruptController::handle_pending_interrupts(cpu, bus, t | d);
-            ins
+        // A stop halts the CPU, which ends the loops below.
+        let step = |cpu: &mut Cpu, bus: &mut Bus, engine: &mut EngineState| -> &'static str {
+            crate::bench::step_machine(cpu, bus, engine, true).unwrap_or("?")
         };
 
         let warm = cpu.cycles + hz / 2;
@@ -371,7 +352,7 @@ impl ReplayEngine {
             }
             let ins = step(&mut cpu, &mut bus, &mut engine);
             if mode == "exec" && pc >= lo && pc <= hi && exec_lines < 400 {
-                println!("EXEC {:04X} {}", pc, ins.mnemonic);
+                println!("EXEC {:04X} {}", pc, ins);
                 exec_lines += 1;
             }
             if mode == "ramwatch" {
@@ -1102,17 +1083,9 @@ mod tests {
         let mut order = Vec::new();
         let mut counted = bus.injector_open_count;
         while cpu.cycles < end {
-            let before = cpu.cycles;
-            let instruction = Interpreter::step(&mut cpu, &mut bus);
-            assert!(
-                !cpu.halted,
-                "halted at {:#06X}: {}",
-                instruction.pc,
-                instruction.mnemonic
-            );
-            let irq = bus.tick_timers((cpu.cycles - before) as u32)
-                | engine.check_distributor_pulses(&mut bus, cpu.cycles, hz);
-            InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
+            if let Err(stop) = crate::bench::step_machine(&mut cpu, &mut bus, &mut engine, true) {
+                panic!("halted: {stop}");
+            }
 
             if cpu.cycles < settle {
                 counted = bus.injector_open_count;
@@ -1239,19 +1212,9 @@ mod tests {
         let start = cpu.cycles;
         let end = start + (seconds * hz as f64) as u64;
         while cpu.cycles < end {
-            let before = cpu.cycles;
-            let instruction = Interpreter::step(&mut cpu, &mut bus);
-            assert!(
-                !cpu.halted,
-                "halted at {:#06X}: {}",
-                instruction.pc,
-                instruction.mnemonic
-            );
-            let mut irq = bus.tick_timers((cpu.cycles - before) as u32);
-            if rpm > 0.0 {
-                irq |= engine.check_distributor_pulses(&mut bus, cpu.cycles, hz);
+            if let Err(stop) = crate::bench::step_machine(&mut cpu, &mut bus, &mut engine, rpm > 0.0) {
+                panic!("halted: {stop}");
             }
-            InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq);
             observe(&mut bus, (cpu.cycles - start) as f64 / hz as f64);
         }
         bus
@@ -1609,18 +1572,10 @@ mod tests {
                 cpu.pc
             );
 
-            let before = cpu.cycles;
-            let instruction = Interpreter::step(&mut cpu, &mut bus);
-            assert!(
-                !cpu.halted,
-                "halted at {:#06X}: {}",
-                instruction.pc,
-                instruction.mnemonic
-            );
-            let t_irq = bus.tick_timers((cpu.cycles - before) as u32);
-            let irq = t_irq | engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
-            dispatched +=
-                InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, irq) as u64;
+            match crate::bench::step_machine_dispatched(&mut cpu, &mut bus, &mut engine, true) {
+                Ok((_, entered)) => dispatched += entered as u64,
+                Err(stop) => panic!("halted: {stop}"),
+            }
 
             if reached_runtime && bus.injector_pulse_width_us > 0 {
                 break;

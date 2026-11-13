@@ -4,6 +4,7 @@
 
 mod cpu;
 mod bus;
+mod bench;
 mod ppi82c55;
 mod engine;
 mod interpreter;
@@ -137,14 +138,13 @@ fn main() {
 
             for _ in 0..cycles {
                 engine.sync_sensors_to_bus(&mut bus);
-                let before = cpu.cycles;
-                Interpreter::step(&mut cpu, &mut bus);
-
-                let timer_irq = bus.tick_timers((cpu.cycles - before) as u32);
-                let dist_irq = engine.check_distributor_pulses(&mut bus, cpu.cycles, crate::bus::CPU_HZ);
-
-                if InterruptController::handle_pending_interrupts(&mut cpu, &mut bus, timer_irq | dist_irq) {
-                    interrupts_handled += 1;
+                match bench::step_machine_dispatched(&mut cpu, &mut bus, &mut engine, true) {
+                    Ok((_, true)) => interrupts_handled += 1,
+                    Ok(_) => {}
+                    Err(stop) => {
+                        eprintln!("Execution stopped: {stop}");
+                        break;
+                    }
                 }
             }
 
