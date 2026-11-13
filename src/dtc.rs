@@ -1,11 +1,8 @@
 // Honda OBD1 ECU Complete Diagnostic Trouble Code (DTC / MIL) Subsystem
-// Covers all 30 official Honda OBD1 fault codes (Code 0 through Code 92)
+// Covers all 30 official Honda OBD1 fault codes (Code 0 through Code 92).
+// Only the catalogue of names: check reads the codes the ROM itself blinks.
 
-use crate::bus::{
-    Bus, P28_ADC_MAP, P28_ADC_TPS, P28_MUX_U5_ADCR1, P28_MUX_U6_ADCR0,
-    P28_U5_ECT_SELECT, P28_U6_HEGO_SELECT, SFR_ADCR0, SFR_P2, SFR_P2IO,
-};
-use crate::engine::EngineState;
+use crate::bus::{P28_ADC_EGR, P28_ADC_MAP, P28_ADC_TPS, P28_MUX_U5_ADCR1, P28_MUX_U6_ADCR0};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +64,7 @@ pub const ALL_HONDA_OBD1_DTCS: &[DtcInfo] = &[
     DtcInfo { code: DtcCode::Dtc09_CylinderPositionCyp, number: 9, name: "CYP Sensor Pulses", description: "Cylinder position pulse phase fault", channel_index: None },
     DtcInfo { code: DtcCode::Dtc10_IntakeAirTempIat, number: 10, name: "IAT Temp Sensor", description: "Intake air temperature voltage open/short", channel_index: None },
     DtcInfo { code: DtcCode::Dtc11_IgnitionSignalModule, number: 11, name: "Ignition Signal Module", description: "Distributor igniter module pulse missing", channel_index: None },
-    DtcInfo { code: DtcCode::Dtc12_EgrSystemValve, number: 12, name: "EGR System / Lift Sensor", description: "EGR valve position sensor out of range", channel_index: Some(crate::bus::P28_ADC_EGR) },
+    DtcInfo { code: DtcCode::Dtc12_EgrSystemValve, number: 12, name: "EGR System / Lift Sensor", description: "EGR valve position sensor out of range", channel_index: Some(P28_ADC_EGR) },
     DtcInfo { code: DtcCode::Dtc13_BarometricPressureBaro, number: 13, name: "BARO Sensor", description: "Atmospheric pressure sensor internal fault", channel_index: Some(P28_MUX_U6_ADCR0) },
     DtcInfo { code: DtcCode::Dtc14_IdleAirControlIacv, number: 14, name: "IACV Idle Control Valve", description: "Idle Air Control Valve open/short circuit", channel_index: None },
     DtcInfo { code: DtcCode::Dtc15_IgnitionOutputSignal, number: 15, name: "Ignition Output Driver", description: "Ignition coil primary circuit failure", channel_index: None },
@@ -86,155 +83,6 @@ pub const ALL_HONDA_OBD1_DTCS: &[DtcInfo] = &[
     DtcInfo { code: DtcCode::Dtc48_LinearAirFuelLafSensor, number: 48, name: "LAF Wideband Sensor", description: "Linear air-fuel ratio sensor circuit fault (Civic VX)", channel_index: None },
     DtcInfo { code: DtcCode::Dtc92_EvapPurgeControlSolenoid, number: 92, name: "EVAP Purge Solenoid", description: "Evaporative emissions purge solenoid circuit", channel_index: None },
 ];
-
-pub struct DtcEvaluator;
-
-impl DtcEvaluator {
-    fn adcr(channel: usize) -> u16 {
-        SFR_ADCR0 + channel as u16 * 2
-    }
-
-    /// Drive the three shared CD4051 address lines without disturbing the
-    /// lower P2 output latch. The stock P28 configures P2.5..P2.7 as outputs;
-    /// standalone diagnostic checks must do the same before sampling a mux.
-    fn select_p28_mux(bus: &mut Bus, select: usize) {
-        let p2io = bus.ram[SFR_P2IO as usize] | 0xE0;
-        let p2 = (bus.ram[SFR_P2 as usize] & 0x1F) | (select as u8 & 0x07) << 5;
-        bus.write_data_u8(SFR_P2IO, p2io);
-        bus.write_data_u8(SFR_P2, p2);
-    }
-
-    /// Recover the 10-bit A/D count (0..1023) from an ADCR register. The
-    /// converter result is stored left-justified in the 16-bit register
-    /// (bits 15..6, see `Bus::adc_result`), whereas these DTC plausibility
-    /// windows are expressed in raw count units, so shift the justification off
-    /// before comparing.
-    fn adc_count(bus: &mut Bus, addr: u16) -> u16 {
-        bus.read_data_u16(addr) >> 6
-    }
-
-    /// Test a specific DTC fault condition against the ECU bus and engine
-    pub fn test_dtc_code(info: &DtcInfo, bus: &mut Bus, engine: &mut EngineState) -> (bool, String) {
-        match info.code {
-            DtcCode::Dtc00_InternalEcuError => {
-                // The 8-bit modulo ROM checksum only proves a ROM is
-                // byte-for-byte OEM and fails on any legitimately modified or
-                // tuned ROM, so it is not used as a pass/fail signal. Report
-                // the internal processor self-test like the other non-sensor
-                // DTC circuit checks.
-                (true, "ECU internal ROM / processor self-test verified".to_string())
-            }
-
-            DtcCode::Dtc01_PrimaryO2Sensor => {
-                engine.o2_volts = 0.0;
-                engine.sync_sensors_to_bus(bus);
-                Self::select_p28_mux(bus, P28_U6_HEGO_SELECT);
-                bus.trigger_adc_conversion();
-                let adcr = Self::adc_count(bus, Self::adcr(P28_MUX_U6_ADCR0));
-                (
-                    adcr < 50,
-                    format!(
-                        "Primary O2 0.0V -> U6/X0 -> ADCR0: {} (DTC {} stimulus)",
-                        adcr, info.number
-                    ),
-                )
-            }
-
-            DtcCode::Dtc03_MapSensorHighLow | DtcCode::Dtc05_MapSensorCircuitRange => {
-                engine.map_kpa = 0.0;
-                engine.sync_sensors_to_bus(bus);
-                bus.trigger_adc_conversion();
-                let adcr = Self::adc_count(bus, Self::adcr(P28_ADC_MAP));
-                (
-                    adcr < 100,
-                    format!(
-                        "MAP pressure 0 kPa -> direct AI6/ADCR6: {} (DTC {} stimulus)",
-                        adcr, info.number
-                    ),
-                )
-            }
-
-            DtcCode::Dtc04_CrankshaftPositionCkp | DtcCode::Dtc08_TopDeadCenterTdc | DtcCode::Dtc09_CylinderPositionCyp => {
-                engine.ckp_pulse_count = 0;
-                engine.tdc_pulse_count = 0;
-                (true, format!("Distributor Pulse Missing at High RPM -> (DTC {} Triggered)", info.number))
-            }
-
-            DtcCode::Dtc06_EngineCoolantTempEct => {
-                engine.ect_celsius = -40.0;
-                engine.sync_sensors_to_bus(bus);
-                Self::select_p28_mux(bus, P28_U5_ECT_SELECT);
-                bus.trigger_adc_conversion();
-                let adcr = Self::adc_count(bus, Self::adcr(P28_MUX_U5_ADCR1));
-                (
-                    adcr > 900,
-                    format!("ECT open stimulus -> U5/X2 -> ADCR1: {adcr}"),
-                )
-            }
-
-            DtcCode::Dtc07_ThrottlePositionTps => {
-                engine.tps_pct = 0.0;
-                engine.sync_sensors_to_bus(bus);
-                // Closed throttle is a valid ~0.5 V signal. A grounded fault
-                // must override the physical AI7 pin after the engine mapping.
-                bus.adc_inputs[P28_ADC_TPS] = 0;
-                bus.trigger_adc_conversion();
-                let adcr = Self::adc_count(bus, Self::adcr(P28_ADC_TPS));
-                (
-                    adcr == 0,
-                    format!("TPS grounded -> direct AI7/ADCR7: {adcr}"),
-                )
-            }
-
-            DtcCode::Dtc10_IntakeAirTempIat => {
-                // Do not resurrect the old synthetic ADCR3 assignment: AI3 is
-                // the optional EGR position input on the stock P28. IAT's final
-                // mux endpoint still needs a verified board trace.
-                (
-                    true,
-                    "IAT ADC endpoint unresolved; no false direct-channel stimulus applied"
-                        .to_string(),
-                )
-            }
-
-            DtcCode::Dtc14_IdleAirControlIacv => {
-                bus.iacv_duty_cycle_pct = 0.0;
-                (true, format!("IACV Valve Circuit Fault -> Duty Cycle 0% (DTC 14 Triggered)"))
-            }
-
-            DtcCode::Dtc17_VehicleSpeedSensorVss => {
-                engine.rpm = 3000.0;
-                engine.speed_kmh = 0.0;
-                (
-                    true,
-                    "RPM 3000 with VSS pulse input absent; VSS is digital, not ADCR6"
-                        .to_string(),
-                )
-            }
-
-            DtcCode::Dtc21_VtecSolenoidValve => {
-                bus.vtec_solenoid_active = false;
-                bus.vtec_solenoid_connected = false;
-                (true, format!("VTEC Solenoid Disconnected -> (DTC 21 Triggered)"))
-            }
-
-            DtcCode::Dtc22_VtecOilPressureSwitch => {
-                bus.set_vtec_pressure_switch_closed(false);
-                (true, format!("VTEC Oil Pressure Switch Open -> (DTC 22 Triggered)"))
-            }
-
-            _ => {
-                (
-                    true,
-                    format!(
-                        "DTC {} ({}) catalog entry; board-level evaluator not modeled",
-                        info.number, info.name
-                    ),
-                )
-            }
-        }
-    }
-}
 
 /// The name of a Honda OBD1 fault code, if the table has it.
 pub fn code_name(number: u8) -> Option<&'static str> {

@@ -5,6 +5,11 @@ MSM66207 frame by frame. The emulator advances them on its 5 MHz machine-cycle
 timeline, but this is not a real-time or closed-loop engine/chassis simulation.
 Fuel, ignition, idle-control, VTEC, and DTC behavior are inspection targets.
 
+Replay presets give no verdict. To ask whether a ROM image is worth burning,
+use `hondaecu-cli check <rom.bin>`: it runs its own fixed script on a described
+car and reports what the ROM was observed to do, including the fault codes it
+blinks. See [`CHECK.md`](CHECK.md).
+
 ## How to Interpret a Replay
 
 A preset establishes only the **input stimulus**: RPM, MAP, TPS, temperatures,

@@ -3,6 +3,7 @@
 // Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI
 
 mod car;
+mod check;
 mod wiring;
 mod cpu;
 mod bus;
@@ -20,7 +21,6 @@ mod full_decoder;
 mod decoder;
 mod operand;
 mod exec;
-mod suite;
 mod interactive;
 mod replay;
 mod datalog_server;
@@ -28,13 +28,13 @@ mod datalog_server;
 mod fixtures;
 
 use std::env;
+use std::io::{self, IsTerminal};
 use std::process;
 use crate::cpu::Cpu;
 use crate::bus::Bus;
 use crate::engine::EngineState;
 use crate::interpreter::Interpreter;
 use crate::interrupts::InterruptController;
-use crate::suite::EcuTestSuite;
 use crate::interactive::InteractiveShell;
 use crate::replay::ReplayEngine;
 use crate::datalog_server::DatalogServer;
@@ -42,7 +42,10 @@ use crate::datalog_server::DatalogServer;
 fn print_usage() {
     println!("Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI");
     println!("Usage:");
-    println!("  hondaecu-cli test <rom.bin>                               Run automated ECU ROM test suite");
+    println!("  hondaecu-cli check <rom.bin> [options]                    Run the ROM on a described car and say if it is worth burning");
+    println!("      options: --ecu p28|p30  --board-gearbox manual|automatic  --car <preset|file>");
+    println!("               --set key=value  --report <file>  --no-prompt   (`test` does the same)");
+    println!("      exit status: 0 worth burning, 1 do not burn, 2 bad command line or file, 3 could not tell");
     println!("  hondaecu-cli datalog <rom.bin> [port]                     Start live serial datalogging TCP server (Port 38400)");
     println!("  hondaecu-cli replay <rom.bin> <log.csv|preset> [out.csv]  Replay CSV datalog / engine scenario through ECU");
     println!("  hondaecu-cli interactive <rom.bin>                        Launch interactive simulation REPL console");
@@ -56,7 +59,8 @@ fn print_usage() {
     println!("Examples:");
     println!("  ./hondaecu-cli datalog P28-230.bin 38400");
     println!("  ./hondaecu-cli replay P28-230.bin dyno-pull");
-    println!("  ./hondaecu-cli test P28-230.bin");
+    println!("  ./hondaecu-cli check P28-230.bin");
+    println!("  ./hondaecu-cli check P28-230.bin --car stock-p28-automatic --set knock_sensor=no --no-prompt");
     println!("  ./hondaecu-cli interactive P28-230.bin");
 }
 
@@ -89,29 +93,18 @@ fn main() {
             }
         }
 
-        "test" => {
-            let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
-            let results = EcuTestSuite::run_full_suite(rom_path);
-
-            println!("\nTest Results Summary:");
-            let mut total_passed = 0;
-            for res in &results {
-                let status = if res.passed {
-                    total_passed += 1;
-                    "[PASS]"
-                } else {
-                    "[FAIL]"
-                };
-                println!("  {:7} {} - {}", status, res.name, res.details);
-            }
-            println!("\nTotal: {}/{} tests passed ({:.1}%)\n",
-                     total_passed, results.len(), (total_passed as f32 / results.len() as f32) * 100.0);
-
-            if total_passed < results.len() {
-                process::exit(1);
-            }
+        "check" | "test" => {
+            let stdin = io::stdin();
+            let interactive = stdin.is_terminal();
+            let status = check::run(
+                &args[1..],
+                &mut stdin.lock(),
+                interactive,
+                &mut io::stdout(),
+                &mut io::stderr(),
+            );
+            process::exit(status);
         }
-
         "interactive" | "repl" => {
             let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
             if let Err(e) = InteractiveShell::run(rom_path) {

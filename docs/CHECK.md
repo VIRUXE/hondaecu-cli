@@ -1,5 +1,188 @@
 # ROM check
 
+`hondaecu-cli check <rom.bin>` answers one question for a tuner: is this ROM
+image worth burning to a chip and putting in the car? It runs the ROM on the
+modelled P28 box, wired to the car described in a "car" setup, drives the box
+through one fixed script of conditions (about 92 s of ECU time, roughly 20 s of
+wall time), looks only at what an observer outside the box could see, and
+prints one of three verdicts. `test` is an alias that runs exactly the same.
+
+It does not judge fuelling, ignition timing, or anything that needs a
+responding engine. Every `ok` line comes from something the executing ROM was
+observed to do; no result is a constant.
+
+## Running it
+
+```
+hondaecu-cli check <rom.bin> [--ecu p28|p30] [--board-gearbox manual|automatic]
+                             [--car <preset-name|file>] [--set key=value]...
+                             [--report <file>] [--no-prompt]
+```
+
+The ROM is opened and size-checked first: 32768 bytes, optionally followed by
+one 00 byte; anything else is refused with exit status 2 before any question is
+asked.
+
+### Describing the car
+
+A car is twelve values (`car.rs`, `KEYS`):
+
+| key | answers | meaning |
+|---|---|---|
+| `ecu` | `p28`, `p30` | ECU model |
+| `board_gearbox` | `manual`, `automatic` | gearbox the board is strapped for |
+| `gearbox` | `manual`, `automatic` | gearbox in the car |
+| `vtec` | `yes`, `no` | VTEC engine |
+| `knock_sensor` | `yes`, `no` | knock sensor fitted |
+| `o2_sensor` | `none`, `one-wire`, `heated` | oxygen sensor |
+| `iacv` | `stock`, `none`, ohms | idle air control valve |
+| `egr` | `yes`, `no` | EGR lift sensor |
+| `eld` | `yes`, `no` | electrical load detector |
+| `speed_sensor` | `yes`, `no` | vehicle speed sensor |
+| `ac` | `yes`, `no` | air conditioning |
+| `power_steering_switch` | `yes`, `no` | power steering pressure switch |
+
+Four ways to supply them, applied in this order, a later one overriding an
+earlier one:
+
+1. **Preset.** `--car stock-p28-manual | stock-p28-automatic | stock-p30`. With
+   no `--car`, the preset is `stock-p30` when an `ecu` of `p30` is given with
+   `--ecu` or `--set`, else `stock-p28-manual`. (A car file that says
+   `ecu = p30` does not change the preset it starts from.)
+2. **Car file.** `--car <path>` for anything that is not a preset name. Lines
+   are `key = value`; `#` starts a comment; blank lines are ignored; values may
+   be quoted. A leading UTF-8 byte-order mark (Notepad writes one) is ignored.
+   A bad line is refused with its number and exit status 2.
+3. **Arguments.** `--set key=value`, repeatable, and the shorthands `--ecu`
+   and `--board-gearbox`, in command-line order.
+4. **Questions.** When standard input is a terminal and `--no-prompt` is not
+   given, `check` first asks which preset to start from (unless `--car` was
+   given), then asks every key not yet given, each as plain words with the
+   accepted answers and the default in brackets:
+   `Knock sensor fitted? (yes/no) [no]: `. Enter takes the default; so does
+   the end of input. A wrong answer is asked again, three times in all, then
+   takes the default. Afterwards it offers `Save these answers to a file?
+   [path, or Enter to skip]`; the file reads back with `--car`.
+
+A value the user did not supply is **defaulted**, and the report heading lists
+those keys: `(defaulted: ...)`. Taking a default does not make a value given.
+`board_gearbox`, when not given, is set to the car's `gearbox` after all inputs
+are applied; it stays in the defaulted list.
+
+**Which values change the run today.** Only `board_gearbox` (the gearbox strap
+input), `vtec` (solenoid and pressure switch connected), `o2_sensor` (heater
+connected only when `heated`), `iacv` (`stock` or `none`; an ohms value is
+recorded but changes nothing) and `ac` (leaves out the A/C stage and the A/C
+switch) reach the board model (`wiring.rs`, `script.rs`). `ecu`, `gearbox`,
+`knock_sensor`, `egr`, `eld`, `speed_sensor` and `power_steering_switch` are
+recorded in the report and the saved file but are not wired to anything yet,
+so changing them does not change the verdict.
+
+### Exit status
+
+| status | meaning |
+|---|---|
+| 0 | worth burning |
+| 1 | do not burn |
+| 2 | bad command line, unreadable ROM or car file, or the report/save file could not be written (the verdict is still printed) |
+| 3 | could not tell, and nothing found wrong |
+
+`--report <file>` also writes the result as JSON (`report.rs`).
+
+## The script
+
+`script::stages` in `script.rs`. Coolant is 88 C in every stage but
+`cold idle`. Rpm is constant in a stage unless a range is given. Stages run
+back to back; if execution stops, the stage it stopped in is kept, cut short,
+and scripting ends.
+
+| stage | s | rpm | MAP kPa | TPS % | km/h | switches |
+|---|---|---|---|---|---|---|
+| key on | 6.0 | 0 | 100 | 0 | 0 | none |
+| cranking | 1.5 | 300 | 90 | 0 | 0 | starter |
+| cold idle (ECT 0 C) | 3.0 | 1500 | 45 | 0 | 0 | none |
+| warm idle | 8.0 | 800 | 35 | 0 | 0 | none |
+| idle, A/C on (only when `ac = yes`) | 4.0 | 800 | 40 | 0 | 0 | A/C |
+| cruise | 4.0 | 2500 | 45 | 15 | 60 | in gear |
+| full throttle | 14.0 | 2000 to 9000 | 98 | 100 | 100 | in gear |
+| lift off | 4.0 | 6000 to 1500 | 25 | 0 | 80 | in gear |
+| warm idle again | 8.0 | 800 | 35 | 0 | 0 | none |
+| code read-out | 40.0 | 800 | 35 | 0 | 0 | service connector grounded |
+
+Engine inputs are refreshed every 10 ms of ECU time.
+
+## The lines
+
+Two sections, `VALID FOR THIS ECU` and `RUNS A BASIC SETUP`. Every line is in
+one of three states: **ok**, **problem**, **could not tell**. An instruction
+the emulator does not implement is "could not tell"; an opcode the processor
+does not define is a "problem". A section is a problem if any line is, else
+could-not-tell if any line is, else ok. The rules below are those of
+`verdict.rs`.
+
+**Valid for this ECU**
+
+| line | ok when | problem when | could not tell when |
+|---|---|---|---|
+| executes | the run reached the end without stopping | it hit an undefined opcode | it hit an instruction the emulator does not implement |
+| settles after power-on | at most 16 BRKs in the first second, none later, watchdog served | more than 16 BRKs in the first second; a BRK after the first second (a reset); the watchdog unserved for 0.5 s | the run stopped before this could be judged |
+| talks only to this board | the board was programmed and no access fell outside it | the board was never programmed | any unmapped external read or write, or the 82C55 put in a mode the emulator lacks |
+
+**Runs a basic setup**
+
+| line | ok when | problem when | could not tell when |
+|---|---|---|---|
+| fuel pump prime | in `key on` the pump was on for 0.5 to 5 s and then off | otherwise | the run stopped before the stage |
+| cranking | the engine turned and every injector output opened | an output never opened | the engine did not turn, or the run stopped before the stage |
+| warm idle | at least 10 engine cycles; each output opened within 2 of the cycle count; ignitions at least 3 per cycle | an output opened 0 times or more than 2 away from the cycle count; too few ignitions | fewer than 10 engine cycles in the stage (`MIN_IDLE_ENGINE_CYCLES`), or the run stopped before it |
+| idle, A/C on | the clutch was engaged (the line exists only with `ac = yes`) | it never was | (not applicable) |
+| full throttle sweep | always ok when the stage ran; it reports where fuel stopped and where VTEC switched on | never | the run stopped before the stage |
+| check-engine light | never lit after the bulb check and the read-out was reached | lit at any time between the bulb check and the read-out | not lit, but the run stopped before the read-out |
+| codes | lamp off, or steady with the connector grounded (a steady lamp during the read-out means no code is stored) | one or more codes blinked; each is shown with its name from the catalogue in `dtc.rs` | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
+
+The bulb check is the lamp lit from power-on until the first lit-to-dark edge
+in `key on`.
+
+Lamp reading (`blink.rs`): with the connector grounded the ROM flashes each
+stored code; a blink lit at least 0.82 s is a tens digit and a shorter one is
+a ones digit, and a dark gap of at least 2.0 s ends a code. A lamp lit without
+a break for at least 10 s at the end of the window with no complete run in it
+is `Steady`.
+
+### The three verdicts
+
+- **WORTH BURNING** (exit 0): every line is ok.
+- **DO NOT BURN** (exit 1): at least one line is a problem. The verdict names
+  the first one, in the order printed.
+- **COULD NOT TELL** (exit 3): nothing is a problem, but at least one line is
+  could-not-tell. The verdict names the first one.
+
+A problem always wins over a could-not-tell. A line's `ok` means only that
+what the script looked at looked right; the `NOT JUDGED` line says what it
+did not look at.
+
+## Assumptions
+
+Numbers chosen here rather than measured on a car or taken from a document:
+
+- **Watchdog threshold.** The watchdog counts as unserved after 0.5 s
+  (`WATCHDOG_STARVED_SECONDS` in `bench.rs`). The real overflow period is on
+  manual pages missing from the scan.
+- **Boot window.** A boot is one second with at most 16 BRKs
+  (`BOOT_WINDOW_SECONDS`, `BOOT_BREAK_LIMIT`).
+- **Blink timing.** 0.82 s separates a tens blink from a ones blink, 2.0 s of
+  dark ends a code, 10 s lit without a break is a steady lamp
+  (`LONG_BLINK_MIN_SECONDS`, `CODE_GAP_MIN_SECONDS`, `STEADY_MIN_SECONDS` in
+  `blink.rs`).
+- **Verdict thresholds.** Fuel pump prime 0.5 to 5 s, injector openings within
+  2 of the engine cycles, 3 ignitions per cycle, 10 engine cycles minimum for
+  `warm idle` (`verdict.rs`). Fuel stop: an opening followed by two engine
+  cycles with none (`script.rs`).
+- **Static wiring.** Only the five values listed under "Which values change the
+  run today" are applied to the board; the rest of a car is not modelled.
+- **Coolant at 88 C.** Every stage but `cold idle`; see the VTEC finding below
+  for why the curve matters.
+
 ## Findings while building the script
 
 Measured on the stock P28-230 ROM, `stock-p28-manual` setup, one run of

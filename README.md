@@ -1,9 +1,9 @@
-# Honda OBD1 ECU (OKI MSM66207) Emulator & ROM Testing Suite in Rust
+# Honda OBD1 ECU (OKI MSM66207) Emulator & ROM Checker in Rust
 
 [![License](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org/)
 
-An experimental command-line emulator and ROM-inspection suite for the stock
+An experimental command-line emulator and ROM checker for the stock
 Honda P28 ECU, powered by an OKI MSM66207 16-bit CPU core and a developing
 peripheral/board model.
 
@@ -11,6 +11,7 @@ peripheral/board model.
 
 ## 📚 Documentation Index
 
+- ✅ [**ROM Check (`docs/CHECK.md`)**](docs/CHECK.md): What `check` does, the car values, the script, the rule behind every line, the verdicts, and the assumptions and findings behind them.
 - 📖 [**Scripted Stimulus & Fault-Injection Guide (`docs/SCENARIOS.md`)**](docs/SCENARIOS.md): Preset and CSV inputs, plus the boundary between an injected condition and an observed ROM response.
 - 🧠 [**OKI MSM66207 CPU Core — Findings & Implementation Notes (`docs/CPU_CORE.md`)**](docs/CPU_CORE.md): Instruction decoding/execution, machine-cycle timing, register and memory models, peripherals, stock-P28 observations, trace tooling, and known gaps.
 - 💉 [**Stock P28 Injection (`docs/INJECTION.md`)**](docs/INJECTION.md): How the ROM schedules and drives the injectors, the six defects that kept the emulator from sustaining injection, and how each was verified.
@@ -38,7 +39,7 @@ flowchart TD
     end
     
     subgraph Modes ["CLI Modes & Subcommands"]
-        Test["ROM and Hardware<br/>Sanity Checks"]
+        Check["check: is this ROM<br/>worth burning?"]
         Run["Timed Simulation Run"]
         REPL["Interactive REPL Shell<br/>(Step, Inspect, Set MAP/RPM, Dump)"]
         Disasm["Linear Disassembler"]
@@ -85,9 +86,10 @@ flowchart TD
 - **Tracked decoder ground truth**: `tests/fixtures/p28_dasm662.tsv` exercises
   mnemonic and length agreement for 10,914 stock-P28 instruction windows. It
   does not certify every execution semantic, peripheral, or board connection.
-- **DTC reference catalog**: The catalog is metadata. Scenario inputs and
-  synthetic evaluator checks are not proof that stock firmware qualified or
-  stored a DTC.
+- **ROM check**: `check` runs a ROM on the modelled box wired to a described
+  car and prints one verdict. See below and `docs/CHECK.md`.
+- **DTC name catalogue**: `dtc.rs` only maps fault-code numbers to names. The
+  codes `check` reports are the ones the ROM itself blinks on the MIL.
 
 ---
 
@@ -187,15 +189,43 @@ cargo build --release
 
 > **Note**: For Windows, replace `./hondaecu-cli` with `.\hondaecu-cli.exe`.
 
-### 1. Run Stock P28 ROM and Hardware Sanity Checks
+### 1. Check a ROM before burning it
+`check` runs the ROM on the modelled P28 box, wired to the car you describe,
+through one fixed script (about 92 s of ECU time, roughly 20 s of wall time),
+and prints one verdict. `test` is an alias.
 ```bash
-# Linux / macOS
-./hondaecu-cli test P28-230.bin
+# Linux / macOS: asks about the car when run in a terminal
+./hondaecu-cli check P28-230.bin
 
 # Windows (PowerShell / CMD)
-.\hondaecu-cli.exe test P28-230.bin
+.\hondaecu-cli.exe check P28-230.bin
+
+# No questions: a preset, a car file, or --set values; the rest is defaulted
+./hondaecu-cli check my-rom.bin --no-prompt
+./hondaecu-cli check my-rom.bin --car stock-p28-automatic --set knock_sensor=no
+./hondaecu-cli check my-rom.bin --car my-civic.txt --report result.json
 ```
 
+The car comes from, in order: a preset (`stock-p28-manual`,
+`stock-p28-automatic`, `stock-p30`), a car file of `key = value` lines
+(`--car <file>`), `--set key=value` and the shorthands `--ecu` and
+`--board-gearbox`, then questions when run in a terminal (skip them with
+`--no-prompt`). Anything you did not give is listed as `defaulted` in the
+report. The questions can save your answers to a file for `--car`.
+
+There are three verdicts:
+
+| verdict | exit status | meaning |
+|---|---|---|
+| `WORTH BURNING` | 0 | everything the script looked at looked right |
+| `DO NOT BURN` | 1 | something was wrong; the verdict names the first problem |
+| `COULD NOT TELL` | 3 | nothing was wrong, but something could not be judged |
+
+Exit status 2 is a bad command line or a file that cannot be read or
+written. The check does not judge fuelling, ignition timing, or anything that
+needs a responding engine. Only the car values listed in
+[`docs/CHECK.md`](docs/CHECK.md) change the run today; the others are
+recorded in the report.
 ### 2. ECU Datalog CSV Replay & Scripted Trace Playback
 Replay a CSV log or scripted sensor preset through the emulator and export its
 observed output fields. Scenario names describe stimuli, not verified ROM
@@ -283,43 +313,44 @@ in microseconds). `ramwatch` lines end with the machine-cycle count.
 
 ---
 
-## 🚦 Honda OBD1 Diagnostic Trouble Code (DTC) Matrix
+## 🚦 Honda OBD1 Diagnostic Trouble Code (DTC) Names
 
-The table is reference metadata. `CATALOGUED` does not mean the emulator has
-observed the stock ROM qualifying or storing that DTC:
+This is only the catalogue of names `check` uses to label a code. It says
+nothing about which codes the emulator or a ROM can set: `check` reports the
+codes the ROM blinks on the MIL, whatever they are.
 
-| DTC Code | Component Name | Description & Fault Condition | Status |
-|---|---|---|---|
-| **DTC 0** | ECU Internal ROM | Corrupt Checksum / Modulo Sum Mismatch (Solid CEL) | **CATALOGUED** |
-| **DTC 1** | Primary O2 Sensor | Signal out of range (<0.1V / >1.1V / Open circuit) | **CATALOGUED** |
-| **DTC 2** | Secondary O2 Sensor | Secondary O2 circuit fault (JDM / Lean spot) | **CATALOGUED** |
-| **DTC 3** | MAP Sensor High/Low | Manifold Absolute Pressure sensor out of bounds | **CATALOGUED** |
-| **DTC 4** | CKP Position Sensor | Crankshaft position pulse signal missing at high RPM | **CATALOGUED** |
-| **DTC 5** | MAP Sensor Range | Vacuum mismatch vs engine RPM/TPS | **CATALOGUED** |
-| **DTC 6** | ECT Engine Temp | Coolant temp sensor open (<0.2V) or shorted (>4.8V) | **CATALOGUED** |
-| **DTC 7** | TPS Throttle Sensor | Throttle position voltage out of bounds (<0.3V or >4.8V) | **CATALOGUED** |
-| **DTC 8** | TDC Sensor Pulses | Top Dead Center distributor pulse sync fault | **CATALOGUED** |
-| **DTC 9** | CYP Sensor Pulses | Cylinder position pulse phase fault | **CATALOGUED** |
-| **DTC 10** | IAT Intake Air Temp | Air temp voltage open (<0.2V) or shorted (>4.8V) | **CATALOGUED** |
-| **DTC 11** | Ignition Module | Distributor igniter module pulse missing | **CATALOGUED** |
-| **DTC 12** | EGR System | EGR valve position sensor out of range | **CATALOGUED** |
-| **DTC 13** | BARO Sensor | Atmospheric pressure sensor internal circuit fault | **CATALOGUED** |
-| **DTC 14** | IACV Idle Valve | Idle Air Control Valve open/short circuit | **CATALOGUED** |
-| **DTC 15** | Ignition Coil Output | Ignition coil primary circuit failure | **CATALOGUED** |
-| **DTC 16** | Injector Driver | Fuel injector driver transistor open/short | **CATALOGUED** |
-| **DTC 17** | VSS Speed Sensor | Missing speed pulse while RPM > 2000 & high MAP | **CATALOGUED** |
-| **DTC 19** | A/T Lockup Solenoid | Automatic transmission lockup solenoid circuit fault | **CATALOGUED** |
-| **DTC 20** | ELD Load Detector | Fuse box ELD current sensor out of range | **CATALOGUED** |
-| **DTC 21** | VTEC Solenoid | VTEC solenoid coil open/short circuit | **CATALOGUED** |
-| **DTC 22** | VTEC Pressure Switch | Low oil pressure / switch open when VTEC commanded | **CATALOGUED** |
-| **DTC 23** | Knock Sensor (KS) | Knock sensor circuit open or signal noise fault | **CATALOGUED** |
-| **DTC 30** | A/T Shift Signal A | Automatic transmission shift solenoid A circuit | **CATALOGUED** |
-| **DTC 31** | A/T Shift Signal B | Automatic transmission shift solenoid B circuit | **CATALOGUED** |
-| **DTC 41** | O2 Sensor Heater | Oxygen sensor heater element circuit open/short | **CATALOGUED** |
-| **DTC 43** | Fuel Supply System | Fuel pressure or O2 trim lean limit exceeded | **CATALOGUED** |
-| **DTC 45** | Fuel System Rich/Lean | Air/Fuel ratio out of closed-loop correction range | **CATALOGUED** |
-| **DTC 48** | LAF Wideband Sensor | Linear air-fuel ratio sensor circuit fault (Civic VX) | **CATALOGUED** |
-| **DTC 92** | EVAP Purge Solenoid | Evaporative emissions purge solenoid circuit | **CATALOGUED** |
+| DTC Code | Component Name | Description & Fault Condition |
+|---|---|---|
+| **DTC 0** | ECU Internal ROM | Corrupt Checksum / Modulo Sum Mismatch (Solid CEL) |
+| **DTC 1** | Primary O2 Sensor | Signal out of range (<0.1V / >1.1V / Open circuit) |
+| **DTC 2** | Secondary O2 Sensor | Secondary O2 circuit fault (JDM / Lean spot) |
+| **DTC 3** | MAP Sensor High/Low | Manifold Absolute Pressure sensor out of bounds |
+| **DTC 4** | CKP Position Sensor | Crankshaft position pulse signal missing at high RPM |
+| **DTC 5** | MAP Sensor Range | Vacuum mismatch vs engine RPM/TPS |
+| **DTC 6** | ECT Engine Temp | Coolant temp sensor open (<0.2V) or shorted (>4.8V) |
+| **DTC 7** | TPS Throttle Sensor | Throttle position voltage out of bounds (<0.3V or >4.8V) |
+| **DTC 8** | TDC Sensor Pulses | Top Dead Center distributor pulse sync fault |
+| **DTC 9** | CYP Sensor Pulses | Cylinder position pulse phase fault |
+| **DTC 10** | IAT Intake Air Temp | Air temp voltage open (<0.2V) or shorted (>4.8V) |
+| **DTC 11** | Ignition Module | Distributor igniter module pulse missing |
+| **DTC 12** | EGR System | EGR valve position sensor out of range |
+| **DTC 13** | BARO Sensor | Atmospheric pressure sensor internal circuit fault |
+| **DTC 14** | IACV Idle Valve | Idle Air Control Valve open/short circuit |
+| **DTC 15** | Ignition Coil Output | Ignition coil primary circuit failure |
+| **DTC 16** | Injector Driver | Fuel injector driver transistor open/short |
+| **DTC 17** | VSS Speed Sensor | Missing speed pulse while RPM > 2000 & high MAP |
+| **DTC 19** | A/T Lockup Solenoid | Automatic transmission lockup solenoid circuit fault |
+| **DTC 20** | ELD Load Detector | Fuse box ELD current sensor out of range |
+| **DTC 21** | VTEC Solenoid | VTEC solenoid coil open/short circuit |
+| **DTC 22** | VTEC Pressure Switch | Low oil pressure / switch open when VTEC commanded |
+| **DTC 23** | Knock Sensor (KS) | Knock sensor circuit open or signal noise fault |
+| **DTC 30** | A/T Shift Signal A | Automatic transmission shift solenoid A circuit |
+| **DTC 31** | A/T Shift Signal B | Automatic transmission shift solenoid B circuit |
+| **DTC 41** | O2 Sensor Heater | Oxygen sensor heater element circuit open/short |
+| **DTC 43** | Fuel Supply System | Fuel pressure or O2 trim lean limit exceeded |
+| **DTC 45** | Fuel System Rich/Lean | Air/Fuel ratio out of closed-loop correction range |
+| **DTC 48** | LAF Wideband Sensor | Linear air-fuel ratio sensor circuit fault (Civic VX) |
+| **DTC 92** | EVAP Purge Solenoid | Evaporative emissions purge solenoid circuit |
 
 ---
 
@@ -330,18 +361,25 @@ hondaecu-cli/
 ├── Cargo.toml
 ├── README.md
 ├── LICENSE
+├── docs/               # CHECK.md, SCENARIOS.md, CPU_CORE.md, INJECTION.md, P28_ARCHITECTURE.md
 └── src/
     ├── main.rs         # CLI Entrypoint & subcommand dispatcher
+    ├── check.rs        # The `check` command: arguments, questions, car file, report output
+    ├── car.rs          # The car: presets, car-file format, defaulted values
+    ├── wiring.rs       # Applies a car to the board model
+    ├── bench.rs        # The ECU box on a bench: run log, settling, MIL edges
+    ├── script.rs       # The fixed sequence of driving conditions and what it observes
+    ├── blink.rs        # Reads fault codes back from the MIL's blinks
+    ├── verdict.rs      # Three-state lines and the verdict
+    ├── report.rs       # Text and JSON rendering of the verdict
     ├── cpu.rs          # OKI MSM66207 CPU Register File & PSW Flags
     ├── bus.rs          # Memory Bus (32KB ROM / 4KB RAM), Timers, SFRs, ADC, PWM
     ├── engine.rs       # Virtual Engine Simulator, Sensor Signals, Distributor Pulses
     ├── interpreter.rs  # Machine Code Opcode Decoder & Interpreter
     ├── interrupts.rs   # ISR Vector Dispatcher (TM0-TM3, INT0, INT1, Serial RX)
-    ├── dtc.rs          # Honda OBD1 DTC metadata and selected synthetic checks
-    ├── suite.rs        # Observable ROM and hardware sanity checks
+    ├── dtc.rs          # Honda OBD1 fault-code names
     └── interactive.rs  # Interactive Debugging REPL Shell
 ```
-
 ---
 
 ## 📜 License
