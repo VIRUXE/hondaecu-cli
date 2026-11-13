@@ -779,6 +779,14 @@ unplugged / defective sensor"). How the board detects it is not known, so
 works, not that a real board takes it. The board ignores the frame the ROM
 sends it.
 
+P72 code (`ecu/bins/p72.bin`, and the ERM baseline built on it) has the same
+heartbeat check with its RAM moved (0x29A5..0x29D2: countdown `2FCh`, fault
+bit `B2h.3`, knock enable `227h.6` from option byte `5467h`) and the same
+read-out skip on `214h.7` (0x3529); on this board model it behaves as the
+P30 image does (`docs/CHECK.md`, "The three do-not-burn results, traced").
+That the P72 board's knock interface is the P30's is inferred from the code,
+not from a P72 schematic.
+
 A knock sensor on a P28 box (`ecu = p28`, `knock_sensor = yes`) is the
 Absent board: connector D10 goes only to FC1 pin 10 (sheet 5), so the ROM
 cannot see the sensor.

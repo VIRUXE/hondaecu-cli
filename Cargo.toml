@@ -22,5 +22,9 @@ rom-fixtures = ["p28-rom", "p30-rom", "launch-rom"]
 # The HTS D16Z6 base ROM (HONDAECU_HTS_ROM). A local opt-in only: it is not
 # part of `rom-fixtures` and CI has no copy of it.
 hts-rom = []
+# The UberData ERM baseline (HONDAECU_ERM_ROM) and the P72 image
+# (HONDAECU_P72_ROM). Local opt-ins like `hts-rom`.
+erm-rom = []
+p72-rom = []
 
 [dependencies]

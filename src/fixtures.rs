@@ -10,6 +10,9 @@
 //   feature `hts-rom`     + HONDAECU_HTS_ROM     the HTS D16Z6 base ROM (local
 //                                                only: not in `rom-fixtures`
 //                                                nor in CI)
+//   feature `erm-rom`     + HONDAECU_ERM_ROM     the UberData ERM baseline
+//                                                (local only, like hts-rom)
+//   feature `p72-rom`     + HONDAECU_P72_ROM     the P72 image (local only)
 //
 // Without the feature those tests are reported as ignored, never as passed.
 // With it, a path that is unset or does not name a file fails the test: a
@@ -22,6 +25,8 @@ pub const P28_ROM_ENV: &str = "HONDAECU_P28_ROM";
 pub const P30_ROM_ENV: &str = "HONDAECU_P30_ROM";
 pub const LAUNCH_ROM_ENV: &str = "HONDAECU_LAUNCH_ROM";
 pub const HTS_ROM_ENV: &str = "HONDAECU_HTS_ROM";
+pub const ERM_ROM_ENV: &str = "HONDAECU_ERM_ROM";
+pub const P72_ROM_ENV: &str = "HONDAECU_P72_ROM";
 
 /// Path of the stock P28-230 image. Panics if it is not configured or absent.
 pub fn p28_rom_path() -> String {
@@ -43,6 +48,19 @@ pub fn launch_rom_path() -> String {
 /// ROM"). Panics if it is not configured or absent.
 pub fn hts_rom_path() -> String {
     required(HTS_ROM_ENV, "the HTS D16Z6 base ROM")
+}
+
+/// Path of the UberData ERM baseline, `P28-ERMbaseline.bin` (docs/CHECK.md,
+/// "The three do-not-burn results, traced"). Panics if it is not configured
+/// or absent.
+pub fn erm_rom_path() -> String {
+    required(ERM_ROM_ENV, "the UberData ERM baseline ROM")
+}
+
+/// Path of the P72 image (same section). Panics if it is not configured or
+/// absent.
+pub fn p72_rom_path() -> String {
+    required(P72_ROM_ENV, "the P72 ROM")
 }
 
 fn required(var: &str, what: &str) -> String {

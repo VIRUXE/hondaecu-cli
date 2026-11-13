@@ -242,7 +242,11 @@ fn sweep(result: &RunResult) -> Line {
     staged(result, "full throttle sweep", "full throttle", |s| {
         let fuel = match s.fuel_stops_rpm {
             Some(r) => format!("fuel stops at {r:.0} rpm"),
-            None => format!("fuel never stopped below {SWEEP_TOP_RPM:.0} rpm"),
+            // Only injector openings are watched: a rev limiter that cuts
+            // spark alone (the lyonnel ROM, docs/CHECK.md) leaves no trace here.
+            None => format!(
+                "fuel never stopped below {SWEEP_TOP_RPM:.0} rpm (a limiter that cuts only spark is not looked for)"
+            ),
         };
         let vtec = match s.vtec_on_rpm {
             Some(r) => format!("VTEC switches on at {r:.0} rpm"),
@@ -641,7 +645,10 @@ mod tests {
         let r = judge(&c, &setup());
         let l = find(&r, "full throttle sweep");
         assert_eq!(l.state, State::Ok);
-        assert_eq!(l.text, "fuel never stopped below 9000 rpm, VTEC never switched on");
+        assert_eq!(
+            l.text,
+            "fuel never stopped below 9000 rpm (a limiter that cuts only spark is not looked for), VTEC never switched on"
+        );
         assert_eq!(r.exit_status(), 0);
     }
 

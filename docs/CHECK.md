@@ -170,7 +170,7 @@ could-not-tell if any line is, else ok. The rules below are those of
 | cranking | the engine turned and every injector output opened | an output never opened | the engine did not turn, or the run stopped before the stage |
 | warm idle | at least 10 engine cycles; each output opened within 2 of the cycle count; ignitions at least 3 per cycle | an output opened 0 times or more than 2 away from the cycle count; too few ignitions | fewer than 10 engine cycles in the stage (`MIN_IDLE_ENGINE_CYCLES`), or the run stopped before it |
 | idle, A/C on | the clutch was engaged (the line exists only with `ac = yes`) | it never was | (not applicable) |
-| full throttle sweep | always ok when the stage ran; it reports where fuel stopped and where VTEC switched on | never | the run stopped before the stage |
+| full throttle sweep | always ok when the stage ran; it reports where fuel stopped and where VTEC switched on. Only injector openings are watched: with no fuel stop it reads "fuel never stopped below 9000 rpm (a limiter that cuts only spark is not looked for)" | never | the run stopped before the stage |
 | check-engine light | never lit after the bulb check and the read-out was reached | lit at any time between the bulb check and the read-out ("lit at t s"), or never out after power-on ("never went out after power-on (still lit at 6.0 s)") | not lit, but the run stopped before the read-out |
 | codes | nothing blinked (lamp off, or steady with the connector grounded) and the check-engine light was not lit after the bulb check: "none blinked" | one or more codes blinked, each shown with its name from the catalogue in `dtc.rs`; or nothing blinked although the check-engine light was lit after the bulb check ("the ROM is showing a fault it does not blink") | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
 
@@ -776,9 +776,9 @@ these runs changed the model or the verdict rules.
 | `check ../../ecu/bins/p30_203.bin --ecu p28` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check` |
 | `check ../../ecu/bins/p30_usdm_203.bin --ecu p30` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7505 rpm, VTEC at 5315 rpm) |
 | `check ../../ecu/bins/p30_usdm_203.bin --ecu p28` | 0 | `VERDICT: WORTH BURNING` | none (same figures as on the P30 box) |
-| `check ../../ecu/bins/p72.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check` |
-| `check ../test-roms/P28-ERMbaseline.bin` | 1 | `VERDICT: DO NOT BURN - settles after power-on: resets at 5.3 s, 10.6 s, ... 105.8 s (program address 237Dh)` (20 resets, every 5.3 s) | `settles after power-on ... resets at 5.3 s, ...` |
-| `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` | `check-engine light ....... lit at 2.7 s, after the bulb check` |
+| `check ../../ecu/bins/p72.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.2 s, after the bulb check` | `check-engine light ....... lit at 2.2 s, after the bulb check`. True for a P28 box: knock enabled, no knock board, code 24 ("The three do-not-burn results, traced", P72) |
+| `check ../test-roms/P28-ERMbaseline.bin` | 1 | `VERDICT: DO NOT BURN - settles after power-on: resets at 5.3 s, 10.6 s, ... 105.8 s (program address 237Dh)` (20 resets, every 5.3 s) | `settles after power-on ... resets at 5.3 s, ...`. True: the ROM's own checksum fails (sum F9h, debug byte 547Eh = 00h); behind it, the P72 code's knock check, as for `p72.bin` (same section, ERM baseline) |
+| `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` | `check-engine light ....... lit at 2.7 s, after the bulb check`. **Wrong**: no fault is stored; the lamp is a key-on pulse display and a shift light that the lamp rule reads as a fault (same section, lyonnel) |
 | `check ../hts_D16Z6Baserom.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4755 rpm) |
 | `check ../../ecu/bins/p06.bin` | 2 | (refused) `cannot use ROM ../../ecu/bins/p06.bin: expected a 32768-byte ROM image (optionally followed by one 00 byte), got 32769 bytes` | n/a |
 | `check ../../ecu/bins/p1j.bin` | 2 | (refused) `... got 32860 bytes` | n/a |
@@ -790,19 +790,160 @@ explains yet:
   5685 rpm; "What the stock P30 does" above gives 8310 and 5690, which is
   what the same image shows today on the P28 box. 5 rpm is one step of the
   sweep; which change moved it was not traced.
-- **`p72.bin`** on a P28 box behaves like the P30 image there: the lamp lights
-  again at 2.2 s and the read-out blinks nothing ("none blinked, although the
-  check-engine light is on"). Not traced; the P30's cause (the knock board's
-  missing heartbeat, code 24) is the obvious candidate. It was not run with
-  `--ecu p30`.
-- **`P28-ERMbaseline.bin`** resets every 5.3 s: the BRK at 0x237D follows a
-  countdown in RAM `F6h` (0x2371..0x2378). Its `idle, A/C on` line is also a
-  problem ("the A/C clutch was never engaged") and its lamp is lit from
-  2.2 s. Its bytes sum to F9h. Not traced.
-- **`lyonnel-2.0-launch-ok.bin`** lights the lamp at 2.7 s and blinks
-  nothing; its fuel pump prime is 2.6 s (2.1 s on the others). Its
-  `full throttle sweep` line reads "fuel never stopped below 9000 rpm":
-  true, but its limiter does not cut fuel (`6126h` = FFh, see "HTS base
-  ROM"), and a `trace` snapshot at 7500 rpm found the spark-cut flag `E6h.0`
-  set. A tuner reading that line as "no rev limiter" would be wrong; the
-  line reports fuel only.
+- **`p72.bin`**, **`P28-ERMbaseline.bin`** and **`lyonnel-2.0-launch-ok.bin`**:
+  traced in the next section.
+- **`lyonnel-2.0-launch-ok.bin`**'s `full throttle sweep` line read "fuel
+  never stopped below 9000 rpm": true, but its limiter does not cut fuel
+  (`6126h` = FFh, see "HTS base ROM"), and a `trace` snapshot at 7500 rpm
+  found the spark-cut flag `E6h.0` set. A tuner could have read that line as
+  "no rev limiter". The line now says that a spark-only limiter is not
+  looked for.
+
+## The three do-not-burn results, traced
+
+Each image was run through `check --no-prompt` as in the table above, then
+on the P30 box (`--ecu p30`, knock sensor fitted and not), with RAM read at
+the end of the run and, where needed, a bench run watching program
+addresses. Disassembly of the two `test-roms` images is from their `.asm`
+listings, checked against `hondaecu-cli disasm`. Acceptance cases:
+`erm_baseline_resets_on_its_own_checksum`,
+`erm_baseline_with_a_good_checksum_needs_a_knock_board` (feature `erm-rom`),
+`p72_needs_a_knock_board` (`p72-rom`) and
+`lyonnel_lamp_shows_two_displays_and_no_fault` (`launch-rom`). No model or
+emulator file changed.
+
+| image | `check` said | what the ROM does | verdict for the setup run |
+|---|---|---|---|
+| `P28-ERMbaseline.bin` | resets every 5.3 s | its own checksum fails and it resets itself; behind that, the knock check of `p72.bin` | **true** for the file as distributed, on any box |
+| `p72.bin` | lamp lit at 2.2 s, nothing blinked | knock control enabled; no knock board on a P28 box, code 24 stored | **true** for a P28 box; worth burning on a box with a knock board |
+| `lyonnel-2.0-launch-ok.bin` | lamp lit at 2.7 s, nothing blinked | stores no fault; the lamp gives four pulses after the bulb check and is a shift light above 8408 rpm | **wrong**: the lamp rule takes a display for a fault |
+
+### ERM baseline: its own checksum
+
+`P28-ERMbaseline.bin` is P72 code, not P28-230 code: it differs from
+`p72.bin` in 1579 bytes, mostly tables and option bytes, some at the end of
+the erased area 0x6761..0x7C49 (the README in `test-roms` places UberData's
+launch code at 0x6E00), plus a few code changes (for example a jump at
+0x2173 into new code at 0x6576). The vectors (0x0000..0x0037), the reset
+and checksum code (0x2360..0x2A2F), the read-out code around 0x3529 and the
+option copy at 0x5350..0x538F are byte for byte the P72's. The stock P28 addresses in the brief
+(0x282A..0x2866, 0x2855, RAM `EBh`, option `6011h`) do not apply; the same
+mechanism is here:
+
+```
+29E4  CLR X2 ; MOV er0, 39Ah[X2]      ; er0 = block number 0..1FFh
+29EA  ... MUL ; MOV X1, A             ; X1 = block x 64
+29F0  MOV DP, #20h ; MOVB r0, 39Ch[X2]  ; 32 words; r0 = running sum
+29F7  LC A, [X1] ; ADDB A, ACCH ; ADDB r0, A ; INC X1 ; INC X1 ; JRNZ DP, 29F7
+2A06  INC 39Ah[X2] ; CMP 39Ah[X2], #200h ; JNE 2A2A   ; not the last block
+2A12  CLR 39Ah[X2] ; LB A, r0 ; JEQ 2A2A               ; sum 0: fine
+2A19  CLRB 39Ch[X2] ; LCB A, 547Eh ; JNE 2A2A          ; 547Eh non-zero: ignore
+2A23  MOVB F5h, #48h ; J 237A
+237A  SB B7h.1
+237D  BRK
+```
+
+One 64-byte block per main-loop pass, 512 passes for the 32 KB; the 8-bit
+sum of all of it must be 0, unless option byte `547Eh` is non-zero. The
+pgmfi wiki's P72 page names `547Eh` "Debug Mode (0xFF enables, 0x00
+disables)". `F5h` is the reset reason the boot code reads after the BRK
+(0x2393): 44h from the watchdog vector (0x236D), 45h from the unused
+interrupt vectors (0x2367), 4Dh and 4Fh from two run-time checks (0x2C0F,
+0x366F), 48h from this one.
+
+In the image as distributed the bytes sum to **F9h** and `547Eh` is **00h**.
+Observed on the model: 0x2A23 runs 5.29 s after power-on, the BRK at 0x237D
+follows within a millisecond, and no other path into the reset code runs;
+then the same after every pass, 20 times in the script, 5.29 s apart. The
+path depends on nothing the board model supplies: the ROM reads its own
+code memory with `LC` and adds bytes. A real MSM66207 executing this image
+sums the same bytes and resets on the same schedule, so **"do not burn" is
+true of this file as distributed**. Nothing in the workspace says why the
+distributed file is in this state; a likely reading, not checked, is that it
+is meant to be opened in UberData, which would write a correct checksum (or
+set `547Eh`) when it saves. Burned as downloaded, it resets every 5.3 s.
+
+The `idle, A/C on` problem in the same run is a side effect: a reset fell in
+that stage. With the sum corrected (one byte of the erased fill, 0x7000, from
+FFh to 06h) the resets stop and the A/C clutch is engaged; what remains is
+the next finding, as for `p72.bin`: lamp lit at 2.2 s, code 24 stored, nothing
+blinked, do not burn on the P28 box; on the P30 box with a knock sensor,
+worth burning. So the tuner's real fix is two edits in the tuning tool:
+a correct checksum and, for a P28 box, knock control off.
+
+### P72: knock control on, no knock board
+
+The P72 code carries the P30's knock checks, moved: option byte `5467h`
+(FFh in both P72-code images; the wiki's P72 page: "Knock Sensor
+(enable=FF/disable=00)", RAM `227h.6` "Knock Sensor Enable Flag") is copied
+into `227h.6` at 0x535E, and 0x29A5..0x29D2 is the P30's heartbeat check at
+0x27F7 with its RAM moved: port A bit 2 against `232h.6`, the countdown at
+`2FCh` (the P30's `2E8h`) reloaded with 0Ah unless the frame is bad and
+`C5h` (the P30's `ADh`) is at most 0Dh, the fault bit `B2h.3` (the P30's
+`9Ah.3`). On a P28 box the heartbeat
+never comes: observed `2FCh` = 0, `214h` = 80h (fault bit 23, code 24), the
+lamp lit again 0.1 s after the bulb check (2.19 s), and the read-out holds it
+lit without blinking: 0x3529 `JBS 214h.7` is the P30's 0x3634. The same as
+the P30 image on a P28 box ("What the stock P30 does"), for the same
+reason. This needs no knock board model beyond the one the P30 already has.
+
+| setup | verdict | codes |
+|---|---|---|
+| `stock-p28-manual` | do not burn: lamp lit at 2.2 s | stored 24, blinked none |
+| `stock-p30` (`--ecu p30`, knock sensor fitted) | worth burning (fuel stops at 8140 rpm, VTEC at 4440 rpm) | none |
+| `stock-p30`, `knock_sensor = no` | do not burn: lamp lit at 9.6 s | 23 blinked and stored |
+
+The P72 is the Integra GS-R box (wiki), whose engine has a knock sensor, and
+the image ships with knock control on, so the box it is made for has a knock
+board; the model's P30 box (P28 board plus knock board) is the closest
+setup, and on it the image runs clean. Whether the P72 board's knock
+interface is the P30's is inferred from the code being the same, not from a
+P72 schematic. **"Do not burn" is true for the P28 box it was run on**: in a
+P28 the lamp stays lit and the read-out shows no code. The wiki's P72 page
+offers "P72 ROM with knock disabled + good checksum" for that use.
+
+### lyonnel: the lamp is a display, not a fault
+
+The lyonnel image (HTS code, see "HTS base ROM"; knock option `61F3h`, copied
+into `227h.6` at 0x4EFE, is 00h, so no knock check) stores **no fault**: `212h..215h`
+are 0 at the end of every run, and the read-out shows the steady no-code
+lamp. Its lamp is driven by 0x3DE1..0x3E0B, which computes the lamp request
+into `222h.3`, and 0x5D91..0x5DC9, which copies it to P1.4 unless a shift
+light overrides it. (So `222h.3` in HTS code is the lamp request; the "HTS
+base ROM" section's reading of it, "set from power-on while the crank is
+still", describes the bulb check.) Two things in it are not in the stock
+ROM, and `check` sees both:
+
+- **Key-on pulses.** The bulb check is the counter `2C6h`, counted down every
+  0.1 s (0x4C04), lamp lit while it is non-zero. When it reaches 0 with
+  `217h.5` set (engine not running), 0x5A71..0x5A8B reloads it with 4 and
+  counts the reload in `413h`, until `413h` reaches option byte `6020h`. In
+  lyonnel `6020h` = **04h** (00h in the HTS base ROM): after the bulb check
+  ends at 2.60 s the lamp gives four pulses, lit 0.3 s and dark 0.1 s, from
+  2.70 s to 4.24 s, then stays dark. What the display is for is not
+  documented in the workspace.
+- **Shift light.** With option byte `6142h` non-zero (FFh) and `6143h` zero,
+  0x5DAB..0x5DC9 lights the lamp while the engine period `C4h` is below the
+  word at `6144h`, 00DFh: above 1875000 / 223 = **8408 rpm**. Observed lit
+  from 39.36 s to 40.53 s, the top of `full throttle`, and on a bench at
+  8600 and 8900 rpm, never at 8300.
+
+`check` takes the first lit edge after the bulb check as a fault: "lit at
+2.7 s", and then calls the quiet read-out "the ROM is showing a fault it
+does not blink". With `6020h` set to 00h the verdict becomes "lit at 39.4 s"
+(the shift light); with `6142h` also 00h it is **worth burning**, with every
+line ok. So the emulator and the board model are not at fault, and a real
+P28 box would show the same lamp; **the verdict is wrong** for this ROM: the
+lamp rule in "The lines" assumes that a lamp lit after the bulb check means
+a stored fault, and this ROM uses the lamp for other things. Nothing an
+observer outside the box sees distinguishes these displays from a fault in
+general (both are the same lamp); telling them apart would take a rule
+about the lamp's shape (pulses that end during `key on`, a lamp lit only
+above a fixed rpm), which is a design change to the lamp rule and has not
+been made. The acceptance case pins the current reading so that such a
+change shows up there.
+
+Two other lyonnel observations: the fuel pump prime is 2.6 s (2.1 s on the
+others), the same length as its bulb check (lamp dark at 2.60 s), not traced
+further; and its rev limiter cuts spark only, which the `full throttle
+sweep` line now says it does not look for.

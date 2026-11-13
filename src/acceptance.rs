@@ -1,7 +1,9 @@
 //! Acceptance: the whole `check` pipeline (script, wiring, verdict) on the
 //! stock P28-230 ROM, manual and automatic, and on the stock P30 mask-203
-//! ROM. Every test needs its ROM image (feature `p28-rom` or `p30-rom`);
-//! each full run is about 20 s of wall time.
+//! ROM, and on community images (HTS base, ERM baseline, P72, lyonnel).
+//! Every test needs its ROM image (feature `p28-rom`, `p30-rom`, `hts-rom`,
+//! `erm-rom`, `p72-rom` or `launch-rom`); each full run is about 20 s of
+//! wall time.
 
 use crate::bench::Bench;
 use crate::blink::Lamp;
@@ -467,4 +469,200 @@ fn case_7_gearbox_mismatch() {
             assert_eq!(bench.bus.ram[0x216] & 0x08, 0, "{case}: 216h.3");
         }
     }
+}
+
+// The three community images `check` judged do-not-burn without a traced
+// reason (docs/CHECK.md, "The three do-not-burn results, traced").
+
+fn erm_rom() -> String {
+    crate::fixtures::erm_rom_path()
+}
+
+/// The ERM image with its byte sum brought to 0 by one byte in the erased
+/// fill at 0x6761..0x7C49 (no code reads it): FFh + 07h, the sum being F9h.
+fn erm_with_good_checksum() -> Vec<u8> {
+    let mut image = std::fs::read(erm_rom()).unwrap();
+    image.truncate(32768);
+    let sum = image.iter().fold(0u8, |s, &b| s.wrapping_add(b));
+    assert_eq!(sum, 0xF9, "byte sum of the ERM image as distributed");
+    assert_eq!(image[0x7000], 0xFF);
+    image[0x7000] = 0xFF_u8.wrapping_sub(sum); // 06h
+    assert_eq!(image.iter().fold(0u8, |s, &b| s.wrapping_add(b)), 0);
+    image
+}
+
+#[test]
+#[cfg_attr(not(feature = "erm-rom"), ignore = "needs the UberData ERM baseline: enable feature erm-rom")]
+fn erm_baseline_resets_on_its_own_checksum() {
+    // The ROM sums its own 32 KB, 64 bytes per main-loop pass (0x29E4..0x2A00,
+    // `LC A, [X1]` over code memory), 512 passes for the whole image. At the
+    // end, a non-zero sum with option byte 547Eh at 00h (the pgmfi wiki's
+    // P72 page: "Debug Mode", FFh enables) stores 48h in F5h (0x2A23) and
+    // jumps to 0x237A: SB B7h.1, BRK at 0x237D. The image's bytes sum to F9h
+    // and its 547Eh is 00h, so it resets after every full pass: on a real
+    // chip as here. Observed: every 5.3 s.
+    let image = std::fs::read(erm_rom()).unwrap();
+    assert_eq!(image[0x547E], 0x00, "547Eh");
+    let (result, report, bench) = check_bench(Bench::new(&image[..32768]), &preset("stock-p28-manual"));
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("settles after power-on: resets at 5.3 s, 10.6 s")),
+        "{report:#?}"
+    );
+    match &result.settling {
+        crate::bench::Settling::ResetsLater { times, pc } => {
+            assert_eq!(*pc, 0x237D);
+            assert_eq!(times.len(), 20, "{times:?}");
+            for w in times.windows(2) {
+                assert!((w[1] - w[0] - 5.29).abs() < 0.05, "{times:?}");
+            }
+        }
+        s => panic!("{s:?}"),
+    }
+    assert!(bench.log.breaks.iter().filter(|b| b.t > 1.0).all(|b| b.pc == 0x237D));
+
+    // The reason byte: 0x2A23 (F5h = 48h, the checksum) runs just before the
+    // first reset, and no other path into 0x2371 (44h watchdog interrupt,
+    // 45h unused interrupt, 4Dh port check, 4Fh IE check) does.
+    let mut bench = Bench::new(&image[..32768]);
+    let setup = preset("stock-p28-manual");
+    crate::wiring::apply_static(&mut bench.bus, &setup);
+    crate::wiring::apply_engine(&mut bench.engine, &setup);
+    bench.engine.rpm = 800.0;
+    bench.engine.map_kpa = 35.0;
+    bench.engine.ect_celsius = 88.0;
+    bench.engine.sync_sensors_to_bus(&mut bench.bus);
+    let mut entries = Vec::new();
+    assert!(bench.run_observed(6.0, |b| {
+        if [0x2367, 0x236D, 0x2A23, 0x2C0F, 0x366F].contains(&b.cpu.pc) {
+            entries.push((b.seconds(), b.cpu.pc));
+        }
+    }));
+    let first_reset = bench.log.breaks.iter().find(|b| b.t > 1.0).unwrap().t;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].1, 0x2A23);
+    assert!(first_reset > entries[0].0 && first_reset - entries[0].0 < 0.001, "{entries:?} {first_reset}");
+}
+
+#[test]
+#[cfg_attr(not(feature = "erm-rom"), ignore = "needs the UberData ERM baseline: enable feature erm-rom")]
+fn erm_baseline_with_a_good_checksum_needs_a_knock_board() {
+    // With the sum corrected the resets stop and the A/C line passes (the
+    // clutch was missed only because a reset fell in that stage). What is
+    // left is the P72 code's knock check: option byte 5467h = FFh (the
+    // wiki's P72 page: "Knock Sensor", enable=FF) sets 227h.6 (0x535E), and
+    // 0x29A5..0x29D2 then wants the knock board's heartbeat on port A bit 2,
+    // as the P30 does at 0x27F7. On a P28 box it never comes: B2h.3 is set,
+    // fault bit 23 (214h.7) stored at about 2.2 s, and the read-out skips
+    // the blink (0x3529 `JBS 214h.7`, the P30's 0x3634) and holds the lamp
+    // lit. On the P30 box (P28 board plus knock board) it is worth burning.
+    let image = erm_with_good_checksum();
+    let (result, report, bench) = check_bench(Bench::new(&image), &preset("stock-p28-manual"));
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    assert!(matches!(result.settling, crate::bench::Settling::Settled { .. }), "{:?}", result.settling);
+    let ac = report.runs.lines.iter().find(|l| l.label == "idle, A/C on").unwrap();
+    assert_eq!(ac.state, State::Ok);
+    let lit = result.mil_first_lit_after_bulb_check.unwrap();
+    assert!((lit - 2.2).abs() < 0.05, "{lit}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert_eq!(stored_codes(&bench), vec![24]);
+    assert_ne!(bench.bus.ram[0x227] & 0x40, 0, "227h.6");
+
+    let (_, report, bench) = check_bench(Bench::new(&image), &preset("stock-p30"));
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+}
+
+fn p72_rom() -> String {
+    crate::fixtures::p72_rom_path()
+}
+
+#[test]
+#[cfg_attr(not(feature = "p72-rom"), ignore = "needs the P72 ROM: enable feature p72-rom")]
+fn p72_needs_a_knock_board() {
+    // The ERM baseline is this code (1579 bytes differ, calibration and
+    // options); the P72 image sums to 0 and does not reset. Knock option
+    // 5467h = FFh, so on a P28 box: the heartbeat check at 0x29A5..0x29D2
+    // fails, fault bit 23 (214h.7) stored at about 2.2 s, no blink
+    // (0x3529), lamp held lit. The P72 (Integra GS-R) is a knock-board box;
+    // the model's P30 box carries the same board: worth burning with the
+    // sensor, code 23 without (the board's frame bit 8, as for the P30).
+    let rom = p72_rom();
+    let image = std::fs::read(&rom).unwrap();
+    assert_eq!(image[0x5467], 0xFF, "5467h");
+    let (result, report, bench) = check_rom_bench(&rom, &preset("stock-p28-manual"));
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    let lit = result.mil_first_lit_after_bulb_check.unwrap();
+    assert!((lit - 2.2).abs() < 0.05, "{lit}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert!(report.codes.is_empty());
+    assert_eq!(stored_codes(&bench), vec![24]);
+    assert_ne!(bench.bus.ram[0x227] & 0x40, 0, "227h.6");
+
+    let (_, report, bench) = check_rom_bench(&rom, &preset("stock-p30"));
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+
+    let mut setup = preset("stock-p30");
+    setup.set("knock_sensor", "no").unwrap();
+    let (result, _, bench) = check_rom_bench(&rom, &setup);
+    assert_eq!(result.lamp, Lamp::Codes(vec![23]));
+    assert_eq!(stored_codes(&bench), vec![23]);
+}
+
+fn check_rom_bench(path: &str, setup: &Setup) -> (RunResult, Report, Bench) {
+    check_bench(Bench::from_file(path).unwrap_or_else(|e| panic!("{path}: {e}")), setup)
+}
+
+fn launch_rom() -> String {
+    crate::fixtures::launch_rom_path()
+}
+
+#[test]
+#[cfg_attr(not(feature = "launch-rom"), ignore = "needs the launch-control ROM: enable feature launch-rom")]
+fn lyonnel_lamp_shows_two_displays_and_no_fault() {
+    // The lyonnel ROM stores no fault. Its lamp (HTS code: 0x3DE1..0x3E0B
+    // computes the lamp request into 222h.3, 0x5D91..0x5DC9 drives P1.4)
+    // does two things the stock ROM does not:
+    // - after the bulb check (2C6h counted down every 0.1 s, 0x4C04), while
+    //   217h.5 is set (engine not running), 0x5A71..0x5A8B reloads 2C6h
+    //   with 4 as many times as option byte 6020h says (04h here, 00h in the
+    //   HTS base ROM): four 0.3 s pulses from 2.7 s;
+    // - with option byte 6142h non-zero (FFh) and 6143h zero the lamp is a
+    //   shift light: lit while the period C4h is below the word at 6144h
+    //   (00DFh, 8408 rpm), observed lit from 39.4 s, the top of `full
+    //   throttle`.
+    // `check` reads the first as a fault ("lit at 2.7 s"), which is wrong for
+    // this ROM: the verdict below is the tool's current reading, pinned so
+    // that a change to the lamp rule shows up here (docs/CHECK.md).
+    let rom = launch_rom();
+    let image = std::fs::read(&rom).unwrap();
+    assert_eq!((image[0x6020], image[0x6142], image[0x6143]), (0x04, 0xFF, 0x00));
+    let (result, report, bench) = check_rom_bench(&rom, &preset("stock-p28-manual"));
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at 2.7 s")),
+        "{report:#?}"
+    );
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+    assert_eq!(result.lamp, Lamp::Steady);
+    let edges = bench.mil_edges();
+    let key_on = stage(&result, "key on");
+    let lit_in_key_on = edges.iter().filter(|e| e.1 && e.0 > 1.0 && e.0 < key_on.to).count();
+    assert_eq!(lit_in_key_on, 4, "{edges:?}");
+    let full = stage(&result, "full throttle");
+    let shift = edges.iter().find(|e| e.1 && e.0 > key_on.to).unwrap().0;
+    assert!(shift > full.from + 12.0 && shift < full.to, "{edges:?}");
+
+    // Both options off: nothing else lights the lamp, worth burning.
+    let mut patched = image[..32768].to_vec();
+    patched[0x6020] = 0x00;
+    patched[0x6142] = 0x00;
+    let (result, report, _) = check_bench(Bench::new(&patched), &preset("stock-p28-manual"));
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert_eq!(result.mil_first_lit_after_bulb_check, None);
 }

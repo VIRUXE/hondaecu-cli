@@ -9,6 +9,9 @@ HONDAECU_P30_ROM = { value = "../../ecu/bins/p30_203.bin", relative = true }
 HONDAECU_LAUNCH_ROM = { value = "../test-roms/lyonnel-2.0-launch-ok.bin", relative = true }
 # Read only with the `hts-rom` feature, which `rom-fixtures` does not include.
 HONDAECU_HTS_ROM = { value = "../hts_D16Z6Baserom.bin", relative = true }
+# Read only with the `erm-rom` / `p72-rom` features, local opt-ins like `hts-rom`.
+HONDAECU_ERM_ROM = { value = "../test-roms/P28-ERMbaseline.bin", relative = true }
+HONDAECU_P72_ROM = { value = "../../ecu/bins/p72.bin", relative = true }
 
 [alias]
 # Everything, including the ROM-backed tests.
