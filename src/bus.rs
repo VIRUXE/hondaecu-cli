@@ -168,6 +168,34 @@ pub const SFR_PWMR1: u16  = 0x76;
 pub const SFR_PWCON0: u16 = 0x78;
 pub const SFR_PWCON1: u16 = 0x7A;
 
+// PWCON0/PWCON1 layout, MSM66207 user's manual Fig. 10-2 (p. 99).
+/// Bit 7: this PWM's counter overflow has requested the shared interrupt.
+pub const PWCON_IRQ: u8 = 1 << 7;
+/// Bit 6: counter overflows request IRQ bit 13.
+pub const PWCON_ERQ: u8 = 1 << 6;
+/// Bit 5: the output pin is low while the output F/F is set.
+pub const PWCON_INV: u8 = 1 << 5;
+/// Bit 4: the counter runs.
+pub const PWCON_RUN: u8 = 1 << 4;
+/// Bit 3: PWM mode (bit 2 is then a don't-care).
+pub const PWCON_PWM_MODE: u8 = 1 << 3;
+/// Bit 2, with bit 3 clear: free-run counter mode instead of auto reload.
+pub const PWCON_FREE_RUN: u8 = 1 << 2;
+
+/// (counter, register, control) SFRs of PWM0 and PWM1.
+const PWMS: [(u16, u16, u16); 2] = [
+    (SFR_PWMC0, SFR_PWMR0, SFR_PWCON0),
+    (SFR_PWMC1, SFR_PWMR1, SFR_PWCON1),
+];
+
+/// Bits of PWMC/PWMR in use for PWCON bits 1..0 (Table 10-2). The matching
+/// time-base tap -- TBC7, 9, 11 or 15 -- has a period of exactly `2^bits`
+/// machine cycles (Table 10-4: 51.2 us, 204.8 us, 819.2 us, 13.1072 ms at
+/// 10 MHz), which is what lets PWMR express duty as a fraction of the period.
+fn pwm_bits(pwcon: u8) -> u32 {
+    [8, 10, 12, 16][(pwcon & 0x03) as usize]
+}
+
 pub const SFR_SRBUF: u16  = 0x55;
 pub const SFR_STBUF: u16  = 0x51;
 
@@ -210,8 +238,9 @@ pub struct Bus {
     pub radiator_fan_active: bool,
     pub purge_solenoid_active: bool,
 
-    /// PWM0/PWM1 output pin state, surfaced on P4.2 / P4.3.
-    pub pwm_out: [bool; 2],
+    /// PWM0/PWM1 output F/F (Fig. 10-1): set at the head of each PWM period,
+    /// reset by the counter overflow. See `pwm_pin_level` for the pin.
+    pwm_active: [bool; 2],
 
     /// Fractional prescaler remainder for TM0..TM3.
     pub timer_accum: [u32; 4],
@@ -259,7 +288,7 @@ impl Bus {
             ac_clutch_active: false,
             radiator_fan_active: false,
             purge_solenoid_active: false,
-            pwm_out: [false; 2],
+            pwm_active: [false; 2],
             // All external inputs idle low. In particular P4.1 low means the
             // ECU is powered and should run; high sends it to STOP mode.
             port_pins: [0; 5],
@@ -328,6 +357,13 @@ impl Bus {
             // fail and the ROM BRKs at 0x3896 with fault code 050h.
             return self.ram[SFR_P2SF as usize] | 0x07;
         }
+        if let Some((_, _, con)) = PWMS.iter().find(|(_, r, _)| *r + 1 == addr) {
+            // Table 10-2: PWMR bits above the width selected by PWCON bits
+            // 1..0 read as ones. This is why the ROM can write FF00h for a
+            // 12-bit F00h.
+            let unused = !(((1u32 << pwm_bits(self.ram[*con as usize])) - 1) as u16);
+            return self.ram[idx] | (unused >> 8) as u8;
+        }
         if let Some(port) = PORTS.iter().position(|(d, _, _)| *d == addr) {
             return self.read_port(port);
         }
@@ -386,13 +422,105 @@ impl Bus {
     /// this model actually simulates. Port 4's map (MSM66207 datasheet):
     /// P4.0/TM0CK, P4.1/TM1CK, P4.2/PWM0, P4.3/PWM1, P4.4-7/TRNS0-3. Only the
     /// two PWM outputs are driven from inside the chip; the ROM's power-on
-    /// check polls P4.2 to confirm PWM0 is running.
+    /// check polls P4.2 and P4.3 to confirm both PWMs are running.
     fn secondary_fn_level(&self, port: usize, bit: u8) -> Option<bool> {
         match (port, bit) {
-            (PORT4, 2) => Some(self.pwm_out[0]),
-            (PORT4, 3) => Some(self.pwm_out[1]),
+            (PORT4, 2) => Some(self.pwm_pin_level(0)),
+            (PORT4, 3) => Some(self.pwm_pin_level(1)),
             _ => None,
         }
+    }
+
+    /// Level on the PWM0 (P4.2) or PWM1 (P4.3) pin: the output F/F, inverted
+    /// when PWCON bit 5 selects a low-active output.
+    pub fn pwm_pin_level(&self, pwm: usize) -> bool {
+        let low_active = self.ram[PWMS[pwm].2 as usize] & PWCON_INV != 0;
+        self.pwm_active[pwm] != low_active
+    }
+
+    /// Advance one PWM by `cycles` machine cycles starting at chip time
+    /// `start`; returns whether it requested the shared PWM interrupt.
+    ///
+    /// MSM66207 user's manual chapter 10. The time base counter is taken to be
+    /// zero at chip time zero, so a tap of period P falls at every multiple of
+    /// P; the manual says PWM start and the taps are not synchronized (Fig.
+    /// 10-9), and that is how the ROM's own start time lands here.
+    ///
+    /// PWM mode (pp. 101-105): PWMC counts machine cycles in the selected
+    /// width. The tap's falling edge loads PWMR into PWMC and sets the output
+    /// F/F; the PWMC overflow resets it. The output is therefore active for
+    /// `2^bits - PWMR` cycles of every `2^bits`. An overflow that coincides
+    /// with the tap edge wins: the F/F stays reset, which is what makes
+    /// PWMR = 0 a 0 % duty after one fully active period (Fig. 10-8).
+    ///
+    /// Auto reload timer mode (pp. 105-108): PWMC counts tap periods in the
+    /// selected width and reloads from PWMR on overflow. Free-run counter
+    /// mode (p. 108): the same clock, a fixed 16 bits, no reload. Neither
+    /// touches the output F/F.
+    fn tick_pwm(&mut self, pwm: usize, start: u64, cycles: u32) -> bool {
+        let (c_sfr, r_sfr, con_sfr) = PWMS[pwm];
+        let con = self.ram[con_sfr as usize];
+        if con & PWCON_RUN == 0 {
+            return false;
+        }
+        let read = |ram: &[u8; RAM_SIZE], sfr: u16| {
+            ram[sfr as usize] as u16 | (ram[sfr as usize + 1] as u16) << 8
+        };
+
+        let period = 1u64 << pwm_bits(con);
+        let end = start + cycles as u64;
+        let pwm_mode = con & PWCON_PWM_MODE != 0;
+        let free_run = !pwm_mode && con & PWCON_FREE_RUN != 0;
+        let mask = if free_run { 0xFFFF } else { (period - 1) as u16 };
+        let stored = read(&self.ram, c_sfr);
+        let reload = (read(&self.ram, r_sfr) & mask) as u64;
+        let mut count = (stored & mask) as u64;
+        let mut overflowed = false;
+
+        if pwm_mode {
+            let mut t = start;
+            loop {
+                let overflow_at = t + (period - count);
+                let tap_at = (t / period + 1) * period;
+                let next = overflow_at.min(tap_at);
+                if next > end {
+                    count += end - t;
+                    break;
+                }
+                if overflow_at == next {
+                    overflowed = true;
+                    self.pwm_active[pwm] = false;
+                    count = 0;
+                }
+                if tap_at == next {
+                    count = reload;
+                    if overflow_at != next {
+                        self.pwm_active[pwm] = true;
+                    }
+                }
+                t = next;
+            }
+        } else {
+            for _ in start / period..end / period {
+                count += 1;
+                if count > mask as u64 {
+                    overflowed = true;
+                    count = if free_run { 0 } else { reload };
+                }
+            }
+        }
+
+        let stored = (stored & !mask) | count as u16;
+        self.ram[c_sfr as usize] = stored as u8;
+        self.ram[c_sfr as usize + 1] = (stored >> 8) as u8;
+
+        // Bit 6 gates the request; bit 7 tells the shared handler which PWM
+        // it came from (p. 100). Software clears bit 7.
+        let requested = overflowed && con & PWCON_ERQ != 0;
+        if requested {
+            self.ram[con_sfr as usize] |= PWCON_IRQ;
+        }
+        requested
     }
 
     pub fn read_data_u16(&mut self, addr: u16) -> u16 {
@@ -600,6 +728,7 @@ impl Bus {
 
     // Hardware timer step
     pub fn tick_timers(&mut self, cycles: u32) -> u16 {
+        let started_at = self.elapsed_cycles;
         self.elapsed_cycles = self.elapsed_cycles.wrapping_add(cycles as u64);
 
         // (counter SFR, reload SFR, control SFR, IRQ bit)
@@ -613,23 +742,10 @@ impl Bus {
         let mut irq_flags: u16 = 0;
         let mut strobe_injectors = false;
 
-        // 16-bit PWM: the counter counts up, and on overflow reloads from the
-        // PWM register and flips the output pin. PWMR is therefore a reload
-        // value, not a duty compare -- which is why the ROM writes PWMC0 and
-        // PWMR0 the same (0xFF00), giving a 256-count half period. That rate
-        // matches the budgets its own power-on check allows when it watches
-        // P4.2/P4.3 go low->high->low (0x177/0x177/0xB2 poll iterations).
-        for (i, (c, r)) in [(SFR_PWMC0, SFR_PWMR0), (SFR_PWMC1, SFR_PWMR1)].iter().enumerate() {
-            let (v, overflow) = self.read_data_u16(*c).overflowing_add(cycles as u16);
-            let v = if overflow {
-                self.pwm_out[i] = !self.pwm_out[i];
+        for pwm in 0..PWMS.len() {
+            if self.tick_pwm(pwm, started_at, cycles) {
                 irq_flags |= 1 << IRQ_PWM;
-                self.read_data_u16(*r).wrapping_add(v)
-            } else {
-                v
-            };
-            self.ram[*c as usize] = (v & 0xFF) as u8;
-            self.ram[(*c + 1) as usize] = (v >> 8) as u8;
+            }
         }
 
         if let Some(remaining) = self.adc_cycles_remaining {
@@ -960,4 +1076,248 @@ mod tests {
         assert_eq!(bus.timer_capture_edge(3), 0);
     }
 
+    // ---- PWM0/PWM1: MSM66207 user's manual chapter 10 (pp. 96-109) ----
+    //
+    // The tests write PWCON as raw bytes on purpose, so they pin the bit
+    // layout of Fig. 10-2 rather than whatever the constants happen to say:
+    //   80h IRQ status, 40h overflow-request enable, 20h low active, 10h RUN,
+    //   0Ch mode (00 auto reload, 01 free run, 1x PWM), 03h width / TBC tap.
+
+    /// PWM0 with its pin routed to P4.2, configured at chip time 0.
+    fn pwm0(pwcon: u8, pwmc: u16, pwmr: u16) -> Bus {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P4SF, 0x0C);
+        bus.write_data_u16(SFR_PWMC0, pwmc);
+        bus.write_data_u16(SFR_PWMR0, pwmr);
+        bus.write_data_u8(SFR_PWCON0, pwcon);
+        bus
+    }
+
+    fn pwm0_pin(bus: &mut Bus) -> bool {
+        bus.read_data_u8(SFR_P4) & 0x04 != 0
+    }
+
+    /// Advance one machine cycle at a time and count the cycles that end with
+    /// P4.2 high.
+    fn pwm0_high_cycles(bus: &mut Bus, cycles: u32) -> u32 {
+        (0..cycles)
+            .filter(|_| {
+                bus.tick_timers(1);
+                pwm0_pin(bus)
+            })
+            .count() as u32
+    }
+
+    #[test]
+    fn pwm_mode_sets_the_output_on_the_tbc_tap_and_resets_it_on_counter_overflow() {
+        // 8 bits: TBC7, one period = 256 machine cycles (51.2 us, Table 10-4).
+        let mut bus = pwm0(0x18, 0x80, 0xC0);
+
+        // The counter was started mid-range; its first overflow (t = 128) only
+        // confirms the output F/F in its reset state (Fig. 10-6).
+        bus.tick_timers(255);
+        assert!(!pwm0_pin(&mut bus), "inactive before the first tap edge");
+
+        // Fig. 10-5: the tap's falling edge loads PWMR and sets the F/F.
+        bus.tick_timers(1);
+        assert!(pwm0_pin(&mut bus), "set at the head of the period");
+        assert_eq!(bus.read_data_u16(SFR_PWMC0) & 0xFF, 0xC0, "PWMC <- PWMR");
+
+        // 100h - C0h = 64 counts of one machine cycle each.
+        bus.tick_timers(63);
+        assert!(pwm0_pin(&mut bus));
+        bus.tick_timers(1);
+        assert!(!pwm0_pin(&mut bus), "reset by the PWMC overflow");
+
+        bus.tick_timers(191);
+        assert!(!pwm0_pin(&mut bus));
+        bus.tick_timers(1);
+        assert!(pwm0_pin(&mut bus), "next period starts 256 cycles after the last");
+    }
+
+    #[test]
+    fn pwm_mode_period_and_counter_width_follow_pwcon_bits_1_0() {
+        // Fig. 10-4 / Table 10-4: 8, 10, 12 and 16 bits on TBC7, 9, 11, 15.
+        for (ck, bits) in [(0u8, 8u32), (1, 10), (2, 12), (3, 16)] {
+            let period = 1u32 << bits;
+            // Ten counts short of overflow, in however many bits are used.
+            let mut bus = pwm0(0x18 | ck, 0, 0u16.wrapping_sub(10));
+            bus.tick_timers(2 * period);
+
+            assert_eq!(
+                pwm0_high_cycles(&mut bus, 2 * period),
+                20,
+                "PWCON bits 1-0 = {ck}: 10 active cycles per {period}-cycle period"
+            );
+        }
+    }
+
+    #[test]
+    fn pwm_register_zero_gives_one_full_period_and_then_zero_duty() {
+        // Fig. 10-8, upper trace: PWR = FF, then 00, then 00.
+        let mut bus = pwm0(0x18, 0x80, 0xFF);
+        bus.tick_timers(300);
+        bus.write_data_u16(SFR_PWMR0, 0x00);
+
+        // Head of the next period (t = 512): PWMC <- 00, output set. The
+        // counter now needs exactly one period to overflow.
+        bus.tick_timers(212);
+        assert!(pwm0_pin(&mut bus));
+        bus.tick_timers(255);
+        assert!(pwm0_pin(&mut bus), "active for the whole period");
+
+        // p. 103: an overflow that coincides with the tap's falling edge
+        // holds the F/F reset, so from here on the duty is 0 %.
+        bus.tick_timers(1);
+        assert!(!pwm0_pin(&mut bus));
+        assert_eq!(pwm0_high_cycles(&mut bus, 4 * 256), 0);
+    }
+
+    #[test]
+    fn pwm_duty_spans_one_count_to_one_count_short_of_the_period() {
+        for (pwmr, active) in [(0xFFu16, 1u32), (0x80, 128), (0x01, 255)] {
+            let mut bus = pwm0(0x18, 0x80, pwmr);
+            bus.tick_timers(2 * 256);
+
+            assert_eq!(
+                pwm0_high_cycles(&mut bus, 2 * 256),
+                2 * active,
+                "PWMR = {pwmr:02X}h"
+            );
+        }
+    }
+
+    #[test]
+    fn pwm_low_active_output_idles_high_and_pulses_low() {
+        // Bit 5 set, counter stopped: the F/F is reset, so the pin rests high.
+        let mut stopped = pwm0(0x28, 0x80, 0xC0);
+        assert!(pwm0_pin(&mut stopped));
+
+        let mut bus = pwm0(0x38, 0x80, 0xC0);
+        bus.tick_timers(2 * 256);
+        assert_eq!(pwm0_high_cycles(&mut bus, 2 * 256), 2 * (256 - 64));
+    }
+
+    #[test]
+    fn stopped_pwm_neither_counts_nor_drives_nor_interrupts() {
+        let mut bus = pwm0(0x48, 0x80, 0xC0);
+        bus.write_data_u16(SFR_IRQ, 0);
+
+        assert_eq!(bus.tick_timers(70_000) & (1 << IRQ_PWM), 0);
+
+        assert_eq!(bus.read_data_u16(SFR_PWMC0) & 0xFF, 0x80);
+        assert!(!pwm0_pin(&mut bus));
+        assert_eq!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_PWM), 0);
+    }
+
+    #[test]
+    fn pwm_overflow_requests_the_shared_interrupt_only_when_enabled() {
+        // Bit 6 set: the overflow requests IRQ bit 13 and bit 7 records which
+        // of the two PWMs it came from (p. 100).
+        let mut bus = pwm0(0x58, 0xFE, 0xC0);
+        bus.write_data_u16(SFR_IRQ, 0);
+        assert_eq!(bus.tick_timers(1) & (1 << IRQ_PWM), 0);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_PWM), 0);
+        assert_ne!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u8(SFR_PWCON0) & 0x80, 0x80);
+        assert_eq!(bus.read_data_u8(SFR_PWCON1) & 0x80, 0, "PWM1 did not overflow");
+
+        // Bit 6 clear: same overflow, no request and no status.
+        let mut bus = pwm0(0x18, 0xFE, 0xC0);
+        bus.write_data_u16(SFR_IRQ, 0);
+        assert_eq!(bus.tick_timers(2) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u16(SFR_IRQ) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u8(SFR_PWCON0) & 0x80, 0);
+    }
+
+    #[test]
+    fn pwm_auto_reload_timer_mode_counts_tap_periods_and_reloads_from_pwmr() {
+        // Mode bits 3-2 = 00, bits 1-0 = 00: an 8-bit counter clocked by TBC7
+        // (Fig. 10-10). Table 10-5: overflow period = 51.2 us x (256 - D).
+        let mut bus = pwm0(0x50, 0xFE, 0xF0);
+
+        assert_eq!(bus.tick_timers(511) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u16(SFR_PWMC0) & 0xFF, 0xFF, "one count per 256 cycles");
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u16(SFR_PWMC0) & 0xFF, 0xF0, "reloaded from PWMR");
+
+        assert_eq!(bus.tick_timers(16 * 256 - 1) & (1 << IRQ_PWM), 0);
+        assert_ne!(bus.tick_timers(1) & (1 << IRQ_PWM), 0, "modulo-16 from then on");
+        assert!(!pwm0_pin(&mut bus), "the output F/F belongs to PWM mode only");
+    }
+
+    #[test]
+    fn pwm_free_run_counter_mode_is_sixteen_bits_wide_and_never_reloads() {
+        // Mode bits 3-2 = 01 (Fig. 10-12): PWMC is fixed at 16 bits and bits
+        // 1-0 only pick the clock, here TBC9 = 1024 machine cycles.
+        let mut bus = pwm0(0x55, 0xFFFE, 0x1234);
+
+        assert_eq!(bus.tick_timers(1024) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u16(SFR_PWMC0), 0xFFFF);
+        assert_ne!(bus.tick_timers(1024) & (1 << IRQ_PWM), 0);
+        assert_eq!(bus.read_data_u16(SFR_PWMC0), 0x0000, "modulo 65536, PWMR unused");
+    }
+
+    #[test]
+    fn unused_pwm_register_bits_read_as_ones() {
+        // Table 10-2.
+        for (ck, read) in [(0u8, 0xFF12u16), (1, 0xFC12), (2, 0xF012), (3, 0x0012)] {
+            let mut bus = pwm0(0x08 | ck, 0, 0x0012);
+            assert_eq!(bus.read_data_u16(SFR_PWMR0), read, "PWCON bits 1-0 = {ck}");
+            assert_eq!(bus.read_data_u8(SFR_PWMR0 + 1), (read >> 8) as u8);
+        }
+    }
+
+    /// PWM1 as the P28 ROM programs it at 0x22E9..0x22FA.
+    fn p28_pwm1() -> Bus {
+        let mut bus = Bus::new();
+        bus.write_data_u8(SFR_P4SF, 0xFC);
+        bus.write_data_u8(SFR_PWCON1, 0x7E);
+        bus.write_data_u16(SFR_PWMC1, 0xFF00);
+        bus.write_data_u16(SFR_PWMR1, 0xFF00);
+        bus
+    }
+
+    #[test]
+    fn p28_pwm_setup_is_a_low_pulse_of_256_cycles_every_4096() {
+        // 7Eh = request enabled, low active, RUN, PWM mode, 12 bits / TBC11.
+        // FF00h in 12 bits is F00h: 100h counts to overflow.
+        let mut bus = p28_pwm1();
+        bus.tick_timers(2 * 4096);
+
+        let low = (0..2 * 4096)
+            .filter(|_| {
+                bus.tick_timers(1);
+                bus.read_data_u8(SFR_P4) & 0x08 == 0
+            })
+            .count();
+
+        assert_eq!(low, 2 * 256);
+    }
+
+    #[test]
+    fn pwm_state_does_not_depend_on_how_the_elapsed_time_is_sliced() {
+        let mut fine = p28_pwm1();
+        let mut coarse = p28_pwm1();
+
+        for chunk in [1u32, 7, 300, 3788, 4096, 5000, 13, 70_000, 255, 4097] {
+            let mut fine_irq = false;
+            for _ in 0..chunk {
+                fine_irq |= fine.tick_timers(1) & (1 << IRQ_PWM) != 0;
+            }
+            let coarse_irq = coarse.tick_timers(chunk) & (1 << IRQ_PWM) != 0;
+
+            assert_eq!(coarse_irq, fine_irq, "request during a {chunk}-cycle step");
+            assert_eq!(
+                coarse.read_data_u16(SFR_PWMC1),
+                fine.read_data_u16(SFR_PWMC1),
+                "PWMC1 after a {chunk}-cycle step"
+            );
+            assert_eq!(
+                coarse.read_data_u8(SFR_P4) & 0x08,
+                fine.read_data_u8(SFR_P4) & 0x08,
+                "P4.3 after a {chunk}-cycle step"
+            );
+        }
+    }
 }

@@ -241,16 +241,53 @@ enables the special function for that bit.
 
 ### The PWM model
 
-`PWMR` is a **reload value, not a duty compare**. The counter counts up; on
-overflow it reloads from `PWMR` and flips the output pin.
+`Bus::tick_pwm` follows the MSM66207 user's manual, chapter 10 (pp. 96–109).
+`PWCON0/1` share one layout (Fig. 10-2):
 
-Evidence: the ROM writes `PWMC0` and `PWMR0` to the *same* value (`0xFF00`),
-which only makes sense for a reload. That gives a 256-count half period, which
-fits the timeout budgets its own power-on check allows.
+| bits | field |
+|---|---|
+| 7 | IRQ status: this PWM's overflow requested the shared interrupt |
+| 6 | enable overflow requests (IRQ bit 13, shared by both PWMs) |
+| 5 | output polarity: 0 high active, 1 low active |
+| 4 | RUN |
+| 3..2 | mode: `00` auto reload timer, `01` free-run counter, `1x` PWM |
+| 1..0 | width / time-base tap: 8 bits + TBC7, 10 + TBC9, 12 + TBC11, 16 + TBC15 |
 
-This reload/toggle model is sufficient to explore the stock ROM's current boot
-path, but it is not a complete implementation of the manual's PWM modes. It
-must not be used to infer P28 duty cycle or board-output behavior.
+Each tap's period is exactly `2^bits` machine cycles (256, 1024, 4096, 65536;
+51.2 µs to 13.1072 ms at 10 MHz).
+
+- **PWM mode.** `PWMC` counts machine cycles in the selected width. The tap's
+  falling edge loads `PWMR` into `PWMC` and sets the output F/F; the `PWMC`
+  overflow resets it and raises the request. The output is active for
+  `2^bits − PWMR` cycles of every `2^bits`. An overflow that coincides with the
+  tap edge keeps the F/F reset, so `PWMR = 0` is a 0 % duty after one fully
+  active period (Fig. 10-8) and 100 % is not reachable.
+- **Auto reload timer mode.** `PWMC` counts tap periods in the selected width
+  and reloads from `PWMR` on overflow (Table 10-5).
+- **Free-run counter mode.** Same clock, fixed 16 bits, no reload.
+
+Unused upper `PWMR` bits read as ones (Table 10-2).
+
+Two things are interpretations rather than quotations: the time base counter is
+taken to be zero at chip time zero, and bit 7 is set only when bit 6 let the
+overflow raise a request (the manual says bit 7 "shows if an overflow interrupt
+request has occurred").
+
+What the P28 does with it, from the ROM alone:
+
+- `0x22E9..0x22FA` programs both PWMs to PWM mode, 12 bits, low active, running
+  (`PWCON0 = 3Eh`, `PWCON1 = 7Eh`), with `PWMC = PWMR = FF00h`. In 12 bits that
+  is `F00h`: a 51.2 µs low pulse every 819.2 µs. Writing `FF00h` rather than
+  `0F00h` matches the read-as-ones rule above.
+- After the power-on check it writes `PWMR0 = PWMR1 = FFFFh` (one-count pulse)
+  and clears `P4SF.3`, turning P4.3 back into a plain port bit.
+- The PWM interrupt handler at `0x031E` therefore runs every 819.2 µs
+  (2441 times in 2 s of emulated time). It steps a 0..99 counter and copies a
+  compare result to `P4.3`: a software PWM with a 100-step, 81.92 ms period.
+  Which load P4.3 drives is not established here.
+- The configuration-integrity check at `0x3897` accepts `PWCON0 & 7Bh = 3Ah`
+  and `PWCON1 & 7Bh = 7Ah`, i.e. it ignores exactly bit 7 (status) and bit 2
+  (don't-care in PWM mode).
 
 ### Timers (user's manual ch. 9, pp. 84–93)
 
@@ -422,8 +459,10 @@ through the active LRB page, not plain address `N8`.
 
 **Known gaps.**
 
-1. PWM remains a reload/toggle approximation, and board-output mappings other
-   than the injectors are incomplete (fuel pump, MIL, VTEC, IACV …).
+1. Board-output mappings other than the injectors are incomplete (fuel pump,
+   MIL, VTEC, IACV …), including what the PWM0 pin and the software PWM on
+   P4.3 drive. The time base counter exists only as the PWM tap phase; it is
+   not a readable register.
 2. The injector output latch and the CKP/TDC/CYP/VSS pin assignment are derived
    from the ROM, not read off the schematic. Output-to-cylinder mapping and
    real sensor phasing are not established. External timer clocking (`111b`)

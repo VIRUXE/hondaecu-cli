@@ -111,9 +111,10 @@ path with live mux inputs, but it is not a physical-ECU validator.
   mapping and the real sensor phasing are not established.
 - Other board-output wiring is incomplete. Fuel-pump, MIL, VTEC, IACV and
   similar telemetry must not be treated as verified harness behavior.
-- PWM mode is still a reload/toggle approximation, and external data addresses
-  above the 4 KiB backing store currently alias (including the digital input
-  port at `0x4700`).
+- PWM0/PWM1 follow the user's manual (PWM, auto reload and free-run modes),
+  but which board loads P4.2 and P4.3 drive is not established.
+- External data addresses above the 4 KiB backing store currently alias
+  (including the digital input port at `0x4700`).
 - Three executor flag bugs were found that the decoder ground-truth test cannot
   see. The remaining mnemonics have not been audited against the manual.
 - Replay presets are scripted stimuli. They do not by themselves prove a DTC,

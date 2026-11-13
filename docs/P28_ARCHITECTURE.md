@@ -225,8 +225,8 @@ not apply generically to digital switches and solenoids.
 
 ## Known Fidelity Limits
 
-- PWM mode and the P28 board outputs other than the injectors remain
-  approximate or unresolved.
+- The P28 board outputs other than the injectors remain unresolved,
+  including the loads on the PWM pins.
 - The external digital-input buffer at `0x4700` is not modeled.
 - The injector output stage and crank-signal pin assignment are ROM-derived
   and await confirmation against the schematic; cylinder mapping and sensor
