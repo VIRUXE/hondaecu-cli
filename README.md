@@ -201,8 +201,10 @@ cargo build --release
 
 ### 1. Check a ROM before burning it
 `check` runs the ROM on the modelled P28 box, wired to the car you describe,
-through one fixed script (about 92 s of ECU time, roughly 20 s of wall time),
-and prints one verdict. `test` is an alias.
+through one fixed script (about 110 s of ECU time and about half a minute of
+wall time; more when the lamp blinks many codes, since the code read-out runs
+until the blinked sequence has repeated, up to 180 s), and prints one verdict.
+`test` is an alias.
 ```bash
 # Linux / macOS: asks about the car when run in a terminal
 ./hondaecu-cli check P28-230.bin
@@ -220,7 +222,8 @@ The car comes from, in order: a preset (`stock-p28-manual`,
 `stock-p28-automatic`, `stock-p30`), a car file of `key = value` lines
 (`--car <file>`), `--set key=value` and the shorthands `--ecu` and
 `--board-gearbox`, then questions when run in a terminal (skip them with
-`--no-prompt`). Anything you did not give is listed as `defaulted` in the
+`--no-prompt`). With no preset named, an `ecu` of `p30` from any of these
+starts from `stock-p30`. Anything you did not give is listed as `defaulted` in the
 report. The questions can save your answers to a file for `--car`; keys you
 took the default for are saved as comments, and the file starts with
 `preset = <name>` (a hand-written file may have that line too), so the same
@@ -234,12 +237,24 @@ There are three verdicts:
 | `DO NOT BURN` | 1 | something was wrong; the verdict names the first problem |
 | `COULD NOT TELL` | 3 | nothing was wrong, but something could not be judged |
 
-Exit status 2 is a bad command line or a file that cannot be read or
-written. The check does not judge fuelling, ignition timing, or anything that
-needs a responding engine. A car value the board model cannot represent
-(listed in [`docs/CHECK.md`](docs/CHECK.md), "Which values change the run
-today") is named on a `car as described` line, and the verdict is then never
-`WORTH BURNING`.
+Exit status 2 is a bad command line or a file that cannot be read, or a
+`--report` file that cannot be written. Under the verdict, every line shows
+its state before what was seen (`ok: `, `PROBLEM: ` or `could not tell: `):
+```text
+  warm idle ................ ok: injectors opened 53, 54, 53, 53 times and 214 sparks in 53.3 engine cycles
+  codes .................... PROBLEM: 14 IACV Idle Control Valve
+```
+
+**Not judged, and known limits.** The check does not judge fuelling,
+ignition timing, or anything that needs a responding engine. A car value the
+board model cannot represent (listed in [`docs/CHECK.md`](docs/CHECK.md),
+"Which values change the run today") is named on a `car as described` line,
+and the verdict is then never `WORTH BURNING`. A ROM whose check-engine
+light never lights at key-on cannot be judged on its lamp, and is never
+`WORTH BURNING`. The `talks only to this board` line catches accesses to
+external addresses the board does not decode and 82C55 modes the emulator
+lacks, but **not** a ROM that uses an on-chip peripheral of the MSM66207 the
+model does not implement: such a ROM can pass that line.
 ### 2. ECU Datalog CSV Replay & Scripted Trace Playback
 Replay a CSV log or scripted sensor preset through the emulator and export its
 observed output fields. Scenario names describe stimuli, not verified ROM
@@ -381,11 +396,13 @@ hondaecu-cli/
     ├── check.rs        # The `check` command: arguments, questions, car file, report output
     ├── car.rs          # The car: presets, car-file format, defaulted values
     ├── wiring.rs       # Applies a car to the board model
+    ├── knock.rs        # The P30 box's knock board on FC1
     ├── bench.rs        # The ECU box on a bench: run log, settling, MIL edges
     ├── script.rs       # The fixed sequence of driving conditions and what it observes
     ├── blink.rs        # Reads fault codes back from the MIL's blinks
     ├── verdict.rs      # Three-state lines and the verdict
     ├── report.rs       # Text and JSON rendering of the verdict
+    ├── acceptance.rs   # ROM-backed acceptance cases for `check` (opt-in features)
     ├── cpu.rs          # OKI MSM66207 CPU Register File & PSW Flags
     ├── bus.rs          # Memory Bus (32KB ROM / 4KB RAM), Timers, SFRs, ADC, PWM
     ├── engine.rs       # Virtual Engine Simulator, Sensor Signals, Distributor Pulses

@@ -88,6 +88,8 @@ pub struct RunLog {
     pub breaks: Vec<Break>,
     /// Every BRK executed, including those not kept in `breaks`.
     pub break_count: u64,
+    /// The BRKs of `break_count` executed inside the boot window.
+    pub boot_break_count: u64,
     pub stop: Option<(f64, Stop)>,
     /// `(t, port B, port C)` on every change once both are outputs.
     pub board: Vec<(f64, u8, u8)>,
@@ -107,10 +109,12 @@ pub const BOOT_BREAK_LIMIT: usize = 16;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Settling {
     Settled { boot_breaks: usize },
-    /// More than `BOOT_BREAK_LIMIT` BRKs inside the boot window.
+    /// More than `BOOT_BREAK_LIMIT` BRKs inside the boot window: `breaks`
+    /// of them (inside the window only), the last at `last_pc`.
     NeverSettles { breaks: usize, last_pc: u16 },
-    /// A BRK after the boot window: `times` of them, `pc` of the first.
-    ResetsLater { times: Vec<f64>, pc: u16 },
+    /// BRKs after the boot window: `count` of them, the times of those
+    /// kept in the log (`BREAKS_KEPT`), `pc` of the first.
+    ResetsLater { times: Vec<f64>, pc: u16, count: u64 },
     /// The watchdog went unserved since this time.
     Hung { since: f64 },
     Stopped,
@@ -123,17 +127,20 @@ impl RunLog {
         if self.stop.is_some() {
             return Settling::Stopped;
         }
-        let boot_breaks =
-            self.breaks.iter().filter(|b| b.t < BOOT_WINDOW_SECONDS).count();
+        let boot_kept: Vec<&Break> =
+            self.breaks.iter().filter(|b| b.t < BOOT_WINDOW_SECONDS).collect();
+        // The kept list is the first `BREAKS_KEPT`, so it holds the boot
+        // window's breaks until they overflow it; the counters go on.
+        let boot_breaks = (self.boot_break_count as usize).max(boot_kept.len());
         if boot_breaks > BOOT_BREAK_LIMIT {
-            let breaks = (self.break_count as usize).max(self.breaks.len());
-            let last_pc = self.breaks.last().map_or(0, |b| b.pc);
-            return Settling::NeverSettles { breaks, last_pc };
+            let last_pc = boot_kept.last().map_or(0, |b| b.pc);
+            return Settling::NeverSettles { breaks: boot_breaks, last_pc };
         }
         let later: Vec<&Break> =
             self.breaks.iter().filter(|b| b.t >= BOOT_WINDOW_SECONDS).collect();
         if let Some(first) = later.first() {
-            return Settling::ResetsLater { times: later.iter().map(|b| b.t).collect(), pc: first.pc };
+            let count = self.break_count.saturating_sub(self.boot_break_count).max(later.len() as u64);
+            return Settling::ResetsLater { times: later.iter().map(|b| b.t).collect(), pc: first.pc, count };
         }
         if let Some(since) = self.watchdog_starved_at {
             return Settling::Hung { since };
@@ -201,6 +208,9 @@ impl Bench {
                     if mnemonic == "BRK" {
                         let t = self.seconds();
                         self.log.break_count += 1;
+                        if t < BOOT_WINDOW_SECONDS {
+                            self.log.boot_break_count += 1;
+                        }
                         if self.log.breaks.len() < BREAKS_KEPT {
                             self.log.breaks.push(Break { t, pc });
                         }
@@ -331,6 +341,34 @@ mod tests {
             bench.log.settling(bench.seconds()),
             Settling::NeverSettles { breaks, .. } if breaks as u64 == bench.log.break_count
         ));
+    }
+
+    #[test]
+    fn never_settles_counts_only_the_first_seconds_breaks() {
+        // Breaking on every instruction for 1.5 s: the count reported is
+        // the boot window's, not the whole run's.
+        let mut rom = rom_with(&[0xFF]);
+        rom[2] = 0x00;
+        rom[3] = 0x01;
+        let mut bench = Bench::new(&rom);
+        bench.run(1.5);
+        let log = &bench.log;
+        assert!(log.boot_break_count > BREAKS_KEPT as u64 && log.boot_break_count < log.break_count);
+        assert!(matches!(
+            log.settling(bench.seconds()),
+            Settling::NeverSettles { breaks, last_pc: 0x0100 } if breaks as u64 == log.boot_break_count
+        ));
+    }
+
+    #[test]
+    fn resets_later_counts_every_later_break_not_only_those_kept() {
+        let log = RunLog {
+            breaks: vec![Break { t: 5.3, pc: 0x237D }, Break { t: 10.6, pc: 0x237D }],
+            break_count: 20,
+            boot_break_count: 0,
+            ..Default::default()
+        };
+        assert!(matches!(log.settling(110.0), Settling::ResetsLater { count: 20, pc: 0x237D, .. }));
     }
 
     #[test]

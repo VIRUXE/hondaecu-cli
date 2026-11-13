@@ -2,7 +2,7 @@
 //! an outside observer of the box would see in each stage.
 
 use crate::bench::{Bench, Settling, Stop};
-use crate::blink::{decode, Lamp};
+use crate::blink::{complete_runs, decode, full_period, Lamp};
 use crate::car::Setup;
 use crate::wiring::{apply_engine, apply_static, apply_switches, Switches, Unmodelled};
 
@@ -53,13 +53,19 @@ pub struct RunResult {
     /// Reads, writes, last address.
     pub unmapped: (u64, u64, Option<u16>),
     pub ppi_unsupported_mode: bool,
+    /// The lamp was seen lit during `key on` (from the board log): the bulb
+    /// check, the only sign that the lamp works at all. Without it a dark
+    /// lamp says nothing about faults.
+    pub bulb_check_seen: bool,
     pub mil_first_lit_after_bulb_check: Option<f64>,
     /// The lamp never went out after power-on: lit from the bulb check to
     /// the end of `key on`. `mil_first_lit_after_bulb_check` is then the end
     /// of `key on`.
     pub mil_never_went_out: bool,
-    /// The lamp was lit at the end of the drive: the end of the last stage
-    /// before `code read-out`. False when the run did not get that far.
+    /// The lamp was lit at the end of the drive: lit at the end of the last
+    /// stage before `code read-out`, or lit for more than half of that
+    /// stage (a lamp blinking then is not dark). False when the run did not
+    /// get that far.
     pub mil_lit_at_end_of_drive: bool,
     /// Each lit interval that starts after the bulb check and before `code
     /// read-out` (or the stop), from the board log. One still open at the
@@ -67,6 +73,10 @@ pub struct RunResult {
     /// `mil_never_went_out` the first starts at the end of `key on`.
     pub mil_lit_spans: Vec<(f64, f64)>,
     pub lamp: Lamp,
+    /// The read-out reached `READ_OUT_MAX_SECONDS` while the lamp was still
+    /// blinking and before its sequence had been seen to repeat: `lamp` may
+    /// lack codes.
+    pub lamp_list_may_be_incomplete: bool,
     pub seconds: f64,
     /// Car values the board model could not represent, with the reason
     /// (`wiring::apply_static`).
@@ -80,6 +90,11 @@ const CODE_READ_OUT: &str = "code read-out";
 /// An opening followed by this many engine cycles without another is where
 /// fuel stopped.
 const FUEL_STOP_CYCLES: f64 = 2.0;
+/// The read-out runs its 40 s stage, then, while the lamp has blinked
+/// complete codes whose sequence has not yet been seen to repeat, further
+/// slices of this length, up to `READ_OUT_MAX_SECONDS` in all.
+const READ_OUT_SLICE_SECONDS: f64 = 1.0;
+pub const READ_OUT_MAX_SECONDS: f64 = 180.0;
 
 /// Finds `StageResult::fuel_stops_rpm`: the rpm of the last injector opening
 /// followed by at least `FUEL_STOP_CYCLES` engine cycles with no opening. A
@@ -190,16 +205,26 @@ pub fn stages(setup: &Setup) -> Vec<Stage> {
 
 /// Run every stage of `stages(setup)` on a freshly built `bench`. Scripting
 /// stops as soon as execution does; the stage it stopped in is kept, cut
-/// short at the stop.
+/// short at the stop. The read-out may run past its 40 s
+/// (`read_until_the_codes_repeat`).
 pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
     let unmodelled = apply_static(&mut bench.bus, setup);
     apply_engine(&mut bench.engine, setup);
     let mut results = Vec::new();
     // Start of the read-out and whether it ran its full length.
     let mut read_out: Option<(f64, bool)> = None;
+    let mut lamp_list_may_be_incomplete = false;
     for stage in stages(setup) {
         let start = bench.seconds();
-        let (result, running) = run_stage(bench, setup, &stage);
+        let (mut result, mut running) = run_stage(bench, setup, &stage);
+        if stage.name == CODE_READ_OUT && running {
+            let (more, still_running, cut) = read_until_the_codes_repeat(bench, setup, &stage, start);
+            for r in more {
+                extend(&mut result, r);
+            }
+            running = still_running;
+            lamp_list_may_be_incomplete = cut;
+        }
         results.push(result);
         if stage.name == CODE_READ_OUT {
             read_out = Some((start, running));
@@ -215,13 +240,15 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
     let search_to = read_out.map_or(end, |r| r.0);
     let (mil_first_lit_after_bulb_check, mil_never_went_out) =
         mil_lit_after_bulb_check(&edges, key_on_end, search_to, end);
+    // The read-out is the last stage, so the one before it ends the drive.
+    let final_stage = read_out.and_then(|_| results.iter().rev().nth(1)).map(|s| (s.from, s.to));
     let (mil_lit_spans, mil_lit_at_end_of_drive) = lamp_after_bulb_check(
         &edges,
         key_on_end,
         search_to,
         end,
         mil_never_went_out,
-        read_out.map(|r| r.0),
+        final_stage,
     );
     let lamp = read_out_lamp(&edges, read_out, end);
 
@@ -236,14 +263,86 @@ pub fn run(bench: &mut Bench, setup: &Setup) -> RunResult {
             bench.bus.external_last_unmapped,
         ),
         ppi_unsupported_mode: bench.bus.ppi.unsupported_mode,
+        bulb_check_seen: bulb_check_seen(&edges, key_on_end),
         mil_first_lit_after_bulb_check,
         mil_never_went_out,
         mil_lit_at_end_of_drive,
         mil_lit_spans,
         lamp,
+        lamp_list_may_be_incomplete,
         seconds: end,
         unmodelled,
     }
+}
+
+/// Keeps reading after the 40 s read-out `stage` (begun at `start`) while
+/// the lamp has blinked complete codes whose sequence has not yet been seen
+/// to repeat (`blink::full_period`), in slices of `READ_OUT_SLICE_SECONDS`,
+/// until `READ_OUT_MAX_SECONDS` of read-out in all. A read-out with no
+/// complete code ends at 40 s. Returns the extra slices, whether execution
+/// is still going, and whether the cap was reached before a full repeat.
+fn read_until_the_codes_repeat(
+    bench: &mut Bench,
+    setup: &Setup,
+    stage: &Stage,
+    start: f64,
+) -> (Vec<StageResult>, bool, bool) {
+    let slice = Stage { seconds: READ_OUT_SLICE_SECONDS, ..stage.clone() };
+    let extra = ((READ_OUT_MAX_SECONDS - stage.seconds) / READ_OUT_SLICE_SECONDS).round() as usize;
+    let mut more = Vec::new();
+    for _ in 0..extra {
+        let runs = complete_runs(&bench.mil_edges(), start, bench.seconds());
+        if runs.is_empty() || full_period(&runs).is_some() {
+            return (more, true, false);
+        }
+        let (result, running) = run_stage(bench, setup, &slice);
+        more.push(result);
+        if !running {
+            return (more, false, false);
+        }
+    }
+    let runs = complete_runs(&bench.mil_edges(), start, bench.seconds());
+    let cut = !runs.is_empty() && full_period(&runs).is_none();
+    (more, true, cut)
+}
+
+/// Adds a later slice `b` of the same stage to `a`.
+fn extend(a: &mut StageResult, b: StageResult) {
+    a.to = b.to;
+    a.engine_cycles += b.engine_cycles;
+    for i in 0..4 {
+        a.injector_opens[i] += b.injector_opens[i];
+    }
+    a.pulse_us = b.pulse_us;
+    a.ignitions += b.ignitions;
+    a.fuel_pump_on_seconds += b.fuel_pump_on_seconds;
+    a.mil_lit_at_end = b.mil_lit_at_end;
+    a.ac_clutch_seen |= b.ac_clutch_seen;
+    a.iacv_duty_pct = b.iacv_duty_pct;
+    a.fuel_stops_rpm = b.fuel_stops_rpm.or(a.fuel_stops_rpm);
+    a.vtec_on_rpm = a.vtec_on_rpm.or(b.vtec_on_rpm);
+}
+
+/// The lamp was seen lit at some point up to `key_on_end`, the end of `key
+/// on` (or the stop, for a run that stopped inside it).
+fn bulb_check_seen(edges: &[(f64, bool)], key_on_end: f64) -> bool {
+    edges.iter().any(|e| e.1 && e.0 <= key_on_end)
+}
+
+/// Seconds the lamp was lit between `from` and `to`.
+fn lit_seconds(edges: &[(f64, bool)], from: f64, to: f64) -> f64 {
+    let mut lit = edges.iter().rev().find(|e| e.0 <= from).is_some_and(|e| e.1);
+    let (mut t, mut total) = (from, 0.0);
+    for &(at, now) in edges.iter().filter(|e| e.0 > from && e.0 < to) {
+        if lit {
+            total += at - t;
+        }
+        (t, lit) = (at, now);
+    }
+    if lit {
+        total += to - t;
+    }
+    total
 }
 
 /// When the MIL was first lit after the bulb check, looking up to
@@ -280,16 +379,19 @@ fn mil_lit_after_bulb_check(
 /// start of the read-out, or the end of a run that never got there), and
 /// ends at the next dark edge; one still open at `search_to` ends there. A
 /// lamp that `never_went_out` has one span from `key_on_end`, the moment
-/// `mil_lit_after_bulb_check` counts it lit. `read_out_start` is `None` when
-/// the run did not reach the read-out: the drive did not end, so the lamp
-/// is not lit at its end.
+/// `mil_lit_after_bulb_check` counts it lit. `final_stage` is the last stage
+/// before the read-out, `(from, to)`, or `None` when the run did not reach
+/// the read-out: the drive did not end, so the lamp is not lit at its end.
+/// Otherwise the lamp is lit at the end of the drive when it is lit at `to`
+/// or was lit for more than half of the stage: the state at one instant
+/// would make a blinking lamp a coin flip.
 fn lamp_after_bulb_check(
     edges: &[(f64, bool)],
     key_on_end: f64,
     search_to: f64,
     end: f64,
     never_went_out: bool,
-    read_out_start: Option<f64>,
+    final_stage: Option<(f64, f64)>,
 ) -> (Vec<(f64, f64)>, bool) {
     let lit_at = |t: f64| edges.iter().rev().find(|e| e.0 <= t).is_some_and(|e| e.1);
     let bulb_check_end = edges
@@ -316,7 +418,8 @@ fn lamp_after_bulb_check(
             (from, to)
         })
         .collect();
-    let lit_at_end_of_drive = read_out_start.is_some_and(lit_at);
+    let lit_at_end_of_drive = final_stage
+        .is_some_and(|(from, to)| lit_at(to) || lit_seconds(edges, from, to) > (to - from) / 2.0);
     (spans, lit_at_end_of_drive)
 }
 
@@ -511,12 +614,51 @@ mod tests {
     // throttle is 26.5..40.5, lift off 40.5..62.5, the read-out starts at
     // 70.5 and the run ends at 110.5.
     const KEY_ON_END: f64 = 6.0;
+    /// `warm idle again`, the last stage before the read-out.
+    const FINAL_STAGE: (f64, f64) = (62.5, READ_OUT);
     const READ_OUT: f64 = 70.5;
     const END: f64 = 110.5;
 
     fn lamp_after(edges: &[(f64, bool)]) -> (Vec<(f64, f64)>, bool) {
         let never = mil_lit_after_bulb_check(edges, KEY_ON_END, READ_OUT, END).1;
-        lamp_after_bulb_check(edges, KEY_ON_END, READ_OUT, END, never, Some(READ_OUT))
+        lamp_after_bulb_check(edges, KEY_ON_END, READ_OUT, END, never, Some(FINAL_STAGE))
+    }
+
+    #[test]
+    fn the_bulb_check_is_seen_only_when_the_lamp_lit_in_key_on() {
+        assert!(bulb_check_seen(&[(0.04, false), (0.044, true), (2.1, false)], KEY_ON_END));
+        // Lit from power-on and never dark again.
+        assert!(bulb_check_seen(&[(0.04, true)], KEY_ON_END));
+        // Never lit, or no lamp edge at all (the board never programmed).
+        assert!(!bulb_check_seen(&[(0.04, false)], KEY_ON_END));
+        assert!(!bulb_check_seen(&[], KEY_ON_END));
+        // Lit only after key on: no bulb check.
+        assert!(!bulb_check_seen(&[(0.04, false), (8.0, true)], KEY_ON_END));
+    }
+
+    /// The lamp blinking through the final stage, `on` s lit then `off` s
+    /// dark from 62.5 s, with the bulb check before it.
+    fn blinking_to_the_read_out(on: f64, off: f64) -> Vec<(f64, bool)> {
+        let mut edges = vec![(0.04, true), (2.1, false)];
+        let blinks = ((READ_OUT - FINAL_STAGE.0) / (on + off)).round() as usize;
+        for i in 0..blinks {
+            let t = FINAL_STAGE.0 + i as f64 * (on + off);
+            edges.push((t, true));
+            edges.push((t + on, false));
+        }
+        edges
+    }
+
+    #[test]
+    fn a_lamp_blinking_at_the_end_of_the_drive_counts_as_lit_when_mostly_lit() {
+        // 0.3 s lit, 0.1 s dark: dark at 70.5 s (the last blink ends at
+        // 70.4 s) but lit for three quarters of the stage.
+        let edges = blinking_to_the_read_out(0.3, 0.1);
+        assert!(!edges.iter().rev().find(|e| e.0 <= READ_OUT).unwrap().1, "dark at the end instant");
+        assert!(lamp_after(&edges).1);
+        // 0.1 s lit, 0.3 s dark, dark at the end: a quarter of the stage.
+        let edges = blinking_to_the_read_out(0.1, 0.3);
+        assert!(!lamp_after(&edges).1);
     }
 
     #[test]

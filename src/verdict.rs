@@ -65,6 +65,8 @@ const SWEEP_TOP_RPM: f64 = 9000.0;
 /// Fewer engine cycles than this in the warm idle stage say nothing about it.
 pub const MIN_IDLE_ENGINE_CYCLES: f64 = 10.0;
 const READ_OUT_STAGE: &str = "code read-out";
+/// The `settles` line names this many reset times and counts the rest.
+const RESETS_LISTED: usize = 3;
 
 /// The run got through the fault-code read-out without stopping early.
 fn reached_read_out(result: &RunResult) -> bool {
@@ -102,7 +104,14 @@ fn stage<'a>(result: &'a RunResult, name: &str) -> Option<&'a StageResult> {
     result.stages.iter().find(|s| s.name == name)
 }
 
-/// The line for a stage-based check, or "could not tell" when the stage never ran.
+/// The stage the run stopped in, when it stopped: the last one it has.
+fn stopped_in(result: &RunResult) -> Option<&'static str> {
+    result.stop.as_ref().and(result.stages.last()).map(|s| s.name)
+}
+
+/// The line for a stage-based check, or "could not tell" when the stage
+/// never ran or the run stopped inside it (a stage cut short is not judged
+/// as if it had run).
 fn staged(
     result: &RunResult,
     label: &'static str,
@@ -110,10 +119,15 @@ fn staged(
     check: impl FnOnce(&StageResult) -> Line,
 ) -> Line {
     match stage(result, stage_name) {
+        Some(s) if stopped_in(result) == Some(s.name) => could_not_tell(label, "the run stopped during this stage"),
         Some(s) => check(s),
         None => could_not_tell(label, "the run stopped before this"),
     }
 }
+
+/// The two lamp lines without a bulb check: a lamp never seen lit cannot be
+/// believed when it stays dark.
+const NO_BULB_CHECK: &str = "the check-engine light never came on at key-on, so it cannot show a fault";
 
 fn executes(result: &RunResult) -> Line {
     match &result.stop {
@@ -133,9 +147,15 @@ fn settles(result: &RunResult) -> Line {
         Settling::NeverSettles { breaks, last_pc } => {
             problem(L, format!("never settles: {breaks} resets in the first second (last at program address {last_pc:X}h)"))
         }
-        Settling::ResetsLater { times, pc } => {
-            let at: Vec<String> = times.iter().map(|t| format!("{t:.1} s")).collect();
-            problem(L, format!("resets at {} (program address {pc:X}h)", at.join(", ")))
+        Settling::ResetsLater { times, pc, count } => {
+            let at: Vec<String> = times.iter().take(RESETS_LISTED).map(|t| format!("{t:.1} s")).collect();
+            let more = count.saturating_sub(at.len() as u64);
+            let at = if more > 0 {
+                format!("{} and {more} more times", at.join(", "))
+            } else {
+                at.join(", ")
+            };
+            problem(L, format!("resets at {at} (program address {pc:X}h)"))
         }
         Settling::Hung { since } => problem(L, format!("stopped responding at {since:.1} s (watchdog not serviced)")),
         Settling::Stopped => could_not_tell(L, "the run stopped before this could be judged"),
@@ -145,6 +165,9 @@ fn settles(result: &RunResult) -> Line {
 fn own_board(result: &RunResult) -> Line {
     const L: &str = "talks only to this board";
     if !result.board_programmed {
+        if result.stop.is_some() {
+            return could_not_tell(L, "the run stopped before the board was set up");
+        }
         return problem(L, "the board was never programmed");
     }
     let (reads, writes, last) = result.unmapped;
@@ -228,18 +251,26 @@ fn warm_idle(result: &RunResult) -> Line {
     })
 }
 
-fn ac_idle(result: &RunResult) -> Option<Line> {
-    stage(result, "idle, A/C on").map(|s| {
+/// Present for a car with A/C: the stage is in the script only then.
+fn ac_idle(result: &RunResult, setup: &Setup) -> Option<Line> {
+    const L: &str = "idle, A/C on";
+    if !setup.ac && stage(result, L).is_none() {
+        return None;
+    }
+    Some(staged(result, L, L, |s| {
         if s.ac_clutch_seen {
-            ok("idle, A/C on", "the A/C clutch was engaged")
+            ok(L, "the A/C clutch was engaged")
         } else {
-            problem("idle, A/C on", "the A/C clutch was never engaged")
+            problem(L, "the A/C clutch was never engaged")
         }
-    })
+    }))
 }
 
 fn sweep(result: &RunResult) -> Line {
     staged(result, "full throttle sweep", "full throttle", |s| {
+        if s.injector_opens.iter().all(|&n| n == 0) {
+            return problem("full throttle sweep", "no injector opened during the full-throttle sweep");
+        }
         let fuel = match s.fuel_stops_rpm {
             Some(r) => format!("fuel stops at {r:.0} rpm"),
             // Only injector openings are watched: a rev limiter that cuts
@@ -256,15 +287,35 @@ fn sweep(result: &RunResult) -> Line {
     })
 }
 
+/// The lamp was lit from power-on to the end of the drive without a break:
+/// it never ended its bulb check, and its one span reaches the read-out.
+fn lit_from_power_on_to_the_end(result: &RunResult) -> bool {
+    let read_out_from = stage(result, READ_OUT_STAGE).map(|s| s.from);
+    match (result.mil_never_went_out, result.mil_lit_spans.as_slice(), read_out_from) {
+        (true, [(_, to)], Some(from)) => *to >= from,
+        _ => false,
+    }
+}
+
 /// A stored fault keeps the lamp lit; a ROM's own display (a start-up
 /// flash, a shift light) goes dark again. So the lamp is a problem only when
 /// it is lit at the end of the drive, or lit when a run that never got there
-/// stopped (docs/CHECK.md, "The lines").
+/// stopped. A lamp never seen lit in `key on` cannot be believed when dark
+/// (docs/CHECK.md, "The lines").
 fn check_engine_light(result: &RunResult) -> Line {
     const L: &str = "check-engine light";
     let last = result.mil_lit_spans.last();
     // A run that stopped inside the read-out still had a whole drive.
-    if !reached_read_out(result) && !result.mil_lit_at_end_of_drive {
+    if result.mil_lit_at_end_of_drive {
+        if lit_from_power_on_to_the_end(result) {
+            return problem(L, "never went out after power-on");
+        }
+        return match last {
+            Some(&(from, _)) => problem(L, format!("on at the end of the drive (lit since {from:.1} s)")),
+            None => problem(L, "on at the end of the drive"),
+        };
+    }
+    if !reached_read_out(result) {
         // A span still open at the stop ends at the end of the run.
         return match last {
             Some(&(from, to)) if to >= result.seconds => problem(
@@ -274,15 +325,8 @@ fn check_engine_light(result: &RunResult) -> Line {
             _ => could_not_tell(L, "the run stopped before this"),
         };
     }
-    if result.mil_lit_at_end_of_drive {
-        if result.mil_never_went_out {
-            let t = result.mil_first_lit_after_bulb_check.or(last.map(|s| s.0)).unwrap_or(0.0);
-            return problem(L, format!("never went out after power-on (still lit at {t:.1} s)"));
-        }
-        return match last {
-            Some(&(from, _)) => problem(L, format!("on at the end of the drive (lit since {from:.1} s)")),
-            None => problem(L, "on at the end of the drive"),
-        };
+    if !result.bulb_check_seen {
+        return could_not_tell(L, NO_BULB_CHECK);
     }
     if result.mil_lit_spans.is_empty() {
         return ok(L, "never lit after the bulb check");
@@ -320,24 +364,12 @@ fn lit_where(result: &RunResult) -> String {
 }
 
 fn codes(result: &RunResult) -> Line {
-    match &result.lamp {
-        Lamp::Off | Lamp::Steady if !reached_read_out(result) => {
-            could_not_tell("codes", "the run stopped before this")
-        }
-        Lamp::Codes(v) if v.is_empty() => {
-            could_not_tell("codes", "the lamp blinked but no code could be read")
-        }
-        // A steady lamp is the stock ROMs' no-code display, but the P30 ROM
-        // shows it too with code 24 stored (214h.7 skips the blink sequence
-        // at 0x3634). With the lamp lit at the end of the drive, "none
-        // blinked" does not mean "no fault".
-        Lamp::Off | Lamp::Steady if result.mil_lit_at_end_of_drive => problem(
-            "codes",
-            "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)",
-        ),
-        Lamp::Off => ok("codes", "none blinked"),
-        Lamp::Steady => ok("codes", "none blinked (lamp steady with the connector grounded)"),
-        Lamp::Codes(v) => {
+    const L: &str = "codes";
+    if !reached_read_out(result) {
+        return could_not_tell(L, "the run stopped before this");
+    }
+    let mut line = match &result.lamp {
+        Lamp::Codes(v) if !v.is_empty() => {
             let each: Vec<String> = v
                 .iter()
                 .map(|n| match code_name(*n) {
@@ -345,10 +377,33 @@ fn codes(result: &RunResult) -> Line {
                     None => n.to_string(),
                 })
                 .collect();
-            problem("codes", each.join(", "))
+            problem(L, each.join(", "))
         }
-        Lamp::Unreadable => could_not_tell("codes", "the lamp changed but no complete code could be read"),
+        // A steady lamp is the stock ROMs' no-code display, but the P30 ROM
+        // shows it too with code 24 stored (214h.7 skips the blink sequence
+        // at 0x3634). With the lamp lit at the end of the drive, "none
+        // blinked" does not mean "no fault".
+        Lamp::Off | Lamp::Steady if result.mil_lit_at_end_of_drive => problem(
+            L,
+            "none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)",
+        ),
+        _ if !result.bulb_check_seen => could_not_tell(L, NO_BULB_CHECK),
+        Lamp::Codes(_) => could_not_tell(L, "the lamp blinked but no code could be read"),
+        // Every ROM run so far lights the lamp with the connector grounded
+        // (steady with nothing stored, blinking otherwise); option byte
+        // 6011h at FFh on the stock ROM still gave a steady lamp. A dark one
+        // is not evidence of an empty fault list.
+        Lamp::Off => could_not_tell(
+            L,
+            "the light stayed dark with the service connector grounded; every ROM seen so far lights it or blinks",
+        ),
+        Lamp::Steady => ok(L, "none blinked (lamp steady with the connector grounded)"),
+        Lamp::Unreadable => could_not_tell(L, "the lamp changed but no complete code could be read"),
+    };
+    if result.lamp_list_may_be_incomplete {
+        line.text.push_str(" (the list may be incomplete: the light was still showing new codes when the read-out ended)");
     }
+    line
 }
 
 /// "Could not tell" naming every car value the board model could not
@@ -365,14 +420,14 @@ fn car_as_described(result: &RunResult) -> Option<Line> {
     ))
 }
 
-pub fn judge(result: &RunResult, _setup: &Setup) -> Report {
+pub fn judge(result: &RunResult, setup: &Setup) -> Report {
     let valid = section(
         "VALID FOR THIS ECU",
         vec![executes(result), settles(result), own_board(result)],
     );
     let mut run_lines: Vec<Line> = car_as_described(result).into_iter().collect();
     run_lines.extend([fuel_pump(result), cranking(result), warm_idle(result)]);
-    run_lines.extend(ac_idle(result));
+    run_lines.extend(ac_idle(result, setup));
     run_lines.extend([sweep(result), check_engine_light(result), codes(result)]);
     let runs = section("RUNS A BASIC SETUP", run_lines);
 
@@ -427,6 +482,7 @@ mod tests {
         let mut ac = stage("idle, A/C on", 18.0, 22.0);
         ac.ac_clutch_seen = true;
         let mut full = stage("full throttle", 26.0, 40.0);
+        full.injector_opens = [80, 80, 80, 80];
         full.fuel_stops_rpm = Some(7420.0);
         full.vtec_on_rpm = Some(4875.0);
         RunResult {
@@ -436,11 +492,13 @@ mod tests {
             stop: None,
             unmapped: (0, 0, None),
             ppi_unsupported_mode: false,
+            bulb_check_seen: true,
             mil_first_lit_after_bulb_check: None,
             mil_never_went_out: false,
             mil_lit_at_end_of_drive: false,
             mil_lit_spans: Vec::new(),
-            lamp: Lamp::Off,
+            lamp: Lamp::Steady,
+            lamp_list_may_be_incomplete: false,
             seconds: 90.0,
             unmodelled: Vec::new(),
         }
@@ -547,7 +605,7 @@ mod tests {
     fn settling_problems_and_stopped() {
         let cases = [
             Settling::NeverSettles { breaks: 9, last_pc: 0x21DF },
-            Settling::ResetsLater { times: vec![5.3, 10.6], pc: 0x21DF },
+            Settling::ResetsLater { times: vec![5.3, 10.6], pc: 0x21DF, count: 2 },
             Settling::Hung { since: 4.0 },
         ];
         for s in cases {
@@ -558,9 +616,21 @@ mod tests {
             assert_eq!(r.exit_status(), 1);
         }
         let mut c = clean();
-        c.settling = Settling::ResetsLater { times: vec![5.3, 10.6], pc: 0x21DF };
+        c.settling = Settling::ResetsLater { times: vec![5.3, 10.6], pc: 0x21DF, count: 2 };
         let r = judge(&c, &setup());
         assert_eq!(find(&r, "settles after power-on").text, "resets at 5.3 s, 10.6 s (program address 21DFh)");
+
+        // Many resets: the first three, and a count of the rest (including
+        // those past the kept log).
+        let times: Vec<f64> = (1..=20).map(|n| n as f64 * 5.29).collect();
+        c.settling = Settling::ResetsLater { times, pc: 0x237D, count: 20 };
+        let r = judge(&c, &setup());
+        assert_eq!(
+            find(&r, "settles after power-on").text,
+            "resets at 5.3 s, 10.6 s, 15.9 s and 17 more times (program address 237Dh)"
+        );
+        c.settling = Settling::ResetsLater { times: vec![5.3, 10.6, 15.9, 21.2], pc: 0x237D, count: 5000 };
+        assert!(find(&judge(&c, &setup()), "settles after power-on").text.contains("and 4997 more times"));
 
         let mut c = clean();
         c.settling = Settling::Stopped;
@@ -659,11 +729,20 @@ mod tests {
         assert_eq!(find(&r, "idle, A/C on").state, State::Problem);
         assert_eq!(r.exit_status(), 1);
 
+        // A car without A/C: no stage and no line.
         let mut c = clean();
         c.stages.retain(|s| s.name != "idle, A/C on");
-        let r = judge(&c, &setup());
+        let mut no_ac = setup();
+        no_ac.set("ac", "no").unwrap();
+        let r = judge(&c, &no_ac);
         assert!(r.runs.lines.iter().all(|l| l.label != "idle, A/C on"));
         assert_eq!(r.exit_status(), 0);
+
+        // A car with A/C whose run stopped before the stage: could not tell.
+        c.stop = Some((15.0, Stop::Unimplemented { pc: 0x1234, mnemonic: "DAA" }));
+        let r = judge(&c, &setup());
+        let l = find(&r, "idle, A/C on");
+        assert_eq!((l.state, l.text.as_str()), (State::CouldNotTell, "the run stopped before this"));
     }
 
     #[test]
@@ -705,6 +784,18 @@ mod tests {
         assert_eq!(r.exit_status(), 0);
     }
 
+    #[test]
+    fn a_sweep_with_no_injector_opening_is_a_problem() {
+        let mut c = clean();
+        let f = stage_mut(&mut c, "full throttle");
+        f.injector_opens = [0; 4];
+        f.fuel_stops_rpm = None;
+        let r = judge(&c, &setup());
+        let l = find(&r, "full throttle sweep");
+        assert_eq!((l.state, l.text.as_str()), (State::Problem, "no injector opened during the full-throttle sweep"));
+        assert_eq!(r.exit_status(), 1);
+    }
+
     /// `clean()` with the lamp relit at `from` and lit to the end of the drive.
     fn lit_to_the_end(from: f64) -> RunResult {
         let mut c = clean();
@@ -738,7 +829,13 @@ mod tests {
         let r = judge(&c, &setup());
         let l = find(&r, "check-engine light");
         assert_eq!(l.state, State::Problem);
-        assert_eq!(l.text, "never went out after power-on (still lit at 6.0 s)");
+        assert_eq!(l.text, "never went out after power-on");
+
+        // Never went out in key on, but dark later and lit again: not
+        // "never went out"; the last span names it.
+        c.mil_lit_spans = vec![(6.0, 20.0), (30.0, 50.0)];
+        let l = find(&judge(&c, &setup()), "check-engine light").clone();
+        assert_eq!((l.state, l.text.as_str()), (State::Problem, "on at the end of the drive (lit since 30.0 s)"));
     }
 
     #[test]
@@ -793,12 +890,21 @@ mod tests {
 
     #[test]
     fn codes_line() {
-        let r = judge(&clean(), &setup());
-        assert_eq!(find(&r, "codes").state, State::Ok);
-        assert_eq!(find(&r, "codes").text, "none blinked");
-
+        // Dark with the connector grounded: no ROM seen so far does that.
         let mut c = clean();
-        c.lamp = Lamp::Steady;
+        c.lamp = Lamp::Off;
+        let r = judge(&c, &setup());
+        let l = find(&r, "codes");
+        assert_eq!(
+            (l.state, l.text.as_str()),
+            (
+                State::CouldNotTell,
+                "the light stayed dark with the service connector grounded; every ROM seen so far lights it or blinks"
+            )
+        );
+        assert_eq!(r.exit_status(), 3);
+
+        let c = clean();
         let r = judge(&c, &setup());
         assert_eq!(find(&r, "codes").state, State::Ok);
         assert_eq!(find(&r, "codes").text, "none blinked (lamp steady with the connector grounded)");
@@ -908,6 +1014,109 @@ mod tests {
         c.stop = Some((60.0, Stop::Unimplemented { pc: 0x1234, mnemonic: "DAA" }));
         let l = find(&judge(&c, &setup()), "check-engine light").clone();
         assert_eq!((l.state, l.text.as_str()), (State::Problem, "on at the end of the drive (lit since 12.5 s)"));
+    }
+
+    #[test]
+    fn without_a_bulb_check_a_quiet_lamp_is_could_not_tell() {
+        // Never seen lit at key-on: dark at the end of the drive and a
+        // quiet read-out say nothing, whatever the read-out showed.
+        for lamp in [Lamp::Off, Lamp::Steady, Lamp::Unreadable, Lamp::Codes(vec![])] {
+            let mut c = clean();
+            c.bulb_check_seen = false;
+            c.lamp = lamp.clone();
+            let r = judge(&c, &setup());
+            for label in ["check-engine light", "codes"] {
+                let l = find(&r, label);
+                assert_eq!(
+                    (l.state, l.text.as_str()),
+                    (State::CouldNotTell, "the check-engine light never came on at key-on, so it cannot show a fault"),
+                    "{label} {lamp:?}"
+                );
+            }
+            assert!(matches!(&r.verdict, Verdict::CouldNotTell(why) if why.starts_with("check-engine light: ")), "{lamp:?}");
+            assert_eq!(r.exit_status(), 3);
+        }
+    }
+
+    #[test]
+    fn without_a_bulb_check_an_observed_fault_is_still_a_problem() {
+        // Codes blinked.
+        let mut c = clean();
+        c.bulb_check_seen = false;
+        c.lamp = Lamp::Codes(vec![14]);
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "codes").state, State::Problem);
+        assert_eq!(find(&r, "check-engine light").state, State::CouldNotTell);
+        assert!(matches!(&r.verdict, Verdict::DoNotBurn(why) if why.starts_with("codes: 14")));
+
+        // Lit at the end of the drive.
+        let mut c = lit_to_the_end(12.5);
+        c.bulb_check_seen = false;
+        let r = judge(&c, &setup());
+        assert_eq!(find(&r, "check-engine light").state, State::Problem);
+        assert_eq!(find(&r, "codes").state, State::Problem);
+        assert_eq!(r.exit_status(), 1);
+    }
+
+    #[test]
+    fn an_incomplete_code_list_says_so() {
+        let mut c = clean();
+        c.lamp = Lamp::Codes(vec![14, 19, 20]);
+        c.lamp_list_may_be_incomplete = true;
+        let l = find(&judge(&c, &setup()), "codes").clone();
+        assert_eq!(l.state, State::Problem);
+        assert!(l.text.starts_with("14 "), "{}", l.text);
+        assert!(
+            l.text.ends_with(
+                "(the list may be incomplete: the light was still showing new codes when the read-out ended)"
+            ),
+            "{}",
+            l.text
+        );
+    }
+
+    /// A real `script::run` of a ROM whose reset vector points at the
+    /// undefined opcode B4h: it stops at once, inside `key on`, before the
+    /// board is programmed.
+    fn stopped_at_once() -> RunResult {
+        let mut rom = vec![0xFF; 32768];
+        rom[0] = 0x00;
+        rom[1] = 0x01;
+        rom[0x100] = 0xB4;
+        let mut bench = crate::bench::Bench::new(&rom);
+        let r = crate::script::run(&mut bench, &setup());
+        assert!(matches!(r.stop, Some((_, Stop::UndefinedOpcode { pc: 0x0100, byte: 0xB4 }))), "{:?}", r.stop);
+        assert_eq!(r.stages.len(), 1);
+        assert!(!r.board_programmed);
+        assert_eq!(r.lamp, Lamp::Unreadable);
+        r
+    }
+
+    #[test]
+    fn an_emulator_gap_early_in_a_real_run_is_could_not_tell() {
+        let mut r = stopped_at_once();
+        r.stop = Some((r.stop.unwrap().0, Stop::Unimplemented { pc: 0x0100, mnemonic: "DAA" }));
+        let report = judge(&r, &setup());
+        assert!(matches!(&report.verdict, Verdict::CouldNotTell(why) if why.starts_with("executes: ")), "{report:#?}");
+        assert_eq!(report.exit_status(), 3);
+        let text = |label| {
+            let l = find(&report, label);
+            (l.state, l.text.clone())
+        };
+        let cnt = |s: &str| (State::CouldNotTell, s.to_string());
+        assert_eq!(text("talks only to this board"), cnt("the run stopped before the board was set up"));
+        assert_eq!(text("fuel pump prime"), cnt("the run stopped during this stage"));
+        for label in ["cranking", "warm idle", "idle, A/C on", "full throttle sweep", "check-engine light", "codes"] {
+            assert_eq!(text(label), cnt("the run stopped before this"), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_undefined_opcode_early_in_a_real_run_is_do_not_burn_through_executes() {
+        let report = judge(&stopped_at_once(), &setup());
+        assert!(matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("executes: undefined opcode")), "{report:#?}");
+        assert_eq!(find(&report, "talks only to this board").state, State::CouldNotTell);
+        assert_eq!(report.exit_status(), 1);
     }
 
     #[test]

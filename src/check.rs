@@ -4,7 +4,7 @@
 use std::io::{BufRead, Write};
 
 use crate::bench::Bench;
-use crate::car::{file_preset, Setup, KEYS, PRESETS};
+use crate::car::{file_preset, EcuModel, Setup, KEYS, PRESETS};
 use crate::report;
 use crate::script;
 use crate::verdict;
@@ -65,7 +65,8 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     Ok(Args { rom, car, sets, report, no_prompt })
 }
 
-/// What the preset would be when the user names none.
+/// The default shown at the preset question (asked only without `--car`):
+/// what the base would be from the command line alone.
 fn default_preset(args: &Args) -> &'static str {
     let p30 = args
         .sets
@@ -74,13 +75,26 @@ fn default_preset(args: &Args) -> &'static str {
     if p30 { PRESETS[2] } else { PRESETS[0] }
 }
 
+/// `--car` names a preset rather than a file.
+fn named_preset(args: &Args) -> Option<&str> {
+    args.car.as_deref().filter(|c| PRESETS.contains(&c.trim().to_ascii_lowercase().as_str()))
+}
+
+/// The car file's name, when `--car` gave a file.
+fn car_file_name(args: &Args) -> Option<String> {
+    match (&args.car, named_preset(args)) {
+        (Some(path), None) => Some(rom_name(path)),
+        _ => None,
+    }
+}
+
 /// Preset, then the car file, then `--set` and the shorthands, in that order.
 /// `chosen_preset` is the answer to the preset question, when it was asked.
+/// When no preset is named anywhere (`--car`, the file's `preset =` line, the
+/// question), the base is `stock-p30` if the resolved `ecu` is p30, from
+/// whichever source gave it, else `stock-p28-manual`.
 fn build_setup(args: &Args, chosen_preset: Option<&str>) -> Result<Setup, String> {
-    let named_preset = args
-        .car
-        .as_deref()
-        .filter(|c| PRESETS.contains(&c.trim().to_ascii_lowercase().as_str()));
+    let named_preset = named_preset(args);
     let file_text = match (&args.car, named_preset) {
         (Some(path), None) => {
             let text = std::fs::read_to_string(path)
@@ -95,15 +109,23 @@ fn build_setup(args: &Args, chosen_preset: Option<&str>) -> Result<Setup, String
         Some((path, text)) => file_preset(text).map_err(|e| format!("car file {path}: {e}"))?,
         None => None,
     };
-    let base = named_preset.or(from_file).or(chosen_preset).unwrap_or(default_preset(args));
-    let mut setup = Setup::preset(base)?;
-    if let Some((path, text)) = &file_text {
-        setup.apply_file(text).map_err(|e| format!("car file {path}: {e}"))?;
+    let build = |base: &str| -> Result<Setup, String> {
+        let mut setup = Setup::preset(base)?;
+        if let Some((path, text)) = &file_text {
+            setup.apply_file(text).map_err(|e| format!("car file {path}: {e}"))?;
+        }
+        for (key, value) in &args.sets {
+            setup.set(key, value).map_err(|e| format!("--set {key}: {e}"))?;
+        }
+        Ok(setup)
+    };
+    match named_preset.or(from_file).or(chosen_preset) {
+        Some(base) => build(base),
+        None => {
+            let setup = build(PRESETS[0])?;
+            if setup.ecu == EcuModel::P30 { build(PRESETS[2]) } else { Ok(setup) }
+        }
     }
-    for (key, value) in &args.sets {
-        setup.set(key, value).map_err(|e| format!("--set {key}: {e}"))?;
-    }
-    Ok(setup)
 }
 
 /// A board that was not described is assumed to be set up for the car's gearbox.
@@ -216,6 +238,53 @@ fn ask_preset(args: &Args, input: &mut impl BufRead, out: &mut impl Write) -> (O
     }
 }
 
+/// One line of input, trimmed; `None` at the end of input.
+fn read_answer(input: &mut impl BufRead, out: &mut impl Write) -> Option<String> {
+    let _ = out.flush();
+    let mut line = String::new();
+    if !matches!(input.read_line(&mut line), Ok(n) if n > 0) {
+        let _ = writeln!(out);
+        return None;
+    }
+    Some(line.trim().to_string())
+}
+
+/// Offers to save the answers as a car file. Enter, `n` or `no` skips; `y`
+/// or `yes` asks for the name; anything else is the name. An existing file
+/// is overwritten only on a yes. A failed save is reported and changes
+/// nothing else: the verdict still decides the exit status.
+fn offer_save(setup: &Setup, input: &mut impl BufRead, out: &mut impl Write, err: &mut impl Write) {
+    let _ = write!(out, "Save these answers to a file? Type a file name, or press Enter to skip: ");
+    let Some(answer) = read_answer(input, out) else { return };
+    let name = match answer.to_ascii_lowercase().as_str() {
+        "" | "n" | "no" => return,
+        "y" | "yes" => {
+            let _ = write!(out, "File name: ");
+            match read_answer(input, out) {
+                Some(name) if !name.is_empty() => name,
+                _ => return,
+            }
+        }
+        _ => answer,
+    };
+    if std::path::Path::new(&name).exists() {
+        let _ = write!(out, "\"{name}\" exists. Overwrite? (yes/no) [no]: ");
+        let yes = read_answer(input, out).is_some_and(|a| a.eq_ignore_ascii_case("yes") || a.eq_ignore_ascii_case("y"));
+        if !yes {
+            let _ = writeln!(out, "Not saved.");
+            return;
+        }
+    }
+    match std::fs::write(&name, setup.to_saved_file_text()) {
+        Ok(()) => {
+            let _ = writeln!(out, "Saved to {name}. Use it again with --car {name}");
+        }
+        Err(e) => {
+            let _ = writeln!(err, "cannot write {name}: {e}");
+        }
+    }
+}
+
 fn rom_name(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -274,33 +343,20 @@ pub fn run(
     }
     settle_board_gearbox(&mut setup);
     if interactive {
-        let check = |_: &str| Ok(());
         // Nothing more is offered once the input has ended.
-        let offer = if ended {
-            Reply::EndOfInput
-        } else {
-            prompt(input, out, "Save these answers to a file? [path, or Enter to skip]", "", &check)
-        };
-        if let Reply::Answer(path) = offer {
-            match std::fs::write(&path, setup.to_saved_file_text()) {
-                Ok(()) => {
-                    let _ = writeln!(out, "Saved to {path}. Use it again with --car {path}");
-                }
-                Err(e) => {
-                    let _ = writeln!(err, "cannot write {path}: {e}");
-                    status = 2;
-                }
-            }
+        if !ended {
+            offer_save(&setup, input, out, err);
         }
-        let _ = writeln!(out, "Running the ROM (about 20 seconds)...");
+        let _ = writeln!(out, "Running the ROM (about half a minute)...");
     }
 
     let result = script::run(&mut bench, &setup);
     let report = verdict::judge(&result, &setup);
     let name = rom_name(&args.rom);
-    let _ = write!(out, "{}", report::text(&report, &setup, &name));
+    let car_file = car_file_name(&args);
+    let _ = write!(out, "{}", report::text(&report, &setup, &name, car_file.as_deref()));
     if let Some(path) = &args.report {
-        if let Err(e) = std::fs::write(path, report::json(&report, &setup, &name)) {
+        if let Err(e) = std::fs::write(path, report::json(&report, &setup, &name, car_file.as_deref())) {
             let _ = writeln!(err, "cannot write report {path}: {e}");
             status = 2;
         }
@@ -495,6 +551,87 @@ mod tests {
     }
 
     #[test]
+    fn ecu_p30_from_any_source_gives_the_same_setup() {
+        let file = temp_file(b"ecu = p30\n");
+        let setups: Vec<Setup> = [
+            &["check", "rom.bin", "--ecu", "p30"][..],
+            &["check", "rom.bin", "--set", "ecu=p30"],
+            &["check", "rom.bin", "--car", &file],
+        ]
+        .iter()
+        .map(|a| build_setup(&parse_args(&strings(a)).unwrap(), None).unwrap())
+        .collect();
+        for s in &setups {
+            assert_eq!(s, &setups[0]);
+        }
+        assert_eq!(setups[0].preset, "stock-p30");
+        assert!(setups[0].knock_sensor);
+        assert_eq!(setups[0].defaulted(), Setup::preset("stock-p30").unwrap().defaulted()[1..].to_vec());
+
+        // A preset that is named still wins over the ecu.
+        let file = temp_file(b"preset = stock-p28-manual\necu = p30\n");
+        let s = build_setup(&parse_args(&strings(&["check", "rom.bin", "--car", &file])).unwrap(), None).unwrap();
+        assert_eq!(s.preset, "stock-p28-manual");
+        assert!(!s.knock_sensor);
+        let args = parse_args(&strings(&["check", "rom.bin", "--ecu", "p30"])).unwrap();
+        assert_eq!(build_setup(&args, Some("stock-p28-manual")).unwrap().preset, "stock-p28-manual");
+    }
+
+    /// The interactive run up to the save offer, every question taking its
+    /// default, then `save` as the lines answering the offer.
+    fn save_offer(save: &[&str]) -> (i32, String, String) {
+        let rom = temp_file(&vec![0xB4u8; 32768]);
+        let input = "\n".repeat(1 + KEYS.len()) + &save.iter().map(|l| format!("{l}\n")).collect::<String>();
+        drive(&["check", &rom], &input, true)
+    }
+
+    #[test]
+    fn no_at_the_save_offer_skips_in_any_case() {
+        for answer in ["n", "no", "NO", "N", ""] {
+            let (status, out, err) = save_offer(&[answer]);
+            assert_eq!(status, 1, "{answer}");
+            assert!(err.is_empty(), "{answer}: {err}");
+            assert!(out.contains("Save these answers to a file? Type a file name, or press Enter to skip: "), "{out}");
+            assert!(!out.contains("Saved to"), "{answer}: {out}");
+            assert!(!std::path::Path::new(answer).exists() || answer.is_empty(), "{answer} written");
+        }
+    }
+
+    #[test]
+    fn yes_at_the_save_offer_asks_for_the_name() {
+        let saved = unique_path("yes.txt");
+        let (_, out, _) = save_offer(&["Yes", &saved]);
+        assert!(out.contains("File name: "), "{out}");
+        assert!(out.contains(&format!("Saved to {saved}.")), "{out}");
+        assert!(std::fs::read_to_string(&saved).unwrap().contains("preset = stock-p28-manual"));
+        // Enter at the name: nothing saved.
+        let (_, out, _) = save_offer(&["y", ""]);
+        assert!(out.contains("File name: ") && !out.contains("Saved to"), "{out}");
+    }
+
+    #[test]
+    fn an_existing_file_is_overwritten_only_on_yes() {
+        let saved = temp_file(b"keep me\n");
+        for answer in ["", "no", "maybe"] {
+            let (_, out, _) = save_offer(&[&saved, answer]);
+            assert!(out.contains(&format!("\"{saved}\" exists. Overwrite? (yes/no) [no]: ")), "{out}");
+            assert!(out.contains("Not saved.") && !out.contains("Saved to"), "{out}");
+            assert_eq!(std::fs::read_to_string(&saved).unwrap(), "keep me\n", "{answer}");
+        }
+        let (_, out, _) = save_offer(&[&saved, "yes"]);
+        assert!(out.contains(&format!("Saved to {saved}.")), "{out}");
+        assert!(std::fs::read_to_string(&saved).unwrap().contains("preset = "));
+    }
+
+    #[test]
+    fn a_failed_save_says_why_and_keeps_the_verdicts_exit_status() {
+        let (status, out, err) = save_offer(&["no-such-dir/car.txt"]);
+        assert!(err.contains("cannot write no-such-dir/car.txt"), "{err}");
+        assert!(out.contains("VERDICT: DO NOT BURN"), "{out}");
+        assert_eq!(status, 1, "the verdict's status, not 2");
+    }
+
+    #[test]
     fn a_wrong_answer_is_asked_again_then_defaulted() {
         // Invalid, then valid: asked again.
         let mut s = Setup::preset("stock-p28-manual").unwrap();
@@ -572,7 +709,7 @@ mod tests {
         assert_eq!(status, 1, "the 0xB4 ROM is not worth burning");
         assert!(out.contains("Start from which car? (stock-p28-manual/stock-p28-automatic/stock-p30) [stock-p28-manual]: "));
         assert!(out.contains("Knock sensor fitted? (yes/no) [no]: "));
-        assert!(out.contains("Save these answers to a file? [path, or Enter to skip]"));
+        assert!(out.contains("Save these answers to a file? Type a file name, or press Enter to skip: "));
         // Only the Enter-pressed key is defaulted, and it followed the car's gearbox.
         assert!(out.contains("(defaulted: board_gearbox)"), "{out}");
         assert!(out.contains("ECU: P28 automatic"), "{out}");
@@ -615,8 +752,10 @@ mod tests {
         let (_, out2, err2) = drive(&["check", &rom, "--car", &saved, "--no-prompt", "--report", &json2], "", false);
         assert!(err2.is_empty(), "{err2}");
         let header = |s: &str| s.lines().find(|l| l.starts_with("ROM:")).unwrap().to_string();
-        assert_eq!(header(&out2), header(&out));
-        assert!(header(&out2).contains("Car: stock-p30"), "{}", header(&out2));
+        // The re-run's header names the file as well as its preset.
+        let file_name = rom_name(&saved);
+        assert_eq!(header(&out2), header(&out).replace("Car: stock-p30", &format!("Car: {file_name} (preset stock-p30)")));
+        assert!(header(&out).contains("Car: stock-p30 "), "{}", header(&out));
         let setup_of = |path: &str| {
             let j = std::fs::read_to_string(path).unwrap();
             let start = j.find("\"setup\"").unwrap();

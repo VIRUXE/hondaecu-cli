@@ -2,8 +2,8 @@
 //! stock P28-230 ROM, manual and automatic, and on the stock P30 mask-203
 //! ROM, and on community images (HTS base, ERM baseline, P72, lyonnel).
 //! Every test needs its ROM image (feature `p28-rom`, `p30-rom`, `hts-rom`,
-//! `erm-rom`, `p72-rom` or `launch-rom`); each full run is about 20 s of
-//! wall time.
+//! `erm-rom`, `p72-rom` or `launch-rom`); each full run is about half a
+//! minute of wall time, more when the read-out runs long.
 
 use crate::bench::Bench;
 use crate::blink::Lamp;
@@ -91,6 +91,110 @@ fn one_change(key: &str, value: &str) -> (RunResult, Report, Bench) {
 
 fn stage<'a>(result: &'a RunResult, name: &str) -> &'a crate::script::StageResult {
     result.stages.iter().find(|s| s.name == name).unwrap()
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn case_6_no_iacv_stores_and_blinks_code_14() {
+    // The IACV current check 0x3C52..0x3C71 sets 99h.3, code 14 (6C99h
+    // index 12); the whole pipeline says do not burn.
+    let (result, report, bench) = one_change("iacv", "none");
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Codes(vec![14]));
+    assert_eq!(report.codes, vec![14]);
+    assert_eq!(stored_codes(&bench), vec![14]);
+    assert!(result.bulb_check_seen);
+}
+
+fn byte_sum(image: &[u8]) -> u8 {
+    image.iter().fold(0u8, |s, &b| s.wrapping_add(b))
+}
+
+/// The stock P28 image with its only two lamp writes, `MB P1.4, C` at 0x36CA
+/// (the read-out display) and 0x42AE (the lamp everywhere else), replaced by
+/// NOPs (00h), and the byte sum brought back to 0 at 0x7FFF (FFh, unused
+/// fill; `case_5_bad_checksum_resets` shows the ROM checks the sum). The
+/// listing `tests/fixtures/p28_dasm662.tsv` gives both as 3-byte
+/// instructions and has no other `MB P1.4, C`.
+fn p28_without_its_lamp() -> Vec<u8> {
+    let listing = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/p28_dasm662.tsv")).unwrap();
+    let writes: Vec<(usize, usize)> = listing
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .filter(|f| f.len() >= 6 && f[3] == "MB" && f[5] == "P1.4, C")
+        .map(|f| (usize::from_str_radix(f[0], 16).unwrap(), f[2].parse().unwrap()))
+        .collect();
+    assert_eq!(writes, [(0x36CA, 3), (0x42AE, 3)]);
+
+    let mut image = std::fs::read(rom()).unwrap();
+    image.truncate(32768);
+    assert_eq!(byte_sum(&image), 0, "byte sum of the stock image");
+    for (at, len) in writes {
+        assert_eq!(image[at..at + len], [0xC5, 0x22, 0x3C], "{at:04X}");
+        image[at..at + len].fill(0x00);
+    }
+    assert_eq!(image[0x7FFF], 0xFF);
+    image[0x7FFF] = image[0x7FFF].wrapping_sub(byte_sum(&image));
+    assert_eq!(image[0x7FFF], 0x45, "FFh less the 2 x 23h the NOPs removed");
+    assert_eq!(byte_sum(&image), 0);
+    image
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn a_rom_that_never_lights_the_lamp_is_not_worth_burning_on_a_car_where_it_stores_a_fault() {
+    // The final review's case: without its lamp writes the ROM still stores
+    // code 14 with the IACV unplugged, but nothing a mechanic could see
+    // shows it. The lamp never lit in `key on`, so neither lamp line can be
+    // believed: could not tell, never worth burning.
+    let mut setup = preset("stock-p28-manual");
+    setup.set("iacv", "none").unwrap();
+    let (result, report, bench) = check_bench(Bench::new(&p28_without_its_lamp()), &setup);
+    assert!(!result.bulb_check_seen);
+    assert!(bench.mil_edges().iter().all(|e| !e.1), "{:?}", bench.mil_edges());
+    assert_eq!(stored_codes(&bench), vec![14]);
+    assert!(
+        matches!(&report.verdict, Verdict::CouldNotTell(why)
+            if why == "check-engine light: the check-engine light never came on at key-on, so it cannot show a fault"),
+        "{report:#?}"
+    );
+    let codes = report.runs.lines.iter().find(|l| l.label == "codes").unwrap();
+    assert_eq!(codes.state, State::CouldNotTell);
+}
+
+/// The reviewer's five faults on one car: IACV unplugged (14), ELD missing
+/// (20), one-wire O2 sensor (heater, stored bit 27, blinked 41), no VTEC
+/// solenoid (21), automatic board in a manual car (19).
+fn five_faults() -> Setup {
+    let mut setup = preset("stock-p28-manual");
+    for (key, value) in [
+        ("iacv", "none"),
+        ("eld", "no"),
+        ("o2_sensor", "one-wire"),
+        ("vtec", "no"),
+        ("board_gearbox", "automatic"),
+    ] {
+        setup.set(key, value).unwrap();
+    }
+    setup
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn five_stored_faults_are_all_blinked() {
+    // A 40 s read-out showed 14, 19, 20 only: the five-code cycle is longer
+    // than that. The read-out now runs until the cycle has been seen twice.
+    let (result, report, bench) = check_bench(Bench::from_file(&rom()).unwrap(), &five_faults());
+    // Stored bit 27 (the O2 heater) is blinked as 41 (`case_6_one_wire_o2_sensor_stores_the_heater_code`).
+    let blinked: Vec<u8> = stored_codes(&bench).iter().map(|&c| if c == 27 { 41 } else { c }).collect();
+    assert_eq!(blinked, vec![14, 19, 20, 21, 41]);
+    assert_eq!(result.lamp, Lamp::Codes(blinked));
+    assert!(!result.lamp_list_may_be_incomplete);
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
+    let read_out = stage(&result, "code read-out");
+    assert!(read_out.to - read_out.from > 40.5, "the read-out went on past 40 s");
+    assert!(read_out.to - read_out.from <= crate::script::READ_OUT_MAX_SECONDS + 0.01);
 }
 
 #[test]
@@ -187,7 +291,7 @@ fn case_6_no_o2_sensor_stores_the_heater_code_and_is_unmodelled() {
 #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
 fn case_6_values_the_model_cannot_represent_could_not_tell() {
     // One run for the unmodelled values that leave the board as it is, so
-    // as not to spend a 20 s run on each (`o2_sensor = none` has its own
+    // as not to spend a whole run on each (`o2_sensor = none` has its own
     // run: its missing heater adds a code). The run is the stock one, so
     // the only line that is not ok is the car line: COULD NOT TELL, exit 3.
     let mut setup = preset("stock-p28-manual");
@@ -284,8 +388,8 @@ fn stock_p30_on_a_p28_box_holds_the_lamp_lit_and_blinks_nothing() {
     // practice expects code 23; the ROM stores code 24 and blinks nothing:
     // with 214h.7 set the read-out routine skips the blink sequence (0x3634)
     // and holds the lamp lit, so the read-out looks like the no-code display
-    // (docs/CHECK.md, "The P30 box"). The lamp lit after the bulb check is
-    // what makes this a problem, and it turns the quiet read-out into a
+    // (docs/CHECK.md, "The P30 box"). The lamp lit at the end of the drive
+    // is what makes this a problem, and it turns the quiet read-out into a
     // problem on the codes line too.
     let (result, report, bench) = p30_check(&[("ecu", "p28")]);
     assert!(
@@ -525,9 +629,10 @@ fn erm_baseline_resets_on_its_own_checksum() {
         "{report:#?}"
     );
     match &result.settling {
-        crate::bench::Settling::ResetsLater { times, pc } => {
+        crate::bench::Settling::ResetsLater { times, pc, count } => {
             assert_eq!(*pc, 0x237D);
             assert_eq!(times.len(), 20, "{times:?}");
+            assert_eq!(*count, 20);
             for w in times.windows(2) {
                 assert!((w[1] - w[0] - 5.29).abs() < 0.05, "{times:?}");
             }

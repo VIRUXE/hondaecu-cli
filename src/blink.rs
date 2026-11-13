@@ -53,6 +53,59 @@ pub const STEADY_MIN_SECONDS: f64 = 10.0;
 /// when the lamp has been lit without a break for `STEADY_MIN_SECONDS` at
 /// `to`, else `Unreadable`. Any complete run makes it `Codes`.
 pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
+    let r = read(edges, from, to);
+    if !r.changed {
+        return if r.lit { Lamp::Steady } else { Lamp::Off };
+    }
+    if !r.saw_rise {
+        return Lamp::Off;
+    }
+    if r.runs.iter().any(|&c| c > 99) {
+        return Lamp::Unreadable;
+    }
+    let mut codes: Vec<u8> = r.runs.into_iter().map(|c| c as u8).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    if !codes.is_empty() {
+        Lamp::Codes(codes)
+    } else if r.lit && to - r.lit_since >= STEADY_MIN_SECONDS {
+        Lamp::Steady
+    } else {
+        Lamp::Unreadable
+    }
+}
+
+/// The complete runs `decode` reads between `from` and `to`, in the order
+/// the lamp showed them, repeats included.
+pub fn complete_runs(edges: &[(f64, bool)], from: f64, to: f64) -> Vec<u32> {
+    read(edges, from, to).runs
+}
+
+/// The length of the cycle the lamp repeats, once `runs` (in order) shows
+/// it twice over: the smallest `p` with `runs[i] == runs[i + p]` for every
+/// `i` and at least `2 p` runs. The ROM blinks each stored code once per
+/// cycle, so a cycle holds distinct codes and no shorter `p` can match. The
+/// first run need not be the first code of the cycle. `None` until a whole
+/// cycle has been seen twice.
+pub fn full_period(runs: &[u32]) -> Option<usize> {
+    (1..=runs.len() / 2).find(|&p| (0..runs.len() - p).all(|i| runs[i] == runs[i + p]))
+}
+
+/// What the lamp showed between `from` and `to`.
+struct Reading {
+    /// Complete runs in order (a code each).
+    runs: Vec<u32>,
+    /// Some edge fell inside the window.
+    changed: bool,
+    /// Some dark-to-lit edge fell inside the window.
+    saw_rise: bool,
+    /// Lit at `to`.
+    lit: bool,
+    /// The last rise inside the window, or `from`.
+    lit_since: f64,
+}
+
+fn read(edges: &[(f64, bool)], from: f64, to: f64) -> Reading {
     let before = edges.iter().rposition(|e| e.0 <= from);
     let mut lit = before.map_or(false, |i| edges[i].1);
     // When the lamp last went dark; a lamp dark since power-on (the first
@@ -62,9 +115,6 @@ pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
         _ => f64::NEG_INFINITY,
     };
     let inside: Vec<&(f64, bool)> = edges.iter().filter(|e| e.0 > from && e.0 < to).collect();
-    if inside.is_empty() {
-        return if lit { Lamp::Steady } else { Lamp::Off };
-    }
 
     let mut codes: Vec<u32> = Vec::new();
     let (mut tens, mut ones) = (0u32, 0u32);
@@ -106,23 +156,7 @@ pub fn decode(edges: &[(f64, bool)], from: f64, to: f64) -> Lamp {
     if !lit && counting && tens + ones > 0 && to - dark_since >= CODE_GAP_MIN_SECONDS {
         codes.push(tens * 10 + ones);
     }
-
-    if !saw_rise {
-        return Lamp::Off;
-    }
-    if codes.iter().any(|&c| c > 99) {
-        return Lamp::Unreadable;
-    }
-    let mut codes: Vec<u8> = codes.into_iter().map(|c| c as u8).collect();
-    codes.sort_unstable();
-    codes.dedup();
-    if !codes.is_empty() {
-        Lamp::Codes(codes)
-    } else if lit && to - lit_since >= STEADY_MIN_SECONDS {
-        Lamp::Steady
-    } else {
-        Lamp::Unreadable
-    }
+    Reading { runs: codes, changed: !inside.is_empty(), saw_rise, lit, lit_since }
 }
 
 #[cfg(test)]
@@ -291,6 +325,55 @@ mod tests {
             (84.521, false),
         ];
         assert_eq!(decode(&edges, 70.506, 88.0), Lamp::Codes(vec![20]));
+    }
+
+    #[test]
+    fn one_code_repeated_has_a_period_of_one() {
+        let (edges, end) = lamp_showing(&[(1, 4), (1, 4)]);
+        assert_eq!(complete_runs(&edges, 0.0, end), vec![14, 14]);
+        assert_eq!(full_period(&complete_runs(&edges, 0.0, end)), Some(1));
+        // Once only: not yet seen to repeat.
+        let (edges, end) = lamp_showing(&[(1, 4)]);
+        assert_eq!(full_period(&complete_runs(&edges, 0.0, end)), None);
+        assert_eq!(full_period(&[]), None);
+    }
+
+    const FIVE: [(u32, u32); 5] = [(1, 4), (1, 9), (2, 0), (2, 1), (4, 1)];
+
+    #[test]
+    fn five_codes_in_a_cycle_have_a_period_of_five_once_seen_twice() {
+        let twice: Vec<(u32, u32)> = FIVE.iter().chain(FIVE.iter()).copied().collect();
+        let (edges, end) = lamp_showing(&twice);
+        let runs = complete_runs(&edges, 0.0, end);
+        assert_eq!(runs, vec![14, 19, 20, 21, 41, 14, 19, 20, 21, 41]);
+        assert_eq!(full_period(&runs), Some(5));
+        assert_eq!(decode(&edges, 0.0, end), Lamp::Codes(vec![14, 19, 20, 21, 41]));
+    }
+
+    #[test]
+    fn a_cycle_cut_before_its_second_pass_has_no_period() {
+        // Five codes, then the first three again: the cycle is not yet
+        // seen twice, and the first three alone are not a cycle.
+        let cut: Vec<(u32, u32)> = FIVE.iter().chain(FIVE[..3].iter()).copied().collect();
+        let (edges, end) = lamp_showing(&cut);
+        let runs = complete_runs(&edges, 0.0, end);
+        assert_eq!(runs, vec![14, 19, 20, 21, 41, 14, 19, 20]);
+        assert_eq!(full_period(&runs), None);
+        // The first three alone, as a 40 s read-out might end: no period.
+        assert_eq!(full_period(&[14, 19, 20]), None);
+    }
+
+    #[test]
+    fn a_first_run_skipped_at_the_window_start_still_finds_the_cycle() {
+        // The window opens inside the first 14 (after its long blink), so
+        // the first run read is 19; the cycle is then 19, 20, 21, 41, 14.
+        let three: Vec<(u32, u32)> = FIVE.iter().chain(FIVE.iter()).chain(FIVE.iter()).copied().collect();
+        let (edges, end) = lamp_showing(&three);
+        let from = edges[2].0 + PAUSE / 2.0;
+        let runs = complete_runs(&edges, from, end);
+        assert_eq!(runs[0], 19, "{runs:?}");
+        assert_eq!(full_period(&runs), Some(5));
+        assert_eq!(full_period(&runs[..9]), None, "nine runs from 19 are not two full cycles");
     }
 
     #[test]
