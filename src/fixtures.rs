@@ -4,8 +4,9 @@
 // neither is in the repository and the tests that need them are opt-in:
 //
 //   feature `p28-rom`     + HONDAECU_P28_ROM     the stock P28-230 image
+//   feature `p30-rom`     + HONDAECU_P30_ROM     the stock P30 mask-203 image
 //   feature `launch-rom`  + HONDAECU_LAUNCH_ROM  the launch-control image
-//   feature `rom-fixtures`                       both
+//   feature `rom-fixtures`                       all three
 //
 // Without the feature those tests are reported as ignored, never as passed.
 // With it, a path that is unset or does not name a file fails the test: a
@@ -15,11 +16,18 @@
 use std::path::Path;
 
 pub const P28_ROM_ENV: &str = "HONDAECU_P28_ROM";
+pub const P30_ROM_ENV: &str = "HONDAECU_P30_ROM";
 pub const LAUNCH_ROM_ENV: &str = "HONDAECU_LAUNCH_ROM";
 
 /// Path of the stock P28-230 image. Panics if it is not configured or absent.
 pub fn p28_rom_path() -> String {
     required(P28_ROM_ENV, "the stock P28-230 ROM")
+}
+
+/// Path of the stock P30 image, mask 203 (docs/CHECK.md, "Which image is the
+/// factory P30"). Panics if it is not configured or absent.
+pub fn p30_rom_path() -> String {
+    required(P30_ROM_ENV, "the stock P30 mask-203 ROM")
 }
 
 /// Path of the launch-control image. Panics if it is not configured or absent.

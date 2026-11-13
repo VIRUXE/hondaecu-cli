@@ -539,11 +539,11 @@ ROM-driven state is `p28_outputs().vtec_solenoid`.
 | PC0 (`P1.0`) | 0 | 0x11E2, 0x1206, 0x1220 | VTEC solenoid driver U14 (sheet 8) | set together with `11Fh.2`, 1 = on; not inverted at 0x48A0 |
 | PC1 (`P1.1`) | 0 | 0x11B9, 0x11BE | U13, a second high-side switch in series with U14 (sheet 8) | |
 | PC2 (`P1.2`) | 1 | 0x102A, 0x20A1, 0x44CA | O2 heater (sheet 8) | inverted at 0x4869; compared with port A bit 6 at 0x2094 |
-| PC3 (`P1.3`) | 0 | 0x4E23 | knock-board diagnostic (82C55 page) | bit-serial data out of `1CEh` (0x4E1C) |
+| PC3 (`P1.3`) | 0 | 0x4E23 | to the knock-board connector FC1 (sheet 5; the 82C55 page calls it knock-board diagnostic) | bit-serial data out of `1CEh`, the odd bits ("P30 box") |
 | PC4 (`P1.4`) | 0 | 0x36CA, 0x42AE | MIL, 1 = lit (sheet 8); **tested** | not inverted at 0x4870 |
 | PC5 (`P1.5`) | 0 | 0x36AE | 10 kohm pull-up only (sheet 6) | |
 | PC6 (`P1.6`) | 1 | 0x44F3 | optional engine-mount control solenoid (sheet 8); the wiki has EGR | inverted at 0x4875 |
-| PC7 (`P1.7`) | 0 | 0x4E1F | to the knock-board connector FC1 (sheet 5) | bit-serial data out of `1CEh` |
+| PC7 (`P1.7`) | 0 | 0x4E1F | to the knock-board connector FC1 (sheet 5) | bit-serial data out of `1CEh`, the even bits ("P30 box") |
 
 "init" is the value loaded at 0x2297 (`P0 = EBh`, `P1 = 44h`). The status
 image is the block the ROM assembles at 0x4823..0x48B9 into RAM
@@ -593,8 +593,8 @@ no longer reports it as the A/C clutch.
 | `4700h`.5 | A/T park and neutral, pin B7: 1 = grounded (sheet 2, P30). Driven by `wiring::apply_switches` for `gearbox = automatic`: set while the stage is not in gear | 0x0D58, 0x2A97, 0x2B05, 0x2BA2, 0x2E81, 0x32A8, 0x3BE4, 0x440F, 0x45CE, 0x47AB, 0x482C, 0x4858, 0x59E5, 0x5CF8 |
 | `4700h`.6 | A/T "gear drive 3" (sheet 2), 1 = selected (0x32AB reads it as D3). `wiring::apply_switches` never selects it | 0x32AB, 0x32D7, 0x3301, 0x3353, 0x33BE, 0x33D2, 0x4828 |
 | `4700h`.7 | A/T "gear drive 4" (sheet 2), 1 = selected (0x32AE reads it as D4). Driven by `wiring::apply_switches` for `gearbox = automatic`: set while the stage is in gear | 0x32AE, 0x32FE, 0x4824 |
-| port A.0, .1 | knock-board connector FC1 through resistors R110..R113 (sheet 5) | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` |
-| port A.2 | knock-board connector FC1 through R109/R114 (sheet 5) | raw at 0x2800 into `232h.6` |
+| port A.0, .1 | knock-board connector FC1 through resistors R110..R113 (sheet 5). Driven by `knock.rs`: the board's reply frame, or the pull-ups with no board | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` ("P30 box") |
+| port A.2 | knock-board connector FC1 through R109/R114 (sheet 5). Driven by `knock.rs`: the board's heartbeat, or the pull-up with no board | raw at 0x2800 into `232h.6`, the heartbeat check ("P30 box") |
 | port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28). Sheet 3 takes the switch through a PNP stage (Q41, 2SA1175, emitter on +5 V, R100 to ground on the collector) whose output reads 1 with B13 grounded, the opposite of the wiki; the pin it reaches on the 82C55 is not drawn (docs/CHECK.md, "power_steering_switch") | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
 | port A.4 | feedback from the driver of lock-up solenoid A, U15 (sheet 8) | raw at 0x3C9C into `99h.6` |
 | port A.5 | VTEC solenoid feedback off U14's output: 0 = powered (sheet 8, P30) | 0x3D15, 0x3D21 |
@@ -624,7 +624,8 @@ selected: the script has no per-stage gear.
 
 Port A bits 4, 5 and 6 are not free inputs in the model: they are the
 lock-up, VTEC-solenoid and O2-heater driver feedbacks, and
-`Bus::drive_p28_feedback` sets them from the outputs on every read (see the
+`Bus::drive_p28_feedback` sets them from the outputs on every read (bits 0..2
+are the knock board's, also set there; "P30 box") (see the
 monitor table below). Neither is `4700h` bit 3, the lock-up B driver
 feedback: `Bus::p28_input_port_as_read` presents it as the inverse of the
 P4.3 pin, and the bit 3 stored in `p28_input_port` is ignored. `Bus::set_vtec_pressure_switch_closed` drives `4700h`
@@ -638,7 +639,149 @@ VTEC is off, 0x3D34), A/C off, brake released, VTEC solenoid off, service
 connector open. Two things in it are not established: the unnamed bits, and
 whether the power-steering switch rests open or grounded. Before this model
 `4700h` read `00h`, which the ROM saw as VTEC pressure switch open and brake
-pressed.
+pressed. Port A bits 0..2 do not keep their reset 0: on every read the knock
+connector sets them, to 1 (the pull-ups) on a P28 box, so the stock P28 ROM
+stores `07h` in `210h` at rest; it never tests those three bits.
+
+### P30 box
+
+A P30 box is the P28 board with a knock board on connector FC1. The image
+used is the stock P30 mask 203 (`p30_203.bin`, fixture `p30-rom`; why that
+image, `docs/CHECK.md`, "Which image is the factory P30"). It is the P28-230
+code base: every routine named below sits at the same address in both
+images, byte for byte, except the two calibration immediates noted. What
+separates them is the option byte at `6002h`: FFh in the P30 image, 00h in
+P28-230. 0x556E copies it into `227h.6`, the knock enable flag, and that flag
+opens every check below. (The other option bytes that differ, `6004h`,
+`6006h`, `600Bh`, `600Eh` and `6013h`, were not traced.)
+
+**What the P30 ROM reaches for on the P28 model.** Run through `check` on the
+P28 board (`stock-p28-manual`, before the knock board existed in the model):
+no external access outside the board (`external_unmapped_reads` and `_writes`
+both 0); its external addresses are the P28's five. It latches one fault:
+`9Ah.3` is set on the first pass of 0x27F7 (0.06 s), and stored fault bit 23
+(`214h.7`, code 24 in the table at 6C99h, index 20 = 18h) follows at 2.09 s.
+So the only difference between the boxes the ROM can see is what sits on
+FC1: port A bits 0..2 in, port C bits 3 and 7 out.
+
+**What FC1 carries** (Bomarc sheets 4, 5, 6; the drawing is of a P28 board,
+so every trace between FC1 and the board is dashed):
+
+| FC1 pin | signal |
+|---|---|
+| 1 | +5 V |
+| 2 | "J": the reset line, through R107 (sheet 6: ASIC pin 27, U2 RST) |
+| 3 | "H": the shaped CKP signal (sheet 4, HIC pin 17 through C10) |
+| 5, 6 | port C bits 7 and 3 through R115 / R116; R141 / R140 pull these lines up |
+| 7 | port A bit 2 through R114 (2.2 kohm); R109 (22 kohm) pulls it up |
+| 9 | port A bit 0 through R112; R111 pulls it up |
+| (next to 11) | port A bit 1 through R113; R110 pulls it up |
+| 10 | the knock sensor, connector D10 |
+| 11, 12 | ground |
+| 14 | "I": the shaped CYP signal (sheet 4, HIC pin 12) |
+
+The pin carrying port A bit 1 is drawn between 9 and 11 without a number.
+The pull-ups on the input lines are drawn solid, so a P28 board has them;
+the series parts R107, R115 and R116 are the ones the pgmfi wiki ("Add Knock
+To P30G00") lists as fitted when converting a 02D01720 board to a knock
+board, together with removing R140 and R141. The labels at the 82C55 read
+`PC7` and `PB0` on the two output lines, but `PB0` is drawn at pin 10, which
+is PC7 on the 82C55; the ROM drives port C bits 7 and 3 here (below).
+
+**The exchange.** Bit-serial, two bits per CKP tooth each way, in the tooth
+routine at 0x4DFC..0x4E2E. `D2h` is the ROM's count of teeth since TDC.
+
+```
+4DFC  MOV  DP, #0F00h ; LB A, [DP]      ; port A
+4E00  SRLB A ; ROR off 0D0h             ; bit 0 into 1D0h bit 15
+4E04  SRLB A ; ROR off 0D0h             ; bit 1 into 1D0h bit 15
+4E08  LB A, 0D2h ; JNE 4E12             ; count 0 ends a frame:
+4E0C  CLR A ; XCHG A, off 0D0h ; ST A, 0F0h   ; F0h = the frame, 1D0h = 0
+4E12  CMPB A, #1 ; JNE 4E1C             ; count 1 starts a frame out:
+4E18  L A, 0EEh ; ST A, off 0CEh        ; 1CEh = EEh
+4E1C  L A, off 0CEh ; SRL A ; MB 022h.7, C ; SRL A ; MB 022h.3, C
+4E26  ST A, off 0CEh ; LB A, 022h ; STB A, [2F00h]   ; port C bits 7, 3
+```
+
+In: the six pairs read at counts 1, 2, 3, 4, 5, 0 land in bits 4..15 of
+`F0h`, pair k in bit `2k + 2` (port A bit 0) and `2k + 3` (bit 1). The main
+loop decodes the frame at 0x0CA1..0x0D06 when the knock control is active
+(`233h.6` clear) and codes 1 (`212h.3`) and 9 (`213h.0`) are not stored:
+
+- 0x0CAF..0x0CCB: bits 5 and 4 must be 1, and the bit-1 lane (bits 7, 9,
+  11, 13, 15) and the bit-0 lane (6, 8, 10, 12, 14) must each hold an even
+  number of ones; otherwise `233h.7` is set, "frame bad";
+- 0x0CCF: bit 8 into `232h.7`;
+- 0x0CD5..0x0D06: bits 9..15, a 7-bit value, into `243h` when the frame is
+  good and knock control active. Otherwise: 0 with `ADh` above 0Dh; with code
+  1, 9 or 24 stored, a value from the tables at 6B34h / 6B48h through
+  0x5079; with the frame bad or knock control inactive, unchanged (0x0D08).
+  `243h` is taken here to be the knock level; what it does to the timing was
+  not traced, and `ADh` was not identified;
+- bits 6 and 7 are used only in the parity count: the board's parity bits.
+
+Out: 0x0A95..0x0B09 builds the word `EEh` once per main-loop pass: bits 0..3
+a nibble from the stack frame (0Fh when `212h` & C3BCh or `214h.5` is set),
+bits 4..9 `233h` bits 0..5, bit 10 set when the even bits 0..8 hold an even
+number of ones and bit 11 likewise for bits 1..9 (odd parity per lane). From
+count 1 on, two bits per tooth go out: the even bit on port C bit 7, the odd
+bit on port C bit 3. What the board does with them is not known.
+
+**What the ROM requires.**
+
+| check | ROM | fault |
+|---|---|---|
+| heartbeat on port A bit 2 | 0x27F7..0x2824, every main-loop pass (about 10 ms, observed): when the bit differs from `232h.6`, the copy of its last level, `2E8h` is reloaded with 0Ah (0x2818), unless the frame is bad (`233h.7`) and `ADh` is at most 0Dh (0x280F..0x2815). `2E8h` counts down every pass (observed, by the instruction ending at 0x5214); at 0, `9Ah.3` is set. So the bit must change at least once in about 100 ms | `9Ah.3`, code 24 (index 20 = 18h) |
+| sensor | 0x3D44..0x3D61: with `214h.6` (code 23) and `214h.5` clear, `212h` & C3BCh zero, the board alive (`2E8h` non-zero) and the frame good (`233h.7` clear), C = `232h.7` | `9Ah.2`, code 23 (index 19 = 17h) |
+
+Both checks are skipped while `227h.6` is clear (0x27F7, 0x3D44), and the
+heartbeat check also while code 24 is stored (`214h.7`, 0x27FA). The P28-230
+image has the same code with two different immediates: 0x280F/0x0CD8
+compare `ADh` with 00h, and 0x2818 reloads FFh.
+
+These were confirmed by driving port A by hand on the P28 board model
+(`stock-p28-manual` script, development harness, deleted afterwards):
+
+| port A bits 0, 1 per count | bit 2 | result |
+|---|---|---|
+| constant (the P28 model's 0s) | constant | `9Ah.3` at 0.06 s, code 24 stored at 2.09 s |
+| constant | toggled every 50 ms | `233h.7` set from the first decoded frame (6.56 s); code 24 stored at 9.57 s, in `cold idle` (`ADh` at most 0Dh) |
+| bits 4, 5 only (`F0h` = 0030h) | toggled every 20 or 50 ms | nothing stored, `233h.7` clear: the stock-P30 script ran clean |
+| bits 4, 5, 8, 10 | toggled every 50 ms | `232h.7` set at 6.56 s and `9Ah.2` raised on every pass after |
+| bits 4, 5, 8 (bad parity) | toggled every 50 ms | `233h.7` set, code 24 stored at 9.57 s |
+
+An earlier note had `p30_203.bin` latching `214h` = 80h "after about 9 s" on
+the P28 model; the 9.57 s row reproduces that: it is code 24 with the
+heartbeat moving and the frame bad.
+
+**The model** (`knock.rs`, `Bus::knock_board`, set by `wiring::apply_static`):
+
+- **Absent** (`ecu = p28`): bits 0..2 read 1, the pull-ups. The result does
+  not depend on that level: with bit 2 constant `2E8h` is never reloaded, so
+  code 24 follows whatever the three lines read.
+- **FittedWithSensor** (`ecu = p30`, `knock_sensor = yes`): bit 2 toggles
+  every 20 ms; bits 0 and 1 carry the frame `F0h` = 0030h (start bits, level
+  0, no fault, even parity), one pair per CKP tooth, kept in step by counting
+  teeth from the CYP edge (FC1 pins 3 and 14). The phase is the ROM's: in the
+  engine model the m-th tooth after CYP is read at count `(m + 2) mod 6`.
+- **FittedNoSensor** (`ecu = p30`, `knock_sensor = no`): as above with frame
+  bit 8 set and bit 6 as its parity, `F0h` = 0170h.
+
+Assumptions: the heartbeat rate (any change within about 100 ms passes; 20
+ms keeps at most one change between two passes); the board's phase (it must
+match the ROM's for the start bits to land, but its own timing is not
+documented); level 0 for a quiet engine; and that an unplugged sensor is
+reported in bit 8. The last rests on two things: bit 8 is the ROM's only
+path to code 23, and code 23 is documented as covering an unplugged sensor
+(pgmfi wiki, "Honda Error Codes": "KS (Knock Sensor) defective circuit or
+unplugged / defective sensor"). How the board detects it is not known, so
+`stock_p30_without_its_knock_sensor_stores_code_23` shows that the ROM's path
+works, not that a real board takes it. The board ignores the frame the ROM
+sends it.
+
+A knock sensor on a P28 box (`ecu = p28`, `knock_sensor = yes`) is the
+Absent board: connector D10 goes only to FC1 pin 10 (sheet 5), so the ROM
+cannot see the sensor.
 
 ### The ROM's power-on peripheral check (0x2316–0x2343)
 
@@ -805,8 +948,9 @@ through the active LRB page, not plain address `N8`.
    schematic apart from the A/C switch and power-steering bits, which rest on
    the pgmfi wiki and the ROM. The buffer's address mirrors are not decoded
    (its select comes out of the ASIC). Port A bits 0..2 and port C bits 3 and
-   7 go to the knock-board connector, which a P28 does not populate; what
-   those inputs read on a P28 is not established.
+   7 go to the knock-board connector FC1; the knock board is modelled from
+   what the P30 ROM requires of it, with the assumptions listed under "P30
+   box", and with no board the inputs sit on their pull-ups.
 4. The feedback paths described under "Faults and the monitors the ROM
    depends on" are models of what the ROM checks, with stated assumptions:
    the IACV sense gain and filter, which edge of the ignition pulse reaches

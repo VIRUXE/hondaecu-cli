@@ -1,6 +1,7 @@
 //! Acceptance: the whole `check` pipeline (script, wiring, verdict) on the
-//! stock P28-230 ROM, manual and automatic. Every test needs the ROM image
-//! (feature `p28-rom`); each full run is about 20 s of wall time.
+//! stock P28-230 ROM, manual and automatic, and on the stock P30 mask-203
+//! ROM. Every test needs its ROM image (feature `p28-rom` or `p30-rom`);
+//! each full run is about 20 s of wall time.
 
 use crate::bench::Bench;
 use crate::blink::Lamp;
@@ -150,8 +151,14 @@ fn case_6_no_vtec_stores_code_21() {
     // "powered" (Bomarc sheet 8) while the ROM keeps PC0 low. The check at
     // 0x3D0C..0x3D21 (behind the VTEC option flag 216h.4, 0x3D06) compares
     // the two and sets 9Ah.0, code 21 (6C99h index 17 = 15h).
+    // The fault is stored 1.2 s after power-on, inside the bulb check, so
+    // the lamp never goes out: lit at the end of `key on`.
     let (result, report, bench) = one_change("vtec", "no");
-    assert!(matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("codes: 21")), "{report:#?}");
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    assert_eq!(result.mil_first_lit_after_bulb_check, Some(stage(&result, "key on").to));
     assert_eq!(result.lamp, Lamp::Codes(vec![21]));
     assert_eq!(report.codes, vec![21]);
     assert_eq!(stored_codes(&bench), vec![21]);
@@ -182,8 +189,6 @@ fn case_6_values_the_model_cannot_represent_could_not_tell() {
     // the only line that is not ok is the car line: COULD NOT TELL, exit 3.
     let mut setup = preset("stock-p28-manual");
     let values = [
-        ("ecu", "p30"),
-        ("knock_sensor", "yes"),
         ("iacv", "9.5"),
         ("egr", "yes"),
         ("power_steering_switch", "no"),
@@ -206,6 +211,89 @@ fn case_6_values_the_model_cannot_represent_could_not_tell() {
     assert!(report.valid.lines.iter().chain(&report.runs.lines[1..]).all(|l| l.state == State::Ok), "{report:#?}");
     assert_eq!(result.lamp, Lamp::Steady);
     assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+}
+
+fn p30_rom() -> String {
+    crate::fixtures::p30_rom_path()
+}
+
+/// `stock-p30` with `changes` applied, run on the stock P30 image and judged.
+fn p30_check(changes: &[(&str, &str)]) -> (RunResult, Report, Bench) {
+    let mut setup = preset("stock-p30");
+    for (key, value) in changes {
+        setup.set(key, value).unwrap();
+    }
+    check_bench(Bench::from_file(&p30_rom()).unwrap(), &setup)
+}
+
+/// The knock checks were live at the end of the run: option byte 6002h (FFh
+/// in the stock P30 image) set 227h.6 at 0x556E, which opens the heartbeat
+/// check at 0x27F7 and the code-23 check at 0x3D44. Read at the end only.
+fn assert_knock_checks_enabled(bench: &Bench) {
+    assert_ne!(bench.bus.ram[0x227] & 0x40, 0, "227h.6");
+}
+
+#[test]
+#[cfg_attr(not(feature = "p30-rom"), ignore = "needs the stock P30 ROM: enable feature p30-rom")]
+fn case_3_stock_p30_on_a_p30_box_is_worth_burning() {
+    // docs/CPU_CORE.md, "P30 box"; the board is `knock.rs`.
+    let (result, report, bench) = p30_check(&[]);
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert_eq!(stored_codes(&bench), Vec::<u8>::new());
+    assert_knock_checks_enabled(&bench);
+    let r = &bench.bus.ram;
+    // The board's last frame was accepted (0x0CAA..0x0CCC: start bits and
+    // parity; 233h.7 clear) and reported no sensor fault (232h.7 clear).
+    assert_eq!(r[0x233] & 0x80, 0, "233h.7");
+    assert_eq!(r[0x232] & 0x80, 0, "232h.7");
+    // The heartbeat keeps the countdown at 2E8h from running out (0x27F7).
+    assert_ne!(r[0x2E8], 0, "2E8h");
+}
+
+#[test]
+#[cfg_attr(not(feature = "p30-rom"), ignore = "needs the stock P30 ROM: enable feature p30-rom")]
+fn stock_p30_without_its_knock_sensor_stores_code_23() {
+    // The board reports the missing sensor in frame bit 8 (`knock.rs`: the
+    // only path to code 23 in the ROM, and code 23 is documented as covering
+    // an unplugged sensor; an assumption, not an independent check). 0x0CD0
+    // copies it to 232h.7; 0x3D44..0x3D61 sets 9Ah.2 with the board alive
+    // (2E8h non-zero) and the frame good (233h.7 clear); 6C99h index 19 =
+    // 17h, code 23. Observed: the MIL lights at 8.6 s, in `cold idle`, and
+    // the read-out blinks 23. Matches Honda practice.
+    let (result, report, bench) = p30_check(&[("knock_sensor", "no")]);
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    assert_eq!(result.lamp, Lamp::Codes(vec![23]));
+    assert_eq!(report.codes, vec![23]);
+    assert_eq!(stored_codes(&bench), vec![23]);
+    assert_knock_checks_enabled(&bench);
+}
+
+#[test]
+#[cfg_attr(not(feature = "p30-rom"), ignore = "needs the stock P30 ROM: enable feature p30-rom")]
+fn stock_p30_on_a_p28_box_holds_the_lamp_lit_and_blinks_nothing() {
+    // No knock board: port A bit 2 never changes, so 0x27F7..0x2824 never
+    // reloads 2E8h and sets 9Ah.3 (6C99h index 20 = 18h, code 24) from the
+    // first pass; it is stored about 2 s after power-on (214h.7). Honda
+    // practice expects code 23; the ROM stores code 24 and blinks nothing:
+    // with 214h.7 set the read-out routine skips the blink sequence (0x3634)
+    // and holds the lamp lit, so the read-out looks like the no-code display
+    // (docs/CHECK.md, "The P30 box"). The lamp lit after the bulb check is
+    // what makes this a problem.
+    let (result, report, bench) = p30_check(&[("ecu", "p28")]);
+    assert!(
+        matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
+        "{report:#?}"
+    );
+    let lit = result.mil_first_lit_after_bulb_check.unwrap();
+    assert!(lit < stage(&result, "key on").to + 1e-9, "{lit}");
+    assert_eq!(result.lamp, Lamp::Steady);
+    assert!(report.codes.is_empty());
+    assert_eq!(stored_codes(&bench), vec![24]);
+    assert_knock_checks_enabled(&bench);
 }
 
 #[test]
@@ -254,10 +342,13 @@ fn case_7_gearbox_mismatch() {
         // Read at the end only; the script gives no per-instruction view.
         assert_eq!(bench.bus.ram[0x381], 0, "{case}: 381h");
         if board == "automatic" {
+            // Stored 0.9 s after power-on, inside the bulb check: the lamp
+            // never goes out, lit at the end of `key on`.
             assert!(
-                matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("codes: 19")),
+                matches!(&report.verdict, Verdict::DoNotBurn(why) if why.starts_with("check-engine light: lit at")),
                 "{case}: {report:#?}"
             );
+            assert_eq!(result.mil_first_lit_after_bulb_check, Some(stage(&result, "key on").to), "{case}");
             assert_eq!(result.lamp, Lamp::Codes(vec![19]), "{case}");
             assert_eq!(stored_codes(&bench), vec![19], "{case}");
             // 216h.3 set: the ROM ran as an automatic.

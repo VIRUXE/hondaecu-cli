@@ -3,6 +3,7 @@
 use std::fs;
 use std::io;
 
+use crate::knock::{KnockBoard, KnockLink, KNOCK_PA_DATA, KNOCK_PA_HEARTBEAT};
 use crate::ppi82c55::{self, Ppi82c55};
 
 pub const ROM_SIZE: usize = 32768; // 32KB ROM space (0x0000..0x7FFF)
@@ -512,6 +513,11 @@ pub struct Bus {
     /// An EGR lift sensor drives AI3. Without one, AI3 sits on the battery
     /// divider (`EngineState::sync_sensors_to_bus`).
     pub egr_fitted: bool,
+    /// What sits on connector FC1 (`knock.rs`). It drives 82C55 port A bits
+    /// 0..2 on every read (`drive_p28_feedback`), stepped by the CKP and CYP
+    /// edges the board gets from the box.
+    pub knock_board: KnockBoard,
+    knock: KnockLink,
     pub ac_clutch_active: bool,
     pub radiator_fan_active: bool,
     pub purge_solenoid_active: bool,
@@ -604,6 +610,8 @@ impl Bus {
             // The stock car is a manual: no lock-up solenoids.
             lockup_solenoids_connected: false,
             egr_fitted: false,
+            knock_board: KnockBoard::Absent,
+            knock: KnockLink::default(),
             ac_clutch_active: false,
             radiator_fan_active: false,
             purge_solenoid_active: false,
@@ -820,6 +828,9 @@ impl Bus {
     ///   always low with no solenoids connected (0x3C98..0x3CA5, automatic
     ///   gearbox only).
     ///
+    /// Bits 0..2 come from connector FC1: the knock board's reply and
+    /// heartbeat, or the pull-ups when there is no board (`knock.rs`).
+    ///
     /// The polarity of bit 6 is read from its check, not from the board. The
     /// polarities of bits 4 and 5, first read from their checks, agree with
     /// the board:
@@ -857,6 +868,10 @@ impl Bus {
         drive(P28_PA_VTEC_SOLENOID_OFF, !vtec);
         drive(P28_PA_O2_HEATER_FEEDBACK, heater);
         drive(P28_PA_LOCKUP_FEEDBACK, !lockup);
+        // Bits 0..2: the knock board on FC1, or the pull-ups with none.
+        let knock = self.knock.port_a(self.knock_board, self.elapsed_cycles);
+        let mask = KNOCK_PA_DATA | KNOCK_PA_HEARTBEAT;
+        *pins = (*pins & !mask) | (knock & mask);
     }
 
     /// TM1IO changed level. Measure the conducting (low) phase and, once per
@@ -1178,6 +1193,8 @@ impl Bus {
     /// CPU write.
     pub fn signal_cyp(&mut self) {
         self.ram[SFR_TRNS as usize] |= 0x01;
+        // FC1 pin 14 carries the shaped CYP signal to the knock board.
+        self.knock.cyp();
     }
 
     /// Latch a falling edge on TRNS`n` (P4.4 + n), if the ROM has given that
@@ -1277,6 +1294,11 @@ impl Bus {
     /// function. Returns the IRQ bits raised, for the interrupt controller.
     pub fn timer_capture_edge(&mut self, timer: usize) -> u16 {
         const EVENT_IRQ: [u16; 4] = [IRQ_TM0, IRQ_TM1, IRQ_TM2, IRQ_TM3];
+        if timer == P28_CKP_CAPTURE_TIMER {
+            // FC1 pin 3 carries the shaped CKP signal to the knock board,
+            // whatever the MCU has made of its own capture input.
+            self.knock.tooth(self.knock_board);
+        }
         let tcon_sfr = (SFR_TCON0 + timer as u16) as usize;
         let tcon = self.ram[tcon_sfr];
         let pin = 1u8 << (4 + timer);
@@ -1604,14 +1626,15 @@ mod tests {
         // An automatic car: the lock-up solenoids are on their drivers.
         bus.lockup_solenoids_connected = true;
         // Bits 4..6 are driver feedback: with these outputs the lock-up and
-        // VTEC drivers are off (1, 1) and so is the O2 heater (0).
-        bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xB3;
+        // VTEC drivers are off (1, 1) and so is the O2 heater (0). Bits 0..2
+        // are FC1's, on their pull-ups with no knock board.
+        bus.ppi.pins[ppi82c55::PORT_A as usize] = 0xB7;
         // The ROM's init sequence at 0x51E4.
         bus.write_data_u8(0x3F00, 0x90);
         bus.write_data_u8(0x1F00, 0xEB);
         bus.write_data_u8(0x2F00, 0x44);
 
-        assert_eq!(bus.read_data_u8(0x0F00), 0xB3);
+        assert_eq!(bus.read_data_u8(0x0F00), 0xB7);
         assert_eq!(bus.read_data_u8(0x1F00), 0xEB);
         assert_eq!(bus.read_data_u8(0x2F00), 0x44);
         assert_eq!(bus.p28_board_outputs(), (0xEB, 0x44));
@@ -1628,6 +1651,28 @@ mod tests {
         }
         assert_eq!(bus.read_data_u8(0x4F00), EXTERNAL_OPEN_BUS);
         assert_eq!(bus.external_unmapped_reads, 1);
+    }
+
+    #[test]
+    fn the_knock_board_drives_port_a_bits_0_to_2_from_the_crank_edges() {
+        let mut bus = Bus::new();
+        bus.write_data_u8(0x3F00, 0x90);
+        // No board: the pull-ups.
+        assert_eq!(bus.read_data_u8(0x0F00) & 0x07, 0x07);
+        // A healthy board, five teeth after CYP: pair 1, the start bits
+        // (`knock.rs`), whatever the MCU made of its capture input.
+        bus.knock_board = KnockBoard::FittedWithSensor;
+        bus.signal_cyp();
+        for _ in 0..5 {
+            bus.timer_capture_edge(P28_CKP_CAPTURE_TIMER);
+        }
+        assert_eq!(bus.read_data_u8(0x0F00) & KNOCK_PA_DATA, 0b11);
+        bus.timer_capture_edge(P28_CKP_CAPTURE_TIMER);
+        assert_eq!(bus.read_data_u8(0x0F00) & KNOCK_PA_DATA, 0);
+        // The heartbeat follows the machine-cycle clock.
+        let beat = bus.read_data_u8(0x0F00) & KNOCK_PA_HEARTBEAT;
+        bus.elapsed_cycles += crate::knock::HEARTBEAT_HALF_PERIOD_CYCLES;
+        assert_ne!(bus.read_data_u8(0x0F00) & KNOCK_PA_HEARTBEAT, beat);
     }
 
     #[test]

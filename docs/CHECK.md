@@ -2,7 +2,8 @@
 
 `hondaecu-cli check <rom.bin>` answers one question for a tuner: is this ROM
 image worth burning to a chip and putting in the car? It runs the ROM on the
-modelled P28 box, wired to the car described in a "car" setup, drives the box
+modelled P28 box (with a knock board on FC1 for a P30 box), wired to the car
+described in a "car" setup, drives the box
 through one fixed script of conditions (about 110 s of ECU time, roughly 25 s of
 wall time), looks only at what an observer outside the box could see, and
 prints one of three verdicts. `test` is an alias that runs exactly the same.
@@ -87,14 +88,15 @@ values, one by one" below):
 
 | key = value | effect on the model |
 |---|---|
-| `ecu = p28` | none (the model is the P28 box) |
-| `ecu = p30` | **unmodelled**: the P30 box's knock board is not modelled |
+| `ecu = p28` | no knock board: FC1's inputs sit on their pull-ups (`knock.rs`) |
+| `ecu = p30` | the knock board on FC1 (`knock.rs`; "The P30 box" below) |
 | `board_gearbox` | the gearbox strap input |
 | `gearbox = automatic` | the A/T position inputs (park/neutral out of gear, D4 in gear; "The automatic gearbox" below) and the lock-up solenoids on their drivers |
 | `gearbox = manual` | no position switch and no lock-up solenoids: on an automatic board both lock-up feedbacks read "powered" |
 | `vtec = no` | VTEC solenoid unplugged (its feedback reads "powered"), pressure switch open |
-| `knock_sensor = no` | none: the stock P28 has no knock check (option byte 6002h) |
-| `knock_sensor = yes` | **unmodelled** on any box |
+| `knock_sensor = yes` on a P30 | the board reports a healthy sensor |
+| `knock_sensor = no` on a P30 | the board reports the sensor missing (frame bit 8; an assumption, see "The P30 box") |
+| `knock_sensor` on a P28 | none: with no board the sensor reaches nothing the ROM reads (sheet 5) |
 | `o2_sensor = heated` | heater plugged in |
 | `o2_sensor = one-wire` | heater unplugged |
 | `o2_sensor = none` | heater unplugged; the sensor input level is **unmodelled** |
@@ -173,7 +175,15 @@ could-not-tell if any line is, else ok. The rules below are those of
 | codes | lamp off, or steady with the connector grounded (a steady lamp during the read-out means no code is stored) | one or more codes blinked; each is shown with its name from the catalogue in `dtc.rs` | the lamp blinked but no code could be read; the lamp changed but no complete code could be read; the read-out was not reached |
 
 The bulb check is the lamp lit from power-on until the first lit-to-dark edge
-in `key on`.
+in `key on`. A lamp that is still lit at the end of `key on` without having
+gone dark never ended its bulb check: it counts as lit after the bulb check,
+at the end of `key on` (`script::mil_lit_after_bulb_check`). Before this
+rule a fault the ROM stores inside the first two seconds held the lamp lit
+from power-on and the line read "never lit": the stock P28 with `vtec = no`
+(code 21 stored at 1.2 s) and on an automatic board in a manual car (code 19
+at 0.9 s) were judged do-not-burn on their codes only, and the P30 image on a
+P28 box (code 24, which the ROM never blinks) was worth burning. All three
+now fail on this line.
 
 Lamp reading (`blink.rs`): with the connector grounded the ROM flashes each
 stored code; a blink lit at least 0.82 s is a tens digit and a shorter one is
@@ -502,9 +512,8 @@ original Bomarc scan (37820-P28-A51), not the restored images.
 | `eld = no` | U5/X0 = 930 counts, 4.55 V (E8h) | sheet 3: D18 has R136 (1 kohm, 1 %) to +5 V and R138 (10 kohm) to ground, then R137 (100 kohm) into U5/X0; open, 5 x 10/11 = 4.55 V. Caveat: R136's value is typed on the scan, not hand-lettered like the rest, so someone added it later; with R136 above about 1.6 kohm the open level would be inside the ROM's range and no code would be stored | do not burn: code **20**, no MIL. 0x3CE2..0x3D02 (gated by option flag `219h.1`, `217h.6`, `214h.3` clear and battery `C3h` at least 69h) sets `99h.7` when `3C6h` is above DCh or below 0Eh | matches (code 20, ELD) |
 | `speed_sensor = no` | no INT0 pulses (`EngineState::speed_sensor_fitted`) | nothing new | do not burn: MIL lit 17.4 s into `lift off` (about 2440 rpm), code **17** stored and blinked; VTEC never switches on. See below | matches (code 17) |
 | `power_steering_switch = no` | **unmodelled** | sheet 3 and the wiki disagree; see below | n/a | n/a |
-| `knock_sensor = no` on a P28 | no difference | option byte 6002h = 00h clears `227h.6` (0x556E) and 0x3D44 then skips the knock check (`9Ah.2`, code 23); nothing on the board model follows the key | no difference | matches |
-| `knock_sensor = yes` | **unmodelled** on any box | the knock board is not modelled | n/a | n/a |
-| `ecu = p30` | **unmodelled** | the P30 box's knock board is not modelled | n/a | n/a |
+| `knock_sensor` on a P28 | no board (`Absent`) either way | option byte 6002h = 00h clears `227h.6` (0x556E), so 0x27F7 and 0x3D44 skip both knock checks; and with no board the sensor reaches nothing (sheet 5: D10 goes only to FC1 pin 10) | no difference | matches |
+| `ecu = p30` | knock board fitted (`knock.rs`) | "The P30 box" below | not run: with `227h.6` clear the P28-230 image skips both checks that read the board (0x27F7, 0x0CA1 via `233h.6`, 0x3D44) | n/a |
 | `gearbox = manual` on an automatic board | no lock-up solenoids | sheet 8, see "Gearbox mismatch" | do not burn, code **19** | matches |
 | `gearbox = automatic` on a manual board | position inputs only | the ROM never reads the lock-up feedbacks with `216h.3` clear | worth burning | matches the ROM; practice says nothing specific |
 
@@ -589,3 +598,40 @@ only say something about coils far from stock (roughly below 0.7 or above
 1.4 times its resistance), and nothing about the edge cases between. Without
 `R_stock` the value is unmodelled.
 
+## The P30 box
+
+### Which image is the factory P30
+
+Two P30 mask-203 images are in the workspace, `ecu/bins/p30_203.bin` and
+`ecu/bins/p30_usdm_203.bin`. Both are 32768 bytes and sum to 0; they differ
+in 1068 bytes.
+
+| | `p30_203.bin` | `p30_usdm_203.bin` |
+|---|---|---|
+| SHA-256 | `c3decae2...61dfa` | `e0fff820...b4206` |
+| pgmfi wiki, "ECU Definition Codes" | byte for byte the attachment `203stock.bin`, "Common ROM for development" (files.hondabase.com download 120); the table lists mask 203 as JDM P30, Civic B16A DOHC VTEC, "common dev rom" | byte for byte the attachment `P30USDMCivicD16Y8203.BIN`, "P2P fuel and ignition on P30" (download 165): a P30 image retuned for a USDM D16Y8 |
+| code at 0x0209..0x02DC | identical to P28-230 | rewritten, with FFh fill after it |
+| code at 0x285A | identical to P28-230 | `J 2867h` and FFh fill: a patch |
+| byte 0x7FFF | FFh, as in P28-230 | 04h: a checksum correction |
+| option bytes | `6002h` FFh (knock), `6003h` FFh (O2 heater), `6004h` 00h, `6005h` FFh (ELD) | `6002h`, `6003h`, `6005h` 00h; `6004h` FFh (not traced) |
+| on the model, `check` | see below | worth burning on both `stock-p28-manual` and `stock-p30`: with `6002h` 00h the knock checks never run |
+
+The first is the factory image: it matches the wiki's stock upload, and the
+second carries a patch, a rewritten routine, a checksum fix and three
+options switched off. The fixture `p30-rom` is `p30_203.bin`.
+
+### What the stock P30 does
+
+Measured on `p30_203.bin`, one run per setup (`acceptance.rs`). How the
+board is modelled, and what the ROM checks, is in `CPU_CORE.md`, "P30 box".
+
+| setup | verdict | codes | why | Honda practice |
+|---|---|---|---|---|
+| `stock-p30` (P30 box, sensor fitted) | worth burning | none | the board's heartbeat keeps `2E8h` reloaded and its frames pass (`233h.7` clear, `232h.7` clear). VTEC at 5690 rpm, fuel stops at 8310 rpm | matches |
+| `stock-p30`, `knock_sensor = no` | do not burn: MIL lit at 8.6 s, in `cold idle` | **23** blinked and stored | 0x3D44..0x3D61 sets `9Ah.2` from frame bit 8. That the board sets bit 8 for an unplugged sensor is the model's assumption (bit 8 is the ROM's only path to code 23, and code 23 is documented as covering an unplugged sensor), so this run confirms the ROM's path, not the board | matches, by construction |
+| `stock-p30`, `ecu = p28` (no knock board) | do not burn: MIL lit again at 2.2 s, 0.1 s after the bulb check ended | stored: **24** (fault bit 23, `214h.7`); blinked: none | port A bit 2 never changes, so 0x27F7..0x2824 never reloads `2E8h` and sets `9Ah.3` from its first pass (0.06 s); code 24 is stored at about 2.2 s. With `214h.7` set the read-out routine skips the blink sequence (0x3634 `JBS 214h.7`) and holds the lamp lit, so the grounded connector shows what looks like the no-code display; the `codes` line therefore reads "none". Same result whatever the pull-ups give on bits 0..2 | **disagrees**: practice expects code 23. The ROM stores 24, which it never blinks, and keeps the MIL lit |
+
+The last row is the ROM's own behaviour; the model was not changed to bring
+out code 23. A P30 ROM in a P28 box keeps the check-engine light on and
+answers the service connector with a steady lamp, which a driver would read
+as "no code stored".

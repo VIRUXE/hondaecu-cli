@@ -34,6 +34,7 @@ jobs:
   # come from repository secrets: each one gzip-compressed, then base64.
   #
   #   gzip -9c P28-230.bin | base64 -w0 | gh secret set P28_230_ROM_GZ_B64
+  #   gzip -9c p30_203.bin | base64 -w0 | gh secret set P30_ROM_GZ_B64
   #   gzip -9c lyonnel-2.0-launch-ok.bin | base64 -w0 | gh secret set LAUNCH_ROM_GZ_B64
   #
   # Without the secrets (forks, pull requests from forks) the job says so and
@@ -43,9 +44,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       P28_ROM_GZ_B64: ${{ secrets.P28_230_ROM_GZ_B64 }}
+      P30_ROM_GZ_B64: ${{ secrets.P30_ROM_GZ_B64 }}
       LAUNCH_ROM_GZ_B64: ${{ secrets.LAUNCH_ROM_GZ_B64 }}
       # SHA-256 of the first 32768 bytes of each image.
       P28_ROM_SHA256: 20b99338774dc41034229f6afd4c4a6ae8ac22339be26e5474b33ac3388c0d5a
+      P30_ROM_SHA256: c3decae27ff4dec5587df26633107dc7fb1712c91ab501668311941cf8761dfa
       LAUNCH_ROM_SHA256: f7c7aac6250af2ee4ae2a9f26b9b0fe68fd02ef668dd524f2d369c9a78482c8e
 
     steps:
@@ -78,6 +81,7 @@ jobs:
           }
 
           fixture p28-rom HONDAECU_P28_ROM P28-230.bin "$P28_ROM_GZ_B64" "$P28_ROM_SHA256"
+          fixture p30-rom HONDAECU_P30_ROM p30_203.bin "$P30_ROM_GZ_B64" "$P30_ROM_SHA256"
           fixture launch-rom HONDAECU_LAUNCH_ROM launch.bin "$LAUNCH_ROM_GZ_B64" "$LAUNCH_ROM_SHA256"
           echo "features=$features" >> "$GITHUB_OUTPUT"
 
@@ -98,6 +102,9 @@ jobs:
             ran exec::tests::oem_rom_passes_its_cpu_self_test
             ran replay::tests::finds_p28_runtime_entry_after_the_hardware_checks
             ran replay::tests::stock_p28_boots_with_live_sensor_inputs_through_the_mux
+          esac
+          case ",${{ steps.fixtures.outputs.features }}," in *,p30-rom,*)
+            ran acceptance::case_3_stock_p30_on_a_p30_box_is_worth_burning
           esac
           case ",${{ steps.fixtures.outputs.features }}," in *,launch-rom,*)
             ran replay::tests::finds_launch_rom_runtime_entry_after_the_hardware_checks

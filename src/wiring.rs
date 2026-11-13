@@ -11,6 +11,7 @@ use crate::bus::{
 };
 use crate::car::{EcuModel, Gearbox, Iacv, O2Sensor, Setup};
 use crate::engine::EngineState;
+use crate::knock::KnockBoard;
 use crate::ppi82c55::PORT_A;
 
 /// 3.2 V on the 10-bit gearbox strap input: an automatic.
@@ -39,12 +40,14 @@ pub fn apply_static(bus: &mut Bus, setup: &Setup) -> Vec<Unmodelled> {
     let mut unmodelled: Vec<Unmodelled> = Vec::new();
     let mut not = |key: &'static str, reason: &str| unmodelled.push((key, reason.to_string()));
 
-    if setup.ecu == EcuModel::P30 {
-        not("ecu", "p30: the P30 box's knock board is not modelled");
-    }
-    if setup.knock_sensor {
-        not("knock_sensor", "yes: the knock board and its sensor input are not modelled");
-    }
+    // A P30 box has a knock board on FC1; a P28 box has none, and then a
+    // knock sensor on the car reaches nothing the ROM reads (Bomarc sheet 5:
+    // connector D10 goes only to FC1 pin 10). See `knock.rs`.
+    bus.knock_board = match (&setup.ecu, setup.knock_sensor) {
+        (EcuModel::P28, _) => KnockBoard::Absent,
+        (EcuModel::P30, false) => KnockBoard::FittedNoSensor,
+        (EcuModel::P30, true) => KnockBoard::FittedWithSensor,
+    };
     bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_GEARBOX_SELECT] = match setup.board_gearbox {
         Gearbox::Manual => GEARBOX_STRAP_MANUAL_COUNTS,
         Gearbox::Automatic => GEARBOX_STRAP_AUTOMATIC_COUNTS,
@@ -324,8 +327,6 @@ mod tests {
     #[test]
     fn every_unmodelled_value_names_its_key_and_a_reason() {
         for (key, value) in [
-            ("ecu", "p30"),
-            ("knock_sensor", "yes"),
             ("o2_sensor", "none"),
             ("iacv", "9.5"),
             ("egr", "yes"),
@@ -339,14 +340,33 @@ mod tests {
     }
 
     #[test]
-    fn a_p30_box_is_unmodelled_and_so_is_its_knock_sensor() {
-        let p30 = Setup::preset("stock-p30").unwrap();
-        assert_eq!(unmodelled_keys(&p30), ["ecu", "knock_sensor"]);
+    fn the_stock_p30_preset_is_fully_modelled() {
+        assert_eq!(unmodelled_keys(&Setup::preset("stock-p30").unwrap()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn the_knock_board_follows_the_box_and_the_sensor() {
+        for (ecu, sensor, board) in [
+            ("p30", "yes", KnockBoard::FittedWithSensor),
+            ("p30", "no", KnockBoard::FittedNoSensor),
+            // No board: the sensor reaches only FC1 pin 10 (sheet 5).
+            ("p28", "yes", KnockBoard::Absent),
+            ("p28", "no", KnockBoard::Absent),
+        ] {
+            let mut bus = Bus::new();
+            bus.knock_board = KnockBoard::FittedWithSensor;
+            let mut s = with("ecu", ecu);
+            s.set("knock_sensor", sensor).unwrap();
+            assert_eq!(apply_static(&mut bus, &s), Vec::new(), "{ecu}, {sensor}");
+            assert_eq!(bus.knock_board, board, "{ecu}, {sensor}");
+        }
     }
 
     #[test]
     fn modelled_values_are_not_reported() {
         for (key, value) in [
+            ("ecu", "p30"),
+            ("knock_sensor", "yes"),
             ("knock_sensor", "no"),
             ("vtec", "no"),
             ("o2_sensor", "one-wire"),
@@ -432,6 +452,7 @@ mod tests {
         assert_eq!(bus.vtec_solenoid_connected, fresh.vtec_solenoid_connected);
         assert_eq!(bus.lockup_solenoids_connected, fresh.lockup_solenoids_connected);
         assert_eq!(bus.egr_fitted, fresh.egr_fitted);
+        assert_eq!(bus.knock_board, fresh.knock_board);
         assert_eq!(bus.vtec_pressure_switch_closed(), fresh.vtec_pressure_switch_closed());
     }
 }

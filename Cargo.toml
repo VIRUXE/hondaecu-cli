@@ -13,9 +13,11 @@ categories = ["emulators", "command-line-utilities"]
 [features]
 # ROM-backed integration tests. The images are not distributable, so these
 # tests are ignored unless the matching feature is on, and with it on they
-# fail if HONDAECU_P28_ROM / HONDAECU_LAUNCH_ROM does not name the image.
+# fail if HONDAECU_P28_ROM / HONDAECU_P30_ROM / HONDAECU_LAUNCH_ROM does not
+# name the image.
 p28-rom = []
+p30-rom = []
 launch-rom = []
-rom-fixtures = ["p28-rom", "launch-rom"]
+rom-fixtures = ["p28-rom", "p30-rom", "launch-rom"]
 
 [dependencies]

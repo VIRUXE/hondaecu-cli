@@ -1,9 +1,11 @@
 # Default locations of the ROM images the opt-in integration tests use: next
-# to this checkout, where they have always been kept. They are read only when
-# the `p28-rom` / `launch-rom` features are on, and an environment variable of
-# the same name overrides them. See README, "Testing".
+# to this checkout, where they have always been kept (the P30 image in the
+# workspace's `ecu/bins`). They are read only when the `p28-rom` / `p30-rom` /
+# `launch-rom` features are on, and an environment variable of the same name
+# overrides them. See README, "Testing".
 [env]
 HONDAECU_P28_ROM = { value = "../P28-230.bin", relative = true }
+HONDAECU_P30_ROM = { value = "../../ecu/bins/p30_203.bin", relative = true }
 HONDAECU_LAUNCH_ROM = { value = "../test-roms/lyonnel-2.0-launch-ok.bin", relative = true }
 
 [alias]

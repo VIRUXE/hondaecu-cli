@@ -7,6 +7,7 @@ mod check;
 mod wiring;
 mod cpu;
 mod bus;
+mod knock;
 mod bench;
 mod blink;
 mod script;

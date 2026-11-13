@@ -145,15 +145,17 @@ launch-ROM tests need images that cannot be redistributed, so they are opt-in:
 | feature | variable | image | SHA-256 of the first 32768 bytes |
 |---|---|---|---|
 | `p28-rom` | `HONDAECU_P28_ROM` | stock USDM P28-230 | `20b99338774dc41034229f6afd4c4a6ae8ac22339be26e5474b33ac3388c0d5a` |
+| `p30-rom` | `HONDAECU_P30_ROM` | stock JDM P30, mask 203 (the pgmfi wiki's `203stock.bin`) | `c3decae27ff4dec5587df26633107dc7fb1712c91ab501668311941cf8761dfa` |
 | `launch-rom` | `HONDAECU_LAUNCH_ROM` | launch-control test ROM | `f7c7aac6250af2ee4ae2a9f26b9b0fe68fd02ef668dd524f2d369c9a78482c8e` |
 
-`rom-fixtures` turns both on, and `cargo test-rom` is `cargo test --release
+`rom-fixtures` turns all three on, and `cargo test-rom` is `cargo test --release
 --features rom-fixtures`. Without a feature its tests are listed as
 `ignored, needs the ... ROM`, never as passed. With it, a variable that is
 unset or does not name a file fails every test that needs the image, so a
-green run means the ROM was there. `.cargo/config.toml` defaults the two
-variables to `../P28-230.bin` and `../test-roms/lyonnel-2.0-launch-ok.bin`,
-beside the checkout; set them to use other paths:
+green run means the ROM was there. `.cargo/config.toml` defaults the three
+variables to `../P28-230.bin`, `../../ecu/bins/p30_203.bin` and
+`../test-roms/lyonnel-2.0-launch-ok.bin`, relative to the checkout; set them
+to use other paths:
 
 ```bash
 HONDAECU_P28_ROM=/roms/P28-230.bin cargo test --release --features p28-rom
@@ -161,7 +163,7 @@ HONDAECU_P28_ROM=/roms/P28-230.bin cargo test --release --features p28-rom
 
 CI runs the default suite on every push. A second job, `rom-fixtures`, runs
 the ROM-backed tests when the repository has the images as secrets
-(`P28_230_ROM_GZ_B64`, `LAUNCH_ROM_GZ_B64`: the image gzip-compressed, then
+(`P28_230_ROM_GZ_B64`, `P30_ROM_GZ_B64`, `LAUNCH_ROM_GZ_B64`: the image gzip-compressed, then
 base64), checks each against the digest above, and fails if a test it exists
 for did not run. Without the secrets it reports the fixtures as not
 configured and runs nothing.
