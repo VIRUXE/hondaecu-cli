@@ -2,6 +2,7 @@
 
 // Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI
 
+mod car;
 mod cpu;
 mod bus;
 mod bench;
