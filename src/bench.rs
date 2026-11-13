@@ -84,12 +84,62 @@ pub struct Break {
 /// Everything about a run that is visible from outside the CPU.
 #[derive(Debug, Default)]
 pub struct RunLog {
-    /// Every BRK executed.
+    /// The first `BREAKS_KEPT` of them; `break_count` carries on past that.
     pub breaks: Vec<Break>,
+    /// Every BRK executed, including those not kept in `breaks`.
+    pub break_count: u64,
     pub stop: Option<(f64, Stop)>,
     /// `(t, port B, port C)` on every change once both are outputs.
     pub board: Vec<(f64, u8, u8)>,
     pub watchdog_starved_at: Option<f64>,
+}
+
+/// `RunLog::breaks` stops growing here so a ROM that breaks on every
+/// instruction cannot exhaust memory.
+pub const BREAKS_KEPT: usize = 4096;
+
+/// A boot that takes longer than this, or breaks more often than
+/// `BOOT_BREAK_LIMIT` inside it, is not a boot.
+pub const BOOT_WINDOW_SECONDS: f64 = 1.0;
+pub const BOOT_BREAK_LIMIT: usize = 16;
+
+/// Whether a ROM settled after power-on, judged from behaviour alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Settling {
+    Settled { boot_breaks: usize },
+    /// More than `BOOT_BREAK_LIMIT` BRKs inside the boot window.
+    NeverSettles { breaks: usize, last_pc: u16 },
+    /// A BRK after the boot window: `times` of them, `pc` of the first.
+    ResetsLater { times: Vec<f64>, pc: u16 },
+    /// The watchdog went unserved since this time.
+    Hung { since: f64 },
+    Stopped,
+}
+
+impl RunLog {
+    /// `Stopped` wins, then `NeverSettles`, then `ResetsLater`, then `Hung`.
+    /// `_now` is the ECU time of the end of the run.
+    pub fn settling(&self, _now: f64) -> Settling {
+        if self.stop.is_some() {
+            return Settling::Stopped;
+        }
+        let boot_breaks =
+            self.breaks.iter().filter(|b| b.t < BOOT_WINDOW_SECONDS).count();
+        if boot_breaks > BOOT_BREAK_LIMIT {
+            let breaks = (self.break_count as usize).max(self.breaks.len());
+            let last_pc = self.breaks.last().map_or(0, |b| b.pc);
+            return Settling::NeverSettles { breaks, last_pc };
+        }
+        let later: Vec<&Break> =
+            self.breaks.iter().filter(|b| b.t >= BOOT_WINDOW_SECONDS).collect();
+        if let Some(first) = later.first() {
+            return Settling::ResetsLater { times: later.iter().map(|b| b.t).collect(), pc: first.pc };
+        }
+        if let Some(since) = self.watchdog_starved_at {
+            return Settling::Hung { since };
+        }
+        Settling::Settled { boot_breaks }
+    }
 }
 
 /// The real overflow period is on manual pages missing from the scan; this is
@@ -121,6 +171,11 @@ impl Bench {
         Ok(Bench::new(&loader.rom))
     }
 
+    /// True once the ROM has programmed the board's PPI (ports are outputs).
+    pub fn board_programmed(&self) -> bool {
+        self.bus.p28_outputs().is_some()
+    }
+
     pub fn seconds(&self) -> f64 {
         self.cpu.cycles as f64 / CPU_HZ as f64
     }
@@ -145,7 +200,10 @@ impl Bench {
                 Ok(mnemonic) => {
                     if mnemonic == "BRK" {
                         let t = self.seconds();
-                        self.log.breaks.push(Break { t, pc });
+                        self.log.break_count += 1;
+                        if self.log.breaks.len() < BREAKS_KEPT {
+                            self.log.breaks.push(Break { t, pc });
+                        }
                     }
                 }
                 Err(stop) => {
@@ -225,6 +283,78 @@ mod tests {
         let mut bench = Bench::new(&rom_with(&[0xCB, 0xFE])); // SJ to itself
         assert!(bench.run(0.6));
         assert!(bench.log.watchdog_starved_at.is_some_and(|t| (0.5..0.52).contains(&t)));
+    }
+
+    #[test]
+    fn a_blank_chip_never_settles() {
+        for fill in [0xFFu8, 0x00] {
+            let mut bench = Bench::new(&vec![fill; 32768]);
+            bench.run(1.5);
+            assert!(
+                matches!(
+                    bench.log.settling(bench.seconds()),
+                    Settling::NeverSettles { .. } | Settling::Stopped | Settling::Hung { .. }
+                ),
+                "fill {fill:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn breaks_inside_the_boot_window_are_boot() {
+        let log = RunLog {
+            breaks: vec![Break { t: 0.01, pc: 0x5A8A }, Break { t: 0.03, pc: 0x5A8A }],
+            ..Default::default()
+        };
+        assert!(matches!(log.settling(6.0), Settling::Settled { boot_breaks: 2 }));
+    }
+
+    #[test]
+    fn a_break_after_the_boot_window_is_a_reset() {
+        let log = RunLog {
+            breaks: vec![Break { t: 0.01, pc: 0x5A8A }, Break { t: 5.3, pc: 0x21DF }],
+            ..Default::default()
+        };
+        assert!(matches!(log.settling(6.0), Settling::ResetsLater { pc: 0x21DF, .. }));
+    }
+
+    #[test]
+    fn a_rom_that_breaks_on_every_instruction_keeps_a_bounded_log() {
+        let mut rom = rom_with(&[0xFF]);
+        rom[2] = 0x00;
+        rom[3] = 0x01;
+        let mut bench = Bench::new(&rom);
+        bench.run(0.05);
+        assert_eq!(bench.log.breaks.len(), BREAKS_KEPT);
+        assert!(bench.log.break_count > BREAKS_KEPT as u64);
+        assert!(matches!(
+            bench.log.settling(bench.seconds()),
+            Settling::NeverSettles { breaks, .. } if breaks as u64 == bench.log.break_count
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+    fn stock_p28_settles_and_programs_the_board() {
+        let mut bench = Bench::from_file(&crate::fixtures::p28_rom_path()).unwrap();
+        EngineState::new().sync_sensors_to_bus(&mut bench.bus);
+        bench.engine.rpm = 0.0;
+        bench.run(6.0);
+        assert!(matches!(bench.log.settling(6.0), Settling::Settled { .. }));
+        assert!(bench.board_programmed() && bench.log.watchdog_starved_at.is_none());
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+    fn stock_p28_with_a_bad_checksum_resets_later() {
+        let mut rom = std::fs::read(crate::fixtures::p28_rom_path()).unwrap();
+        rom.truncate(32768);
+        rom[0x7FFF] ^= 0x01; // unused fill byte; sum no longer 0
+        let mut bench = Bench::new(&rom);
+        EngineState::new().sync_sensors_to_bus(&mut bench.bus);
+        bench.engine.rpm = 0.0;
+        bench.run(12.0);
+        assert!(matches!(bench.log.settling(12.0), Settling::ResetsLater { .. }));
     }
 
     #[test]
