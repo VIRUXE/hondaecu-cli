@@ -156,10 +156,11 @@ impl EngineState {
     /// | CYP | 1 / cam rev | P4.4/TRNS0 | polled as TRNSIT.0 |
     /// | VSS | speed | P3.2/INT0 | 0x01D3 (period capture off TM2) |
     ///
-    /// The CKP/TDC/CYP assignment is derived from the ROM, not yet from the
-    /// board schematic: the timer-2 event chain counts RAM 12Ah from 0 to 23
-    /// and re-zeroes it on TRNSIT.0, while 0x0403 expects IRQH.7 once every
-    /// six of those events. See docs/P28_ARCHITECTURE.md, "Crank-angle inputs".
+    /// The CKP/TDC/CYP assignment was derived from the ROM -- the timer-2
+    /// event chain counts RAM 12Ah from 0 to 23 and re-zeroes it on TRNSIT.0,
+    /// while 0x0403 expects IRQH.7 once every six of those events -- and it
+    /// is what Bomarc sheets 2, 4 and 6 show. See docs/P28_ARCHITECTURE.md,
+    /// "Crank-angle inputs".
     ///
     /// Returns the IRQ bits raised. At most one distributor half-tooth is
     /// emitted per call; callers invoke this after every instruction, which

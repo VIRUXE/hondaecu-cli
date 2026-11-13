@@ -157,8 +157,8 @@ width of the last completed pulse on the modeled injector outputs (P2.0–P2.3
 clocked out by TM0IO, see [`INJECTION.md`](INJECTION.md)), or 0 when no
 injector opened during the last full engine cycle, i.e. the ROM is cutting
 fuel. A meaningful assertion must compare independently observed pulses
-between phases, not the scripted RPM input. The output stage is derived from
-the ROM and still awaits confirmation against the P28 schematic.
+between phases, not the scripted RPM input. The output stage was derived from
+the ROM and matches the P28 schematic (a 74HC175 clocked by P3.4).
 
 ---
 

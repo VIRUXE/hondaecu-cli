@@ -17,71 +17,97 @@ pub const EXTERNAL_DATA_START: u16 = RAM_SIZE as u16;
 /// The P28 board's digital switch-input buffer, read by the ROM at 0x2211,
 /// 0x2584, 0x2943 and 0x3CBE through `DP = 4700h`. It is read-only.
 ///
-/// Only this one address is decoded. The board almost certainly decodes fewer
-/// address lines than that, so the real buffer has mirrors, but the stock ROM
-/// never uses another external data address and the decode logic has not been
-/// read off the schematic.
+/// Bomarc sheet 6: U9, a 74HC541, drives inputs ID0..ID7 onto D0..D7. Its G1
+/// is /RD and its G2 comes from pin 37 of the ASIC (U7), so the address
+/// decode is inside the ASIC and not visible on the drawing. Only the one
+/// address the ROM uses is decoded here; the real buffer has mirrors.
 pub const P28_INPUT_PORT: u16 = 0x4700;
 /// The ROM inverts these bits (`XORB A, #01Ah` at 0x2585 and 0x2944) before
 /// storing the port in RAM 211h, so they are active low as read.
 pub const P28_INPUT_ACTIVE_LOW: u8 = 0x1A;
-// Signals on the switch-input buffer, as masks on the raw byte. Names and
-// polarities are from the pgmfi.org wiki's "P30 (Rom #203)" RAM map, whose
-// patch addresses coincide with this ROM (e.g. 0x2855, 0x3C6E, 0x3D06); they
-// were traced by that community, not read off the Bomarc schematic here.
-// Bits 3, 6 and 7 are not named there.
-/// Starter signal, ECU pin B9. Raw 1 = powered (cranking).
+// Signals on the switch-input buffer, as masks on the raw byte.
+//
+// Which signal is on which bit is read off the Bomarc schematic
+// (37820-P28-A51, original scan): sheet 2 for bits 0, 1, 4, 5, 6 and 7, and
+// sheet 8 for bit 3. The A/C label on sheet 2 is not legible in the scan; bit
+// 2 is A/C from the pgmfi wiki's P30 map and from the ROM (a stock-ROM test
+// closes it and watches the clutch relay). Polarities are the wiki's and the
+// ROM's; connector pin numbers follow the wiki's numbering, with Bomarc's in
+// brackets where it differs.
+/// Starter signal, pin B9 (Bomarc B4, "Ign B+ (start)"). Raw 1 = cranking.
 pub const P28_IN_STARTER: u8 = 1 << 0;
-/// VTEC oil-pressure switch, pin D6. Raw 1 = grounded, i.e. the switch is
-/// closed, which is its state without VTEC oil pressure.
+/// VTEC oil-pressure switch, pin D6 (Bomarc D20). Raw 1 = grounded, i.e. the
+/// switch is closed, which is its state without VTEC oil pressure.
 pub const P28_IN_VTEC_PRESSURE_SW_CLOSED: u8 = 1 << 1;
-/// A/C switch, pin B5. Raw 1 = grounded (A/C requested).
+/// A/C switch, pin B5 (Bomarc B6). Raw 1 = grounded (A/C requested).
 pub const P28_IN_AC_SWITCH: u8 = 1 << 2;
-/// Brake switch, pin D2. Raw 0 = powered (pedal pressed).
+/// Feedback from the driver of A/T lock-up solenoid B (U16), sheet 8.
+pub const P28_IN_LOCKUP_B_FEEDBACK: u8 = 1 << 3;
+/// Brake switch, pin D2 (Bomarc D22). Raw 0 = pedal pressed.
 pub const P28_IN_BRAKE_RELEASED: u8 = 1 << 4;
-/// A/T gear position, pin B7. Raw 1 = grounded.
+/// A/T park and neutral position, pin B7 (Bomarc B5). Raw 1 = grounded.
 pub const P28_IN_AT_GEAR_POSITION: u8 = 1 << 5;
+/// A/T "gear drive 3" (Bomarc B7).
+pub const P28_IN_AT_GEAR_DRIVE_3: u8 = 1 << 6;
+/// A/T "gear drive 4" (Bomarc B15).
+pub const P28_IN_AT_GEAR_DRIVE_4: u8 = 1 << 7;
 
-// Signals on 82C55 port A, same source, plus the pgmfi "82C55" page (an
-// electrical trace of OBD1 Civic/Integra boards) for bits 4 and 6.
-/// Power-steering pressure switch, pin B8. Raw 0 = grounded.
+// Signals on 82C55 port A. Bits 4, 5 and 6 are on Bomarc sheet 8 (each a
+// transistor off its driver's output), bit 7 on sheets 2 and 6. Bit 3 is
+// from the wiki's P30 map; sheet 3 takes the P/S switch to the 82C55 but the
+// pin is not legible.
+/// Power-steering pressure switch, pin B8 (Bomarc B13). Raw 0 = grounded.
 pub const P28_PA_PSP_OPEN: u8 = 1 << 3;
-/// Feedback from the A/T lock-up solenoid driver (IC15).
+/// Feedback from the driver of A/T lock-up solenoid A (U15).
 pub const P28_PA_LOCKUP_FEEDBACK: u8 = 1 << 4;
-/// VTEC solenoid feedback, pin A4. Raw 0 = solenoid powered.
+/// VTEC solenoid feedback from U14's output. Raw 0 = solenoid powered.
 pub const P28_PA_VTEC_SOLENOID_OFF: u8 = 1 << 5;
 /// Feedback from the O2-heater driver; the ROM compares it with what it
 /// drives on port C bit 2 (0x2094).
 pub const P28_PA_O2_HEATER_FEEDBACK: u8 = 1 << 6;
-/// Service check connector, pin D4. Raw 1 = grounded (jumper fitted).
+/// Service check connector, pin D4 (Bomarc D21). Raw 1 = jumper fitted.
 pub const P28_PA_SERVICE_CONNECTOR: u8 = 1 << 7;
 
-// Loads on the 82C55 output ports. Sources as for the inputs; "ROM" marks
-// the ones a stock-ROM test in `replay.rs` exercises.
-/// Port B bit 0: A/C clutch relay, pin A15, low = on (wiki P30; ROM).
+// Loads on the 82C55 output ports. Unless noted the bit-to-load wiring is on
+// Bomarc sheet 8; polarities are from the wiki and the ROM. "ROM" marks the
+// ones a stock-ROM test in `replay.rs` exercises.
+/// Port B bit 0: A/C clutch relay, low = on (ROM). Sheets 6 and 7: the bit
+/// goes to ASIC pin 13, and ASIC pins 32/33 drive the A/C and main-relay
+/// halves of QM3.
 pub const P28_PB_AC_CLUTCH_OFF: u8 = 1 << 0;
-/// Port B bit 1: purge solenoid, pin A20, low = on (wiki P30).
+/// Port B bit 1: purge solenoid, low = on.
 pub const P28_PB_PURGE_OFF: u8 = 1 << 1;
-/// Port B bit 2: alternator control, pin A16, high = pin pulled low (wiki P30).
+/// Port B bit 2: alternator control, high = pin pulled low.
 pub const P28_PB_ALTERNATOR_CONTROL: u8 = 1 << 2;
-/// Port B bit 3: radiator fan, low = on (wiki P30).
+/// Port B bit 3: radiator fan, low = on.
 pub const P28_PB_FAN_OFF: u8 = 1 << 3;
-/// Port B bit 4: A/T lock-up solenoid A via IC15, high = on (wiki 82C55; the
-/// ROM writes its own lock-up flag `22Fh.0` straight to it at 0x3387).
+/// Port B bit 4: A/T lock-up solenoid A via U15, high = on (the ROM writes
+/// its own lock-up flag `22Fh.0` straight to it at 0x3387). Lock-up solenoid
+/// B (U16) is driven from ASIC pin 29, not from the 82C55.
 pub const P28_PB_LOCKUP_SOLENOID: u8 = 1 << 4;
-/// Port B bit 7: fuel-pump relay, low = on. The wiki only traces this pin to
-/// the 7U016 custom IC; the function is from the ROM, which holds it low for
-/// two seconds after reset, while the starter input is set, and while the
-/// engine turns (0x4272..0x427E).
+/// Port B bit 5: A/T interlock unit (the pgmfi wiki has IAB / shift light
+/// here, which is what converted boards use the driver for).
+pub const P28_PB_INTERLOCK: u8 = 1 << 5;
+/// Port B bit 7: main (fuel-pump) relay, low = on. Sheets 6 and 7: the bit
+/// goes to ASIC pin 10, and the relay half of QM3 on connector pins A23/A10
+/// is driven from the ASIC. That it is this bit and not port B bit 0 that
+/// reaches the relay is from the ROM, which holds it low for two seconds
+/// after reset, while the starter input is set, and while the engine turns
+/// (0x4272..0x427E).
 pub const P28_PB_FUEL_PUMP_OFF: u8 = 1 << 7;
-/// Port C bit 0: VTEC solenoid driver IC14, high = on (wiki 82C55/P72; the
-/// ROM sets it together with its own "VTEC line active" flag `11Fh.2`).
+/// Port C bit 0: VTEC solenoid driver U14, high = on (the ROM sets it
+/// together with its own "VTEC line active" flag `11Fh.2`).
 pub const P28_PC_VTEC_SOLENOID: u8 = 1 << 0;
-/// Port C bit 2: O2 heater, low = on (wiki 82C55; polarity from the ROM's
-/// inverted copy at 0x4869).
+/// Port C bit 1: U13, the second high-side switch in series with U14.
+pub const P28_PC_VTEC_SERIES_SWITCH: u8 = 1 << 1;
+/// Port C bit 2: O2 heater, low = on (polarity from the ROM's inverted copy
+/// at 0x4869).
 pub const P28_PC_O2_HEATER_OFF: u8 = 1 << 2;
-/// Port C bit 4: malfunction indicator lamp, high = lit (wiki 82C55; ROM).
+/// Port C bit 4: malfunction indicator lamp, high = lit (ROM).
 pub const P28_PC_MIL: u8 = 1 << 4;
+/// Port C bit 6: engine-mount control solenoid, an optional load (the pgmfi
+/// wiki has the EGR solenoid here).
+pub const P28_PC_ENGINE_MOUNT: u8 = 1 << 6;
 
 /// The 82C55 outputs this model can name, decoded to "is it on".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,21 +122,24 @@ pub struct P28Outputs {
     pub mil: bool,
 }
 
-/// The P28 board's MSM82C55A. Its four registers answer at 0F00h, 1F00h, 2F00h
-/// and 3F00h, i.e. the chip's A1:A0 are address lines A13:A12. Evidence is the
-/// ROM's init at 0x51E4: it writes 90h -- an 82C55 mode word, "mode 0, port A
-/// input, ports B and C output" -- to 3F00h, then loads 1F00h and 2F00h and
-/// reads 0F00h. As with `P28_INPUT_PORT`, only these four addresses are decoded.
+/// The P28 board's MSM82C55A (U8). The ROM uses it at 0F00h, 1F00h, 2F00h and
+/// 3F00h: its init at 0x51E4 writes 90h -- an 82C55 mode word, "mode 0, port
+/// A input, ports B and C output" -- to 3F00h, then loads 1F00h and 2F00h and
+/// reads 0F00h.
+///
+/// Bomarc sheet 6 gives the decode: /CS is address line A14, A1 is A13 and A0
+/// is A12. Nothing else qualifies the select, so the chip answers at every
+/// external data address with A14 low, whatever the other address bits are.
 pub const P28_PPI_BASE: u16 = 0x0F00;
+const P28_PPI_SELECT_LOW: u16 = 1 << 14;
 const P28_PPI_REGISTER_SHIFT: u32 = 12;
 /// The ROM inverts these port A bits (`XORB A, #038h` at 0x51FA and 0x290E)
 /// before storing the port in RAM 210h, so they are active low as read.
 pub const P28_PPI_A_ACTIVE_LOW: u8 = 0x38;
 
-/// Register index of a P28 82C55 address, if `addr` is one.
+/// Register index of an external data address that selects the P28 82C55.
 fn p28_ppi_register(addr: u16) -> Option<u8> {
-    let reg = addr.wrapping_sub(P28_PPI_BASE) >> P28_PPI_REGISTER_SHIFT;
-    (reg < 4 && addr == P28_PPI_BASE + (reg << P28_PPI_REGISTER_SHIFT)).then_some(reg as u8)
+    (addr & P28_PPI_SELECT_LOW == 0).then_some(((addr >> P28_PPI_REGISTER_SHIFT) & 0x03) as u8)
 }
 
 /// What an external read returns when no device answers. Nothing drives the
@@ -259,26 +288,31 @@ pub const SFR_TRNS: u16 = 0x46;
 /// Transition detector that watches the ignition output (TRNS1, P4.5). After
 /// each firing the ROM does `RB TRNSIT.1` at 0x0698 and raises `9Ch.3`
 /// (fault index 24h, code 15, "ignition output signal") if no edge was
-/// latched.
+/// latched. Bomarc sheets 8 and 6: a transistor off the ICM line (connector
+/// A3/A16) feeds MCU pin 51.
 pub const P28_TRNS_IGNITION_MONITOR: u8 = 1;
 /// Transition detector that watches the injector drivers (TRNS2, P4.6): the
 /// injector test circuit of USDM boards. The ROM clears the bit just before
 /// it opens an injector (0x4BCF) and expects it set by the next crank event
-/// (0x0637, 0x1486), else `9Ch.6` (fault index 27h, code 16).
+/// (0x0637, 0x1486), else `9Ch.6` (fault index 27h, code 16). Bomarc sheets 7
+/// and 6: a transistor on each injector's low side, combined into MCU pin 52.
 pub const P28_TRNS_INJECTOR_MONITOR: u8 = 2;
 /// Transition detector the ROM uses as a heartbeat input (TRNS3, P4.7). At
 /// 0x2964 it read-clears the bit on every pass and counts down RAM 2EBh from
 /// FFh while no edge arrives; at zero it sets `230h.6`, which lights the MIL
-/// (0x4293) unless mux input U5/X3 reads FCh or more. The same U5/X3 input
-/// must sit at mid scale or above FCh for the boot check at 0x530C. A
-/// mid-scale reference plus a pulse train that proves something is alive
-/// fits the ECU's backup IC, but the source is not identified.
+/// (0x4293) unless mux input U5/X3 reads FCh or more. Bomarc sheet 6: MCU pin
+/// 53 (P4.7) is tied through R53, 2.2 kohm, to pin 22 (P8.2) of U2, the
+/// MSM6434 second MCU, and to the ASIC -- so this is the backup MCU showing
+/// it is alive.
 pub const P28_TRNS_HEARTBEAT: u8 = 3;
-/// Interval between modeled heartbeat edges. Arbitrary: the ROM only needs
-/// one inside its roughly five-second window.
+/// Interval between modeled heartbeat edges. Arbitrary: what the MSM6434
+/// really sends is unknown, and the ROM only needs one edge inside its
+/// roughly five-second window.
 const P28_HEARTBEAT_CYCLES: u32 = (CPU_HZ / 100) as u32;
 /// Timer whose realtime output (TM3IO, P3.7) is the ignition signal: the CKP
-/// capture handler at 0x014D schedules its edges from crank teeth.
+/// capture handler at 0x014D schedules its edges from crank teeth. Bomarc
+/// sheets 6 and 8: MCU pin 45 goes to the ASIC, whose pin 28 drives the ICM
+/// output transistor.
 pub const P28_IGNITION_TIMER: usize = 3;
 
 pub const SFR_ADSCAN: u16 = 0x58;
@@ -293,16 +327,22 @@ pub const P28_MUX_U5_ADCR1: usize = 1;
 /// Sensor positions confirmed from Bomarc 37820-P28-A51, sheet 3.
 pub const P28_U5_ELD_SELECT: usize = 0;
 pub const P28_U5_ECT_SELECT: usize = 2;
-/// U5/X3 is sampled by the ROM's fault-0x49 boot check. Its external signal
-/// semantics remain unresolved.
+/// U5/X3 is sampled by the ROM's fault-0x49 boot check, which wants mid scale
+/// or more than FCh. Bomarc sheet 3: the input comes from connector pin B14
+/// through 1 kohm and is biased by a 1 % resistor divider, so with nothing
+/// on B14 it is a half-scale reference for the converter.
 pub const P28_U5_BOOT_CHECK_SELECT: usize = 3;
 pub const P28_U6_HEGO_SELECT: usize = 0;
 pub const P28_U6_BARO_SELECT: usize = 3;
 
-// Mux positions identified from the ROM and the pgmfi wiki rather than the
-// schematic.
-/// U5/X1: gearbox configuration resistors (RP17/RP18 on the wiki's
-/// auto/manual page). The ROM copies bit 7 of this sample into `216h.3`
+// Mux positions identified from the ROM and the pgmfi wiki, and since found
+// on Bomarc sheet 3 as well. Sheet 3 also shows resistor pairs, some drawn as
+// jumpers, on U5/X4, X5, X6, X7 and U6/X1, X4, X5, X6: board-configuration
+// inputs. Which of them a given board populates is not on the drawing, and
+// the model leaves those inputs at mid scale.
+/// U5/X1: gearbox configuration resistors RP17 (to +5 V) and RP18 (to
+/// ground), as on the wiki's auto/manual page; the Bomarc board is an
+/// automatic with 2700 ohm in both. The ROM copies bit 7 of this sample into `216h.3`
 /// (0x55C5..0x55D0), which the wiki's P30 map calls "1 = automatic", so a
 /// manual ECU presents less than half scale here. Bit 6 is inverted into
 /// `216h.2` and `216h.0`.
@@ -310,7 +350,8 @@ pub const P28_U5_GEARBOX_SELECT: usize = 1;
 /// U6/X2: intake air temperature (wiki P30 map, RAM 3C0h; the ROM
 /// range-checks it at 0x3BF5 and filters it into C0h).
 pub const P28_U6_IAT_SELECT: usize = 2;
-/// U6/X7: battery voltage. The sample lands in RAM 3C5h and is copied to C3h
+/// U6/X7: battery voltage (on Bomarc sheet 3 the input hangs off resistor
+/// network RM2 from the supply rail). The sample lands in RAM 3C5h and is copied to C3h
 /// (0x3B3B). The ROM's tables indexed by C3h -- injector dead time at 61D6h,
 /// IACV compensation at 69F6h -- have their breakpoints at 54h, 69h, 7Eh,
 /// 93h, A7h..., i.e. 8, 10, 12, 14, 16 V at `P28_VBATT_COUNTS_PER_VOLT`.
@@ -322,8 +363,13 @@ pub const P28_VBATT_COUNTS_PER_VOLT: f64 = 10.4;
 
 /// AI4: IACV coil current. The timer-1 handler samples it at the end of each
 /// conducting phase (0x0136) and the controller at 0x286D steers the PWM
-/// on-time until it matches the target in 25Ah.
+/// on-time until it matches the target in 25Ah. Bomarc sheets 8 and 5: sense
+/// resistor R61 in the emitter of the IACV driver, amplified by U11 into MCU
+/// pin 58 (P5.4).
 pub const P28_ADC_IACV_CURRENT: usize = 4;
+/// AI2: the alternator FR signal, RC-filtered into MCU pin 56 (Bomarc sheet
+/// 2). Not driven by the engine model.
+pub const P28_ADC_ALTERNATOR_FR: usize = 2;
 /// Timer whose realtime output (TM1IO, P3.5) is the IACV PWM. The pin is low
 /// for the phase the controller regulates (RAM C8h, 0F0h..580h timer counts)
 /// and high for the rest of the fixed A00h-count, 2.048 ms period.
@@ -1040,9 +1086,11 @@ impl Bus {
     ///   * fuel cut: `ORB P2, #0Fh` then `SB TCON0.2` / `RB TCON0.2` at 0x4C00.
     ///
     /// Reading the raw P2 latch instead shows ~20 us "pulses", because the
-    /// closed state is staged right after the opening strobe. This is derived
-    /// from the ROM; the latch part itself has not been identified on the
-    /// schematic.
+    /// closed state is staged right after the opening strobe. This was
+    /// derived from the ROM and is what Bomarc sheet 6 shows: U18, a 74HC175,
+    /// takes P2.0..P2.3 on D1..D4 and P3.4 on its clock, and its outputs go
+    /// to the ASIC, which drives the injector pre-drivers (sheet 7: ASIC pins
+    /// 22..25 for injectors 1..4). The 74HC175 clocks on the rising edge.
     fn latch_injector_outputs(&mut self) {
         // The strobe only reaches the pin when P3.4 is a TM0IO output.
         if self.ram[SFR_P3SF as usize] & 0x10 == 0 || self.ram[SFR_P3IO as usize] & 0x10 == 0 {
@@ -1404,18 +1452,18 @@ mod tests {
     fn external_addresses_do_not_alias_on_chip_ram() {
         let mut bus = Bus::new();
         bus.p28_input_port = 0x5A;
-        // The old 4 KiB mask folded 4700h onto 0700h and 1480h onto 0480h.
+        // The old 4 KiB mask folded 4700h onto 0700h and 5480h onto 0480h.
         bus.write_data_u8(0x047F, 0x11);
-        bus.write_data_u8(0x0700, 0x22);
-        bus.write_data_u8(0x1480, 0x33);
+        bus.write_data_u8(0x5480, 0x22);
+        bus.write_data_u8(0x7FFF, 0x33);
 
         assert_eq!(bus.read_data_u8(0x047F), 0x11, "last on-chip RAM byte");
         assert_eq!(bus.read_data_u8(P28_INPUT_PORT), 0x5A);
         assert_eq!(bus.external_unmapped_writes, 2);
-        assert_eq!(bus.read_data_u8(0x0700), EXTERNAL_OPEN_BUS);
-        assert_eq!(bus.read_data_u8(0x0480), EXTERNAL_OPEN_BUS);
+        assert_eq!(bus.read_data_u8(0x4701), EXTERNAL_OPEN_BUS);
+        assert_eq!(bus.read_data_u8(0xC700), EXTERNAL_OPEN_BUS);
         assert_eq!(bus.external_unmapped_reads, 2);
-        assert_eq!(bus.external_last_unmapped, Some(0x0480));
+        assert_eq!(bus.external_last_unmapped, Some(0xC700));
     }
 
     #[test]
@@ -1429,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn p28_ppi_answers_at_its_four_addresses_only() {
+    fn p28_ppi_answers_wherever_a14_is_low() {
         let mut bus = Bus::new();
         // Bits 4..6 are driver feedback: with these outputs the lock-up and
         // VTEC drivers are off (1, 1) and so is the O2 heater (0).
@@ -1445,7 +1493,13 @@ mod tests {
         assert_eq!(bus.p28_board_outputs(), (0xEB, 0x44));
         assert_eq!(bus.external_unmapped_reads, 0);
 
-        for addr in [0x0E00, 0x0F01, 0x4F00, 0x1F80] {
+        // /CS is A14 alone and the register is A13:A12, so the chip has
+        // mirrors all over the lower and third quarters of the address space.
+        for (addr, reg) in [(0x0480u16, 0u8), (0x1F80, 1), (0xAF00, 2), (0xBFFF, 3)] {
+            assert_eq!(p28_ppi_register(addr), Some(reg), "{addr:04X}");
+        }
+        assert_eq!(bus.read_data_u8(0x9ABC), 0xEB, "port B mirror");
+        for addr in [0x4F00u16, 0x7F00, 0xCF00, 0xFFFF] {
             assert_eq!(p28_ppi_register(addr), None, "{addr:04X}");
         }
         assert_eq!(bus.read_data_u8(0x4F00), EXTERNAL_OPEN_BUS);
@@ -1517,7 +1571,7 @@ mod tests {
         // 12.5 V on the battery input.
         bus.p28_mux_inputs[P28_MUX_U6_ADCR0][P28_U6_VBATT_SELECT] = 130 * 4;
         // 40 % conducting (pin low), 2000-cycle period, long enough to settle.
-        let mut drive = |bus: &mut Bus, periods: u32| {
+        let drive = |bus: &mut Bus, periods: u32| {
             for _ in 0..periods {
                 bus.elapsed_cycles += 800;
                 bus.iacv_pwm_edge(true);

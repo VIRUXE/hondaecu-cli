@@ -375,18 +375,20 @@ addresses, which belong to two devices:
 | `2F00h` | 82C55 port C | write, read back | 0x1039, 0x20B0, 0x28FC, 0x4E2D, 0x51F5 |
 | `3F00h` | 82C55 control | write | 0x51E9 |
 
-The 82C55 is identified from the ROM, not from the schematic: the init at
-`0x51E4` writes `90h` to `3F00h`, which is that part's mode word for "mode 0,
-port A input, ports B and C output", then loads `1F00h` and `2F00h` and reads
-`0F00h`. The chip's A1:A0 are therefore address lines A13:A12. `ppi82c55.rs`
+The 82C55 was first identified from the ROM: the init at `0x51E4` writes `90h`
+to `3F00h`, which is that part's mode word for "mode 0, port A input, ports B
+and C output", then loads `1F00h` and `2F00h` and reads `0F00h`. `ppi82c55.rs`
 models mode 0 from the MSM82C55A-2 datasheet (`82C55A-2RS.pdf`): all ports
 are inputs after reset, a mode write clears the output registers, and an
 output port reads back its own register. Modes 1 and 2 are flagged, not
 emulated.
 
-Only those five addresses are decoded. The board certainly decodes fewer
-address lines, so both devices have mirrors, but the ROM does not use them and
-the decode logic has not been read off the schematic. Any other external access
+Sheet 6 of the Bomarc schematic (see "The schematic" below) gives the decode.
+The 82C55 (U8) has /CS on address line A14, A1 on A13 and A0 on A12, with
+nothing else qualifying the select, so it answers at every external data
+address with A14 low; the model decodes it that way. The switch buffer is U9,
+a 74HC541 with G1 on /RD and G2 from pin 37 of the ASIC (U7): its decode is
+inside the ASIC, so only `4700h` itself is modeled. Any other external access
 returns `FFh` (a placeholder for an undriven bus), is dropped on write, and is
 counted in `Bus::external_unmapped_reads` / `external_unmapped_writes`;
 `replay::stock_p28_external_bus_is_fully_decoded` requires both to stay zero.
@@ -399,8 +401,18 @@ both ports, reads each back, and raises fault `4Dh` on a mismatch. The earlier
 4 KiB mask aliased all four 82C55 addresses to RAM `0F00h`, so a port A read
 returned whatever had last been written to port B or C.
 
-**Signal names.** The schematic is still not available here. The names below
-come from the pgmfi.org wiki archive, which is community reverse engineering:
+**The schematic.** The Bomarc drawing 37820-P28-A51 (8 sheets, 2005, an
+automatic-gearbox board 02D01720-1500) is not stored in this workspace, but
+the original scan is public in
+[imtheman0313/Honda-Civic-P28-ECU](https://github.com/imtheman0313/Honda-Civic-P28-ECU) (`P28ECU/Page1.jpg`..`Page8.jpg`),
+and hondabase.com has a written transcription of it. Use the original scan:
+the "restored" images on hondabase are upscaled and several pin labels in
+them are wrong (for example 82C55 pin 42 reads "PA6" where it is PA4). What
+follows marks each fact with the sheet it was read from; where only the wiki
+or the ROM supports it, it says so.
+
+**Signal names.** The names were first taken from the pgmfi.org wiki archive,
+which is community reverse engineering:
 
 - [P30 (Rom #203)](https://www.hondabase.com/pgmfi/wiki/library/p30): a RAM map naming bits of `210h`, `211h`, `P0`
   and `P1` with ECU connector pins. Its patch addresses coincide with this
@@ -415,6 +427,11 @@ Where the ROM can check a name it does: the wiki's O2-heater pair is the PA6 /
 PC2 comparison at 0x2094, its VTEC solenoid feedback and pressure switch are
 the bits tested at 0x3D15 and 0x3D34 behind the VTEC enable flag, and its
 knock-diagnostic pins are the bit-serial pair at 0x4E1F / 0x4E23.
+
+The schematic agrees with the wiki on every bit both name, with two
+exceptions on the outputs: PB5 is the A/T interlock unit (wiki: IAB / shift
+light) and PC6 the optional engine-mount solenoid (wiki: EGR). It also names
+the three input bits the wiki leaves out.
 
 Five names are also exercised by running the stock ROM (`replay.rs`,
 `stock_p28_*` tests), marked **tested** below:
@@ -435,22 +452,22 @@ ROM-driven state is `p28_outputs().vtec_solenoid`.
 
 | bit | init | written at | load (source) | ROM note |
 |---|---|---|---|---|
-| PB0 (`P0.0`) | 1 | 0x432F | A/C clutch relay, pin A15, 0 = on (P30); **tested** | inverted into the status image at 0x4880 |
-| PB1 (`P0.1`) | 1 | 0x5FC3 | purge solenoid, pin A20, 0 = on (P30) | inverted at 0x57BB |
-| PB2 (`P0.2`) | 0 | 0x443B, 0x4462 | alternator control, pin A16, 1 = pulled to ground (P30) | inverted at 0x57D1 |
-| PB3 (`P0.3`) | 1 | 0x43A0, 0x43D1, 0x43E7 | radiator fan, 0 = on (P30) | inverted at 0x48A5 |
-| PB4 (`P0.4`) | 0 | 0x3387 | A/T lock-up solenoid A via IC15 (82C55) | not inverted at 0x489C |
-| PB5 (`P0.5`) | 1 | 0x448E, 0x47E8 | intake air bypass / shift light / lock-up (82C55, P72) | inverted at 0x57C4 |
-| PB6 (`P0.6`) | 1 | 0x2744 (toggle), 0x274A, 0x2752 | pull-up only (82C55) | toggled on a timed cadence gated by the fault words at `212h`/`214h`; not inverted at 0x57CB |
-| PB7 (`P0.7`) | 1 | 0x427E | fuel-pump relay, 0 = on (ROM behaviour; the 82C55 page only traces the pin to the 7U016 custom IC); **tested** | inverted at 0x4887 |
-| PC0 (`P1.0`) | 0 | 0x11E2, 0x1206, 0x1220 | VTEC solenoid driver IC14 (82C55, P72) | set together with `11Fh.2`, 1 = on; not inverted at 0x48A0 |
-| PC1 (`P1.1`) | 0 | 0x11B9, 0x11BE | second VTEC driver IC13 (82C55, P72) | |
-| PC2 (`P1.2`) | 1 | 0x102A, 0x20A1, 0x44CA | O2 heater (82C55) | inverted at 0x4869; compared with port A bit 6 at 0x2094 |
-| PC3 (`P1.3`) | 0 | 0x4E23 | knock-board diagnostic (82C55) | bit-serial data out of `1CEh` (0x4E1C) |
-| PC4 (`P1.4`) | 0 | 0x36CA, 0x42AE | MIL, 1 = lit (82C55); **tested** | not inverted at 0x4870 |
-| PC5 (`P1.5`) | 0 | 0x36AE | pull-up only (82C55) | |
-| PC6 (`P1.6`) | 1 | 0x44F3 | EGR solenoid (82C55) | inverted at 0x4875 |
-| PC7 (`P1.7`) | 0 | 0x4E1F | knock-board diagnostic (82C55) | bit-serial data out of `1CEh` |
+| PB0 (`P0.0`) | 1 | 0x432F | A/C clutch relay, 0 = on (P30; sheets 6, 7: to ASIC pin 13); **tested** | inverted into the status image at 0x4880 |
+| PB1 (`P0.1`) | 1 | 0x5FC3 | purge solenoid, 0 = on (sheet 8, P30) | inverted at 0x57BB |
+| PB2 (`P0.2`) | 0 | 0x443B, 0x4462 | alternator control, 1 = pulled to ground (sheet 8, P30) | inverted at 0x57D1 |
+| PB3 (`P0.3`) | 1 | 0x43A0, 0x43D1, 0x43E7 | radiator fan, 0 = on (sheet 8, P30) | inverted at 0x48A5 |
+| PB4 (`P0.4`) | 0 | 0x3387 | A/T lock-up solenoid A via U15 (sheet 8) | not inverted at 0x489C |
+| PB5 (`P0.5`) | 1 | 0x448E, 0x47E8 | A/T interlock unit (sheet 8); the wiki has IAB / shift light, the use converted boards make of this driver | inverted at 0x57C4 |
+| PB6 (`P0.6`) | 1 | 0x2744 (toggle), 0x274A, 0x2752 | 10 kohm pull-up only (sheet 8) | toggled on a timed cadence gated by the fault words at `212h`/`214h`; not inverted at 0x57CB |
+| PB7 (`P0.7`) | 1 | 0x427E | main (fuel-pump) relay, 0 = on (sheets 6, 7: to ASIC pin 10; ROM behaviour); **tested** | inverted at 0x4887 |
+| PC0 (`P1.0`) | 0 | 0x11E2, 0x1206, 0x1220 | VTEC solenoid driver U14 (sheet 8) | set together with `11Fh.2`, 1 = on; not inverted at 0x48A0 |
+| PC1 (`P1.1`) | 0 | 0x11B9, 0x11BE | U13, a second high-side switch in series with U14 (sheet 8) | |
+| PC2 (`P1.2`) | 1 | 0x102A, 0x20A1, 0x44CA | O2 heater (sheet 8) | inverted at 0x4869; compared with port A bit 6 at 0x2094 |
+| PC3 (`P1.3`) | 0 | 0x4E23 | knock-board diagnostic (82C55 page) | bit-serial data out of `1CEh` (0x4E1C) |
+| PC4 (`P1.4`) | 0 | 0x36CA, 0x42AE | MIL, 1 = lit (sheet 8); **tested** | not inverted at 0x4870 |
+| PC5 (`P1.5`) | 0 | 0x36AE | 10 kohm pull-up only (sheet 6) | |
+| PC6 (`P1.6`) | 1 | 0x44F3 | optional engine-mount control solenoid (sheet 8); the wiki has EGR | inverted at 0x4875 |
+| PC7 (`P1.7`) | 0 | 0x4E1F | to the knock-board connector FC1 (sheet 5) | bit-serial data out of `1CEh` |
 
 "init" is the value loaded at 0x2297 (`P0 = EBh`, `P1 = 44h`). The status
 image is the block the ROM assembles at 0x4823..0x48B9 into RAM
@@ -470,8 +487,14 @@ ROM does, by behaviour: at 0x4272..0x427E it clears `P0.7` while the timer at
 clear. In the emulator PB7 is low from reset; with the engine stopped it goes
 high after 2.07 s, and with the engine turning it stays low. A two-second
 prime followed by "on while the engine turns" is the fuel-pump relay and
-nothing else on this ECU. What is still unconfirmed is the path from the
-7U016 to connector pins A7/A8, which needs the schematic.
+nothing else on this ECU.
+
+The schematic gives the path. PB7 and PB0 both go to the ASIC U7, the
+"MSM7UC16-005" that the wiki calls 7U016 (sheet 6: PB7 to pin 10, PB0 to pin
+13). ASIC pins 32 and 33 drive, through DTA143 pre-drivers, the two halves of
+QM3 (an ST413A): one switches the main relay on connector pins A23/A10, the
+other the A/C clutch on A6 (sheet 7). Which input reaches which output is
+inside the ASIC; the ROM's behaviour says PB7 is the relay and PB0 the A/C.
 
 P2.4 is not a load driver either: the ROM toggles it next to every watchdog
 reload (0x5220..0x522A), so it strobes something outside the chip. The model
@@ -486,30 +509,34 @@ no longer reports it as the A/C clutch.
 
 | bit | signal (source), level as read | read by (through the RAM image unless marked raw) |
 |---|---|---|
-| `4700h`.0 | starter, pin B9: 1 = powered (P30); **tested** | raw at 0x2212 into `9Fh.0`; 0x3A0C, 0x3A21, 0x3BDC, 0x4278, 0x42A0, 0x483C |
-| `4700h`.1 | VTEC pressure switch, pin D6: 1 = grounded (P30); **tested** | 0x0AB8, 0x3D34, 0x5EAB |
-| `4700h`.2 | A/C switch, pin B5: 1 = grounded (P30); **tested** | 0x2A93, 0x2C47, 0x4306, 0x4431, 0x4838, 0x5D1E |
-| `4700h`.3 | not named | raw at 0x3CC6 only |
-| `4700h`.4 | brake switch, pin D2: 0 = powered (P30) | 0x0D61, 0x2946, 0x295C, 0x43F6, 0x4479, 0x47DE, 0x4830 |
-| `4700h`.5 | A/T gear position, pin B7: 1 = grounded (P30) | 0x0D58, 0x2A97, 0x2B05, 0x2BA2, 0x2E81, 0x32A8, 0x3BE4, 0x440F, 0x45CE, 0x47AB, 0x482C, 0x4858, 0x59E5, 0x5CF8 |
-| `4700h`.6 | not named; an A/T input (see below) | 0x32AB, 0x32D7, 0x3301, 0x3353, 0x33BE, 0x33D2, 0x4828 |
-| `4700h`.7 | not named; an A/T input (see below) | 0x32AE, 0x32FE, 0x4824 |
-| port A.0, .1 | resistor pairs R112/R113 (82C55) | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` |
-| port A.2 | resistor R114 (82C55) | raw at 0x2800 into `232h.6` |
-| port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28); the 82C55 page instead guesses an A/D-board diagnostic | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
-| port A.4 | feedback from lock-up driver IC15 (82C55) | raw at 0x3C9C into `99h.6` |
-| port A.5 | VTEC solenoid feedback, pin A4: 0 = powered (P30, 82C55) | 0x3D15, 0x3D21 |
-| port A.6 | O2-heater driver feedback (82C55) | raw at 0x2098: compared with `A0h.5`, drives PC2 |
-| port A.7 | service check connector, pin D4: 1 = grounded (P30); **tested**; the 82C55 page instead guesses an A/D-board diagnostic | 0x0952, 0x0B98, 0x25E3, 0x36B1, 0x3B89, 0x4281, 0x4850 |
+| `4700h`.0 | starter, pin B9: 1 = powered (sheet 2, P30); **tested** | raw at 0x2212 into `9Fh.0`; 0x3A0C, 0x3A21, 0x3BDC, 0x4278, 0x42A0, 0x483C |
+| `4700h`.1 | VTEC pressure switch, pin D6: 1 = grounded (sheet 2, P30); **tested** | 0x0AB8, 0x3D34, 0x5EAB |
+| `4700h`.2 | A/C switch, pin B5: 1 = grounded (P30; the label on sheet 2 is illegible); **tested** | 0x2A93, 0x2C47, 0x4306, 0x4431, 0x4838, 0x5D1E |
+| `4700h`.3 | feedback from the driver of A/T lock-up solenoid B, U16 (sheet 8) | raw at 0x3CC6 only |
+| `4700h`.4 | brake switch, pin D2: 0 = powered (sheet 2, P30) | 0x0D61, 0x2946, 0x295C, 0x43F6, 0x4479, 0x47DE, 0x4830 |
+| `4700h`.5 | A/T park and neutral, pin B7: 1 = grounded (sheet 2, P30) | 0x0D58, 0x2A97, 0x2B05, 0x2BA2, 0x2E81, 0x32A8, 0x3BE4, 0x440F, 0x45CE, 0x47AB, 0x482C, 0x4858, 0x59E5, 0x5CF8 |
+| `4700h`.6 | A/T "gear drive 3" (sheet 2) | 0x32AB, 0x32D7, 0x3301, 0x3353, 0x33BE, 0x33D2, 0x4828 |
+| `4700h`.7 | A/T "gear drive 4" (sheet 2) | 0x32AE, 0x32FE, 0x4824 |
+| port A.0, .1 | knock-board connector FC1 through resistors R110..R113 (sheet 5) | raw at 0x4E00..0x4E05: shifted bit-serially into `1D0h` |
+| port A.2 | knock-board connector FC1 through R109/R114 (sheet 5) | raw at 0x2800 into `232h.6` |
+| port A.3 | power-steering pressure switch, pin B8: 0 = grounded (P30, P28). Sheet 3 takes the switch to the 82C55, pin not legible | 0x2A8F, 0x2D60, 0x2D73, 0x5EB4 |
+| port A.4 | feedback from the driver of lock-up solenoid A, U15 (sheet 8) | raw at 0x3C9C into `99h.6` |
+| port A.5 | VTEC solenoid feedback off U14's output: 0 = powered (sheet 8, P30) | 0x3D15, 0x3D21 |
+| port A.6 | O2-heater driver feedback (sheet 8) | raw at 0x2098: compared with `A0h.5`, drives PC2 |
+| port A.7 | service check connector, pin D4: 1 = grounded (sheets 2 and 6, P30); **tested** | 0x0952, 0x0B98, 0x25E3, 0x36B1, 0x3B89, 0x4281, 0x4850 |
 
 Addresses are the bit tests as dasm662 resolved them (`off(00210h)`,
 `off(00211h)`). The named masks are `P28_IN_*`, `P28_PA_*`, `P28_PB_*` and
 `P28_PC_*` in `bus.rs`.
 
+Connector pin numbers above follow the wiki; Bomarc numbers the same pins
+differently (starter B4, park/neutral B5, A/C B6, gear drive 3 B7, gear drive
+4 B15, VTEC pressure switch D20, service check D21, brake D22).
+
 `4700h` bits 6 and 7 are read only by the routine at 0x32A8..0x3387, together
-with the A/T gear-position bit and vehicle speed, and that routine's result is
-PB4, the A/T lock-up solenoid. They are automatic-transmission inputs; which
-ones is not established. Bit 3 is read once, raw, at 0x3CC6.
+with the park/neutral bit and vehicle speed, and that routine's result is
+PB4, the A/T lock-up solenoid -- which fits the schematic's "gear drive"
+labels. Bit 3 is read once, raw, at 0x3CC6.
 
 Port A bits 4, 5 and 6 are not free inputs in the model: they are the
 lock-up, VTEC-solenoid and O2-heater driver feedbacks, and
@@ -642,14 +669,21 @@ through the active LRB page, not plain address `N8`.
    incomplete (IACV, ignition, P4.0, P2.4 …), including what the PWM0 pin and
    the software PWM on P4.3 drive. The time base counter exists only as the PWM tap phase; it is
    not a readable register.
-2. The injector output latch and the CKP/TDC/CYP/VSS pin assignment are derived
-   from the ROM, not read off the schematic. Output-to-cylinder mapping and
-   real sensor phasing are not established. External timer clocking (`111b`)
-   is not modeled.
+2. The injector output latch and the CKP/TDC/CYP/VSS pin assignment were
+   derived from the ROM and are confirmed by the schematic: U18 (74HC175) is
+   the latch, clocked by P3.4; CKP is MCU pin 44 (P3.6), TDC pin 41 (P3.3),
+   CYP pin 50 (P4.4) and VSS pin 40 (P3.2), each through a 74HC14 inverter
+   (sheets 2, 4, 6). The mapping from latch output to cylinder passes through
+   the ASIC and is not on the drawing, and the real sensor phasing is
+   mechanical, so neither is established. External timer clocking (`111b`) is
+   not modeled.
 3. The P28 external devices -- the switch-input buffer at DATA[`0x4700`] and
-   the 82C55 at `0x0F00..0x3F00` -- are modeled. Their signal names come from
-   the pgmfi wiki and from ROM behaviour, not the schematic; three input bits
-   are unnamed and address mirrors are not decoded.
+   the 82C55 -- are modeled, and their bit assignments are read off the
+   schematic apart from the A/C switch and power-steering bits, which rest on
+   the pgmfi wiki and the ROM. The buffer's address mirrors are not decoded
+   (its select comes out of the ASIC). Port A bits 0..2 and port C bits 3 and
+   7 go to the knock-board connector, which a P28 does not populate; what
+   those inputs read on a P28 is not established.
 4. The feedback paths described under "Faults and the monitors the ROM
    depends on" are models of what the ROM checks, with stated assumptions:
    the IACV sense gain and filter, which edge of the ignition pulse reaches
@@ -703,10 +737,26 @@ through the register aliases; ten instructions in this ROM use the form.
 
 The wiki's engine-simulator page agrees with the set: its author had to fit
 real injector loads, an igniter feed "to prevent code 15", and a real IACV.
-The heartbeat is the least understood: a pulse train plus the mid-scale
-reference on U5/X3 that the boot check at 0x530C demands fits the ECU's backup
-IC proving it is alive, but nothing here identifies the source. Its rate is
-arbitrary; the ROM needs one edge in about five seconds.
+
+The schematic shows every one of these paths:
+
+- ignition (sheets 6, 8): TM3IO, MCU pin 45, goes to the ASIC, whose pin 28
+  drives the ICM output transistor on connector pins A3/A16; a DTC144 off
+  that line feeds MCU pin 51, P4.5;
+- injectors (sheets 6, 7): a DTC144 on each injector's low side, combined
+  through a diode pack and a DTC114 into MCU pin 52, P4.6. The combining
+  stage pulls the line low when an injector conducts, which is the falling
+  edge the model generates;
+- heartbeat (sheet 6): MCU pin 53, P4.7, is tied through R53 (2.2 kohm) to
+  pin 22, P8.2, of U2, the MSM6434 second MCU, and to the ASIC. So it is the
+  backup MCU showing it is alive. What it sends is not known; the modeled
+  rate is arbitrary and the ROM needs one edge in about five seconds;
+- IACV current (sheets 8, 5): sense resistor R61 in the emitter of the IACV
+  driver, amplified by U11 into MCU pin 58, P5.4.
+
+The mid-scale level on U5/X3 that the boot check at 0x530C demands is a
+separate thing: sheet 3 shows that input coming from connector pin B14 and
+biased by a 1 % divider, i.e. a half-scale reference for the converter.
 
 **IACV current loop.** The IACV is not open-loop PWM. Timer 1's realtime
 output (TM1IO, P3.5) carries a fixed `A00h`-count, 2.048 ms period; the handler

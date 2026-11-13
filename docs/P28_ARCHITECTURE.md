@@ -119,7 +119,9 @@ starter signal according to the pgmfi wiki, 1 while cranking, so it rests at
 
 ## Crank-angle inputs
 
-Derived from the stock ROM; not yet confirmed against the schematic.
+Derived from the stock ROM and confirmed on Bomarc sheets 2, 4 and 6: each
+signal reaches the MCU pin listed through a 74HC14 inverter (CKP pin 44, TDC
+pin 41, CYP pin 50, VSS pin 40).
 
 | signal | rate | MCU input | ROM consumer |
 |---|---|---|---|
@@ -231,12 +233,14 @@ not apply generically to digital switches and solenoids.
 - The P28 board outputs other than the injectors and the named 82C55 bits
   remain unresolved, including the loads on the PWM pins.
 - The switch-input buffer at `0x4700` and the 82C55 at `0x0F00..0x3F00` are
-  modeled as devices. Their signal names are taken from the pgmfi wiki and
-  from ROM behaviour rather than the schematic, and three input bits are
-  unnamed. The fuel-pump relay is 82C55 port B bit 7 (active low).
-- The injector output stage and crank-signal pin assignment are ROM-derived
-  and await confirmation against the schematic; cylinder mapping and sensor
-  phasing are not established.
+  modeled as devices, with their bit assignments read off the Bomarc
+  schematic (see `CPU_CORE.md`). The fuel-pump relay is 82C55 port B bit 7,
+  active low, through the ASIC.
+- The injector output stage (U18, a 74HC175 clocked by P3.4) and the
+  crank-signal pin assignment are confirmed by the schematic. The mapping
+  from latch output to cylinder runs through the ASIC and is not on the
+  drawing; sensor phasing is mechanical and not established beyond what the
+  ROM itself requires.
 - Stock-ROM tests require an external image; decoder ground truth is tracked,
   but mnemonic/length agreement does not certify execution or hardware.
 - TCP datalog compatibility and scenario/DTC conclusions remain experimental.

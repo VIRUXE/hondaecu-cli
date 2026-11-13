@@ -106,12 +106,16 @@ path with live mux inputs, but it is not a physical-ECU validator.
   per engine cycle, in rotation, from 300 rpm to its fuel cut between 7000 and
   7500 rpm. Pulse widths come from the ROM's own tables acting on modeled
   sensor voltages; they are plausible, not validated against a datalog.
-- The injector output stage (P2.0–P2.3 clocked by TM0IO) and the crank-signal
-  pin assignment (CKP on TM2IO, TDC on INT1, CYP on TRNS0, VSS on INT0) are
-  derived from the ROM, not yet read off the schematic. The output-to-cylinder
-  mapping and the real sensor phasing are not established.
-- Other board-output wiring is incomplete. Fuel-pump, MIL, VTEC, IACV and
-  similar telemetry must not be treated as verified harness behavior.
+- The injector output stage (P2.0–P2.3 clocked by TM0IO into a 74HC175) and
+  the crank-signal pin assignment (CKP on TM2IO, TDC on INT1, CYP on TRNS0,
+  VSS on INT0) were derived from the ROM and are confirmed by the Bomarc
+  schematic. The output-to-cylinder mapping and the real sensor phasing are
+  not established.
+- Fuel-pump, MIL, A/C clutch, fan and purge telemetry follow the board's
+  82C55 outputs, whose wiring is read off the schematic; `vtec_active` is
+  still emulator-side logic. The feedback paths the ROM monitors (IACV
+  current, ignition and injector monitors, backup-MCU heartbeat) are models
+  with stated assumptions; see `docs/CPU_CORE.md`.
 - PWM0/PWM1 follow the user's manual (PWM, auto reload and free-run modes),
   but which board loads P4.2 and P4.3 drive is not established.
 - External data addresses above the 4 KiB backing store currently alias

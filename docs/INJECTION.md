@@ -185,10 +185,14 @@ output (TM0IO, P3.4):
 injector outputs, provided P3.4 is configured as a TM0IO output. Pulse widths
 and opening counts are measured on those outputs.
 
-This is derived from the ROM. The latch has not been identified on the Bomarc
-schematic, and the mapping from output number to cylinder is not established:
-the outputs open in the order 0, 1, 2, 3, which presumably follows the firing
-order.
+This was derived from the ROM, and Bomarc sheet 6 shows it: U18, a 74HC175
+(rising-edge clocked), has P2.0..P2.3 on D1..D4 and P3.4 on its clock. Its
+outputs Q1..Q4 go to pins 8, 6, 5 and 7 of the ASIC (U7), and the ASIC drives
+the injector pre-drivers from its pins 22..25, which sheet 7 wires to
+injectors 1..4 in that order. What the ASIC does between those pins is not on
+the drawing, so the mapping from output number to cylinder is still not
+established: the outputs open in the order 0, 1, 2, 3, which presumably
+follows the firing order.
 
 ---
 
@@ -288,14 +292,15 @@ the last width.
 
 ## 5. What is still not established
 
-- The injector output latch and the CKP → TM2IO, TDC → INT1, CYP → TRNS0,
-  VSS → INT0 assignments are ROM-derived, not read off the schematic.
-- Output-number-to-cylinder mapping and the real CKP/TDC/CYP phasing.
+- Output-number-to-cylinder mapping (it passes through the ASIC) and the real
+  CKP/TDC/CYP phasing. The latch itself and the CKP → TM2IO, TDC → INT1,
+  CYP → TRNS0, VSS → INT0 assignments are confirmed by the schematic.
 - Pulse widths are produced by the ROM's own tables from modeled sensor
   voltages. They are plausible, not validated against a datalog; in particular
   the ECT/IAT/battery transfer functions in `engine.rs` are approximations.
-- The signals on external data `4700h` and the 82C55 are named from the pgmfi
-  wiki, not the schematic; `4700h` bits 3, 6 and 7 are unnamed.
+- The injector monitor's exact gating: sheet 7 shows a transistor on each
+  injector's low side combined into P4.6, and the model raises one edge per
+  opening, which satisfies the ROM; the analog behaviour is not modeled.
 - The executor's flag behavior was wrong in three places that the decoder
   ground-truth test cannot see. The remaining mnemonics have not been audited
   against the manual's summary tables (pp. 3-179 onward).
