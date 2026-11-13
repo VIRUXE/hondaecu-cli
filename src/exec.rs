@@ -324,7 +324,15 @@ impl<'a> Exec<'a> {
                 self.write(&args[0], byte, y);
                 self.write(&args[1], byte, x);
             }
-            "CLR" => self.write(&args[0], byte, 0),
+            // Only the accumulator forms touch a flag: `CLR A` / `CLRB A` set
+            // ZF to 1 (manual pp. 3-31, 3-33); every other object leaves the
+            // flags alone (pp. 3-32, 3-34).
+            "CLR" => {
+                self.write(&args[0], byte, 0);
+                if args[0] == Arg::Reg(Reg::A) {
+                    self.cpu.zf = true;
+                }
+            }
 
             // ---- arithmetic / logic --------------------------------------
             "ADD" | "ADC" | "SUB" | "SBC" | "CMP" | "CMPC" => {
@@ -339,21 +347,36 @@ impl<'a> Exec<'a> {
                 };
                 let (a, b) = (lhs as u32, rhs as u32);
                 let width_mask: u32 = if byte { 0xFF } else { 0xFFFF };
-                let (res, carry) = match base {
+                // Half carry is the carry (borrow) between bits 3 and 4. The
+                // manual shows it for byte operations (DAA/DAS examples, pp.
+                // 3-50 and 3-53); the word forms are taken to report the same
+                // bit position.
+                let (res, carry, half) = match base {
                     "ADD" | "ADC" => {
                         let r = (a & width_mask) + (b & width_mask) + carry_in;
-                        (r & width_mask, r > width_mask)
+                        (
+                            r & width_mask,
+                            r > width_mask,
+                            (a & 0xF) + (b & 0xF) + carry_in > 0xF,
+                        )
                     }
                     _ => {
                         let r = (a & width_mask)
                             .wrapping_sub(b & width_mask)
                             .wrapping_sub(carry_in);
-                        ((r & width_mask), (a & width_mask) < (b & width_mask) + carry_in)
+                        (
+                            r & width_mask,
+                            (a & width_mask) < (b & width_mask) + carry_in,
+                            (a & 0xF) < (b & 0xF) + carry_in,
+                        )
                     }
                 };
                 self.cpu.cf = carry;
                 self.set_zf(res as u16, byte);
+                // The compares change ZF and CF only (Tables 3-12, 3-13, 3-28
+                // and 3-29); ADD/ADC/SUB/SBC also change HC (Tables 3-14..3-21).
                 if !matches!(base, "CMP" | "CMPC") {
+                    self.cpu.hc = half;
                     self.write(&args[0], byte, res as u16);
                 }
             }
@@ -377,7 +400,17 @@ impl<'a> Exec<'a> {
                     v.wrapping_sub(1)
                 };
                 let res = Self::mask(res, byte);
-                self.set_zf(res, byte);
+                // INC/DEC change ZF and HC and leave CF alone (Table 3-11).
+                self.cpu.hc = if base == "INC" {
+                    v & 0xF == 0xF
+                } else {
+                    v & 0xF == 0
+                };
+                // "If LRB is the addressing object in any addressing mode, ZF
+                // will not be affected" (INC, p. 3-60).
+                if !(base == "INC" && args[0] == Arg::Reg(Reg::Lrb)) {
+                    self.set_zf(res, byte);
+                }
                 self.write(&args[0], byte, res);
             }
             "MUL" => {
@@ -479,11 +512,8 @@ impl<'a> Exec<'a> {
                     // Arithmetic right shift keeps the sign bit.
                     _ => ((v32 >> 1) | (v32 & msb), v32 & 1 != 0),
                 };
+                // Shifts and rotates change CF only (Tables 3-8..3-10).
                 self.cpu.cf = carry;
-                // The rotates affect CF only.
-                if !matches!(base, "ROL" | "ROR") {
-                    self.set_zf(res as u16, byte);
-                }
                 self.write(&args[0], byte, res as u16);
             }
 
@@ -622,9 +652,12 @@ impl<'a> Exec<'a> {
                 }
             }
             "JRNZ" => {
-                // Decrement the named register and branch while it is non-zero.
-                let v = self.read(&args[0], false, false).wrapping_sub(1);
-                self.write(&args[0], false, v);
+                // The loop counter is the low byte of DP only: "DPL <- DPL - 1;
+                // IF DPL != 0 THEN PC <- address" (manual p. 3-68). DPH is not
+                // touched and no flag changes.
+                let dp = self.read(&args[0], false, false);
+                let v = dp.wrapping_sub(1) & 0x00FF;
+                self.write(&args[0], false, (dp & 0xFF00) | v);
                 if v != 0 {
                     let off = self.d.fields.rel8 as i16;
                     self.cpu.pc = self.cpu.pc.wrapping_add(off as u16);
@@ -641,23 +674,36 @@ impl<'a> Exec<'a> {
 
             // ---- misc ----------------------------------------------------
             "DAA" | "DAS" => {
-                // Decimal adjust after add/subtract, on the low byte.
-                let mut v = (self.cpu.a & 0xFF) as u16;
-                let adjust = if (v & 0x0F) > 9 || self.cpu.hc { 6 } else { 0 };
-                v = if base == "DAA" {
-                    v.wrapping_add(adjust)
-                } else {
-                    v.wrapping_sub(adjust)
-                };
-                let adjust_hi = if (v >> 4) > 9 || self.cpu.cf { 0x60 } else { 0 };
-                v = if base == "DAA" {
-                    v.wrapping_add(adjust_hi)
-                } else {
-                    v.wrapping_sub(adjust_hi)
-                };
-                self.cpu.cf = v > 0xFF;
-                self.cpu.a = (self.cpu.a & 0xFF00) | (v & 0xFF);
-                self.set_zf(v, true);
+                // Decimal adjust of AL after a byte add/subtract (manual pp.
+                // 3-49..3-53). Two byte-long steps: +/-6 on the low nibble if
+                // it exceeds 9 or HC is set, then +/-6 on the high nibble if
+                // it exceeds 9 or C is set -- C as it stands after step one.
+                // A carry out of bit 7 in either step sets C and nothing
+                // clears it, so a carry from the preceding add survives. ZF is
+                // not affected.
+                let add = base == "DAA";
+                let mut v = self.cpu.a & 0xFF;
+                let mut carry = self.cpu.cf;
+                let mut half = false;
+                if (v & 0x0F) > 9 || self.cpu.hc {
+                    if add {
+                        half = (v & 0x0F) + 6 > 0x0F;
+                        v += 0x06;
+                    } else {
+                        v = v.wrapping_sub(0x06);
+                    }
+                    carry |= v > 0xFF;
+                    v &= 0xFF;
+                }
+                if (v >> 4) > 9 || carry {
+                    v = if add { v + 0x60 } else { v.wrapping_sub(0x60) };
+                    carry |= v > 0xFF;
+                    v &= 0xFF;
+                }
+                self.cpu.cf = carry;
+                // DAA leaves HC as step one produced it; DAS always clears it.
+                self.cpu.hc = add && half;
+                self.cpu.a = (self.cpu.a & 0xFF00) | v;
             }
             "XNBL" => {
                 // Exchange the nibbles of the accumulator low byte with memory.
@@ -972,6 +1018,238 @@ mod tests {
         step(&mut cpu, &mut bus).expect("MOVB must execute");
 
         assert!(!cpu.zf);
+    }
+
+    // ---- flag audit against the manual's instruction list ----------------
+    //
+    // MSM66201 Instruction Manual, Tables 3-1..3-36 (pp. 3-179..3-212): the
+    // ZF/CF/HC/DD columns say which flags each instruction form changes. The
+    // tests below pin one flag group each.
+
+    /// Place `code` at 0000h and execute exactly one instruction from it.
+    fn exec_one(cpu: &mut Cpu, bus: &mut Bus, code: &[u8]) -> Decoded {
+        bus.rom[..code.len()].copy_from_slice(code);
+        cpu.pc = 0;
+        step(cpu, bus).expect("instruction must execute")
+    }
+
+    /// SLL/SRL/SRA and their byte forms change CF only (Tables 3-9, 3-10).
+    #[test]
+    fn shifts_affect_carry_only() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        for (dd, code, a, want_a, what) in [
+            (true, 0x53u8, 0x8000u16, 0x0000u16, "SLL A"),
+            (true, 0x63, 0x0001, 0x0000, "SRL A"),
+            (true, 0x73, 0x0001, 0x0000, "SRA A"),
+            (false, 0x53, 0xAB80, 0xAB00, "SLLB A"),
+            (false, 0x63, 0xAB01, 0xAB00, "SRLB A"),
+            (false, 0x73, 0xAB01, 0xAB00, "SRAB A"),
+        ] {
+            cpu.dd = dd;
+            cpu.a = a;
+            cpu.cf = false;
+            cpu.zf = false;
+            let d = exec_one(&mut cpu, &mut bus, &[code]);
+            assert_eq!(d.mnemonic, what);
+            assert_eq!(cpu.a, want_a, "{what}");
+            assert!(cpu.cf, "{what}: the shifted-out bit lands in CF");
+            assert!(!cpu.zf, "{what}: ZF is not affected by a zero result");
+        }
+
+        cpu.dd = true;
+        cpu.a = 0x0002;
+        cpu.zf = true;
+        exec_one(&mut cpu, &mut bus, &[0x63]); // SRL A
+        assert_eq!(cpu.a, 0x0001);
+        assert!(cpu.zf, "ZF is not affected by a nonzero result either");
+    }
+
+    /// `CLR A` and `CLRB A` set ZF to 1; clearing any other object leaves it
+    /// alone (Table 3-6, pp. 3-31..3-34).
+    #[test]
+    fn clearing_the_accumulator_sets_zero() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+
+        cpu.a = 0x1234;
+        cpu.zf = false;
+        exec_one(&mut cpu, &mut bus, &[0xF9]); // CLR A
+        assert_eq!(cpu.a, 0);
+        assert!(cpu.zf, "CLR A");
+        assert!(cpu.dd, "CLR A sets DD");
+
+        cpu.a = 0x1234;
+        cpu.zf = false;
+        exec_one(&mut cpu, &mut bus, &[0xFA]); // CLRB A
+        assert_eq!(cpu.a, 0x1200);
+        assert!(cpu.zf, "CLRB A");
+        assert!(!cpu.dd, "CLRB A resets DD");
+
+        bus.write_data_u16(cpu.bank_base(), 0x5555);
+        cpu.zf = false;
+        exec_one(&mut cpu, &mut bus, &[0x44, 0x15]); // CLR er0
+        assert_eq!(bus.read_data_u16(cpu.bank_base()), 0);
+        assert!(!cpu.zf, "CLR er0 affects no flags");
+    }
+
+    /// ADD/ADC/SUB/SBC produce the half carry: the carry (borrow) between
+    /// bits 3 and 4 (Tables 3-14..3-21; the DAA example on p. 3-50 shows
+    /// 87h + 95h leaving H = 0).
+    #[test]
+    fn add_and_subtract_produce_half_carry() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        // (code, A, carry in, expected HC, what)
+        let byte_cases: [(&[u8], u16, bool, bool, &str); 9] = [
+            (&[0x86, 0x01], 0x0F, false, true, "ADDB 0Fh + 01h"),
+            (&[0x86, 0x01], 0x10, false, false, "ADDB 10h + 01h"),
+            (&[0x86, 0x95], 0x87, false, false, "ADDB 87h + 95h"),
+            (&[0x96, 0x00], 0x0F, true, true, "ADCB 0Fh + 00h + C"),
+            (&[0x96, 0x00], 0x0F, false, false, "ADCB 0Fh + 00h"),
+            (&[0xA6, 0x01], 0x10, false, true, "SUBB 10h - 01h"),
+            (&[0xA6, 0x01], 0x1F, false, false, "SUBB 1Fh - 01h"),
+            (&[0xB6, 0x00], 0x10, true, true, "SBCB 10h - 00h - C"),
+            (&[0xB6, 0x00], 0x10, false, false, "SBCB 10h - 00h"),
+        ];
+        for (code, a, cin, want_hc, what) in byte_cases {
+            cpu.dd = false;
+            cpu.a = a;
+            cpu.cf = cin;
+            cpu.hc = !want_hc;
+            exec_one(&mut cpu, &mut bus, code);
+            assert_eq!(cpu.hc, want_hc, "{what}");
+        }
+
+        let word_cases: [(&[u8], u16, bool, &str); 4] = [
+            (&[0x86, 0x01, 0x00], 0x000F, true, "ADD 000Fh + 0001h"),
+            (&[0x86, 0x00, 0x01], 0x0F00, false, "ADD 0F00h + 0100h"),
+            (&[0xA6, 0x01, 0x00], 0x0010, true, "SUB 0010h - 0001h"),
+            (&[0xA6, 0x00, 0x01], 0x1000, false, "SUB 1000h - 0100h"),
+        ];
+        for (code, a, want_hc, what) in word_cases {
+            cpu.dd = true;
+            cpu.a = a;
+            cpu.cf = false;
+            cpu.hc = !want_hc;
+            exec_one(&mut cpu, &mut bus, code);
+            assert_eq!(cpu.hc, want_hc, "{what}");
+        }
+    }
+
+    /// CMP/CMPB change ZF and CF but not HC (Tables 3-28, 3-29).
+    #[test]
+    fn compare_leaves_half_carry_alone() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        for hc in [true, false] {
+            cpu.dd = false;
+            cpu.a = 0x10;
+            cpu.hc = hc;
+            exec_one(&mut cpu, &mut bus, &[0xC6, 0x01]); // CMPB A, #001h
+            assert_eq!(cpu.hc, hc);
+            assert!(!cpu.cf);
+            assert!(!cpu.zf);
+        }
+    }
+
+    /// INC/DEC change ZF and HC and leave CF alone (Table 3-11).
+    #[test]
+    fn increment_and_decrement_produce_half_carry_not_carry() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        let r0 = cpu.bank_base();
+        // (code, r0 before, r0 after, expected HC, what)
+        for (code, before, after, want_hc, what) in [
+            (0xA8u8, 0x0Fu8, 0x10u8, true, "INCB 0Fh"),
+            (0xA8, 0x10, 0x11, false, "INCB 10h"),
+            (0xA8, 0xFF, 0x00, true, "INCB FFh"),
+            (0xB8, 0x10, 0x0F, true, "DECB 10h"),
+            (0xB8, 0x11, 0x10, false, "DECB 11h"),
+        ] {
+            bus.write_data_u8(r0, before);
+            cpu.hc = !want_hc;
+            cpu.cf = true;
+            exec_one(&mut cpu, &mut bus, &[code]);
+            assert_eq!(bus.read_data_u8(r0), after, "{what}");
+            assert_eq!(cpu.hc, want_hc, "{what}");
+            assert_eq!(cpu.zf, after == 0, "{what}");
+            assert!(cpu.cf, "{what}: CF is not affected");
+        }
+    }
+
+    /// "If LRB is the addressing object in any addressing mode, ZF will not
+    /// be affected" (INC, p. 3-60).
+    #[test]
+    fn incrementing_lrb_leaves_zero_alone() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        cpu.lrb = 0xFFFF;
+        cpu.zf = false;
+        exec_one(&mut cpu, &mut bus, &[0xFD]); // INC LRB
+        assert_eq!(cpu.lrb, 0);
+        assert!(!cpu.zf);
+    }
+
+    /// DAA/DAS change CF and HC but not ZF, and CF is sticky: the worked
+    /// examples on pp. 3-50 and 3-53 both end with C still 1.
+    #[test]
+    fn decimal_adjust_follows_the_manual_examples() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+
+        // 87 + 95: ADDB leaves AL = 1Ch, C = 1, H = 0; DAA gives 82h, C = 1,
+        // H = 1 (the +6 on the low nibble carries out of bit 3).
+        cpu.dd = false;
+        cpu.a = 0x87;
+        exec_one(&mut cpu, &mut bus, &[0x86, 0x95]); // ADDB A, #095h
+        assert_eq!((cpu.a & 0xFF, cpu.cf, cpu.hc), (0x1C, true, false));
+        cpu.zf = true;
+        exec_one(&mut cpu, &mut bus, &[0x93]); // DAA
+        assert_eq!(cpu.a & 0xFF, 0x82);
+        assert!(cpu.cf, "the carry into the next digit survives");
+        assert!(cpu.hc);
+        assert!(cpu.zf, "DAA does not affect ZF");
+
+        // 87 - 95: SUBB leaves AL = F2h, C = 1, H = 0; DAS gives 92h, C = 1,
+        // H = 0.
+        cpu.a = 0x87;
+        exec_one(&mut cpu, &mut bus, &[0xA6, 0x95]); // SUBB A, #095h
+        assert_eq!((cpu.a & 0xFF, cpu.cf, cpu.hc), (0xF2, true, false));
+        cpu.zf = true;
+        exec_one(&mut cpu, &mut bus, &[0x94]); // DAS
+        assert_eq!(cpu.a & 0xFF, 0x92);
+        assert!(cpu.cf);
+        assert!(!cpu.hc);
+        assert!(cpu.zf, "DAS does not affect ZF");
+
+        // 15 - 06 = 09: the low-nibble borrow sets H, DAS repairs the digit
+        // and always clears H.
+        cpu.a = 0x15;
+        exec_one(&mut cpu, &mut bus, &[0xA6, 0x06]); // SUBB A, #006h
+        assert_eq!((cpu.a & 0xFF, cpu.cf, cpu.hc), (0x0F, false, true));
+        exec_one(&mut cpu, &mut bus, &[0x94]); // DAS
+        assert_eq!(cpu.a & 0xFF, 0x09);
+        assert!(!cpu.cf);
+        assert!(!cpu.hc, "DAS: HC <- 0");
+    }
+
+    /// `JRNZ DP` counts the *low byte* of DP: "DPL <- DPL - 1; IF DPL != 0
+    /// THEN PC <- address" (p. 3-68). DPH is not part of the counter and no
+    /// flag changes.
+    #[test]
+    fn jrnz_counts_the_low_byte_of_dp() {
+        let (mut cpu, mut bus) = cpu_with_local_bank();
+        let dp = 0x0084; // DP in pointing-register set 0
+        cpu.zf = false;
+
+        bus.write_data_u16(dp, 0x0101);
+        exec_one(&mut cpu, &mut bus, &[0x30, 0x10]); // JRNZ DP, +10h
+        assert_eq!(bus.read_data_u16(dp), 0x0100, "DPH is left alone");
+        assert_eq!(cpu.pc, 0x0002, "DPL reached zero: fall through");
+
+        bus.write_data_u16(dp, 0x0200);
+        exec_one(&mut cpu, &mut bus, &[0x30, 0x10]);
+        assert_eq!(
+            bus.read_data_u16(dp),
+            0x02FF,
+            "DPL wraps without borrowing from DPH"
+        );
+        assert_eq!(cpu.pc, 0x0012, "DPL is nonzero: branch");
+        assert!(!cpu.zf, "JRNZ affects no flags");
     }
 
     /// Boot the OEM P28 ROM and require it to clear its own power-on CPU
