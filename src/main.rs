@@ -7,6 +7,7 @@ mod wiring;
 mod cpu;
 mod bus;
 mod bench;
+mod blink;
 mod ppi82c55;
 mod engine;
 mod interpreter;
