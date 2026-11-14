@@ -44,7 +44,7 @@ use crate::replay::ReplayEngine;
 use crate::datalog_server::DatalogServer;
 
 fn print_usage() {
-    println!("Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI");
+    println!("hondaecu-cli {} - Honda OBD1 ECU (OKI MSM66207) Emulator & Testing CLI", env!("CARGO_PKG_VERSION"));
     println!("Usage:");
     println!("  hondaecu-cli check <rom.bin> [options]                    Run the ROM on a described car and say if it is worth burning");
     println!("      options: --ecu p28|p30  --board-gearbox manual|automatic  --car <preset|file>");
@@ -57,6 +57,7 @@ fn print_usage() {
     println!("  hondaecu-cli disasm <rom.bin> [addr] [count]              Disassemble ROM instructions from target address");
     println!("  hondaecu-cli trace <rom.bin> <mode> <rpm> <secs> [args]   Emit runtime trace for Python analysis");
     println!("      modes: ramwatch <a,..> | pcwatch <p,..> | pccount <p,..> | pchist [n] | snap <lo> <hi> | exec <lo> <hi> | injcount");
+    println!("  hondaecu-cli --version                                    Print the version");
     println!();
     println!("Presets for 'replay': dyno-pull, overrun-decel, accel-stomp, drag-pass, launch-control-2step, error-map-failure, error-ect-overheat, cold-start");
     println!();
@@ -76,6 +77,10 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "--version" | "-V" | "version" => {
+            println!("hondaecu-cli {}", env!("CARGO_PKG_VERSION"));
+        }
+
         "datalog" | "server" => {
             let rom_path = args.get(2).map(|s| s.as_str()).unwrap_or("P28-230.bin");
             let port: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(38400);

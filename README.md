@@ -1,7 +1,7 @@
 # hondaecu-cli
 
 [![License](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org/)
+[![Latest release](https://img.shields.io/github/v/release/VIRUXE/hondaecu-cli)](https://github.com/VIRUXE/hondaecu-cli/releases/latest)
 
 Find out whether a ROM will run on a Honda OBD1 P28 or P30 ECU before you
 burn a chip. `hondaecu-cli` emulates the ECU's OKI MSM66207 processor and its
@@ -331,20 +331,32 @@ three do-not-burn results, traced".
 
 ### Get the program
 
-Build it from source with Rust (1.97 or newer):
+Download the file for your computer from the
+[latest release](https://github.com/VIRUXE/hondaecu-cli/releases/latest) and
+unpack it anywhere. There is nothing to install: it is one program file that
+needs nothing else.
 
-```bash
-git clone https://github.com/VIRUXE/hondaecu-cli.git
-cd hondaecu-cli
-cargo build --release
-```
+| Computer | File to download |
+|---|---|
+| Windows, 64-bit | `hondaecu-cli-v…-windows-x86_64.zip` |
+| Linux, x86-64 | `hondaecu-cli-v…-linux-x86_64.tar.gz` |
+| Mac with Apple silicon | `hondaecu-cli-v…-macos-arm64.tar.gz` |
 
-The program is then `target/release/hondaecu-cli` (`hondaecu-cli.exe` on
-Windows). The release workflow in this repository also builds
-`hondaecu-cli-v0.1.0-windows-x86_64.zip` and
-`hondaecu-cli-v0.1.0-linux-x86_64.tar.gz` for the
-[Releases](https://github.com/VIRUXE/hondaecu-cli/releases) page when a
-version is tagged.
+It is a command-line program, so it runs in a terminal, not by
+double-clicking:
+
+- **Windows:** unzip, open the unzipped folder, right-click an empty spot and
+  choose **Open in Terminal**. The program is `.\hondaecu-cli.exe`.
+- **Linux and Mac:** unpack with `tar -xzf <file>`, `cd` into the folder it
+  made. The program is `./hondaecu-cli`.
+
+The program is not code-signed. If Windows shows "Windows protected your PC",
+choose **More info**, then **Run anyway**. If macOS refuses to open it, run
+`xattr -d com.apple.quarantine ./hondaecu-cli` once.
+
+`hondaecu-cli --version` prints which version you have. For any other
+computer, or to work on the code, see
+[Building and testing](#building-and-testing).
 
 ### Check a ROM
 
@@ -353,8 +365,11 @@ hondaecu-cli check my-rom.bin
 ```
 
 Run in a terminal, it asks about the car first (see below), then runs. `test`
-is another name for `check`. On Windows use `.\hondaecu-cli.exe` from the
-folder it is in.
+is another name for `check`. On Windows that is
+`.\hondaecu-cli.exe check my-rom.bin`, on Linux and Mac
+`./hondaecu-cli check my-rom.bin`, from the folder the program is in. Give the
+ROM's full path if it is somewhere else; dragging the file onto the terminal
+window types its path for you.
 
 A run takes about half a minute to a minute. When the light stays on, the
 `WHY THE LIGHT IS ON` trace re-runs the drive and adds about another minute;
@@ -760,11 +775,21 @@ compatibility and real-time pacing are not guaranteed.
 
 ## Building and testing
 
+You only need this to work on the code, or to run it on a computer the
+[releases](https://github.com/VIRUXE/hondaecu-cli/releases) have no file for.
+It needs [Rust](https://www.rust-lang.org/tools/install) and nothing else; the
+project is developed with Rust 1.94.
+
 ```bash
+git clone https://github.com/VIRUXE/hondaecu-cli.git
+cd hondaecu-cli
 cargo build --release
 cargo test --release        # everything that needs no ROM image
 cargo test-rom              # the same plus the ROM-backed tests
 ```
+
+The program is then `target/release/hondaecu-cli` (`hondaecu-cli.exe` on
+Windows).
 
 ### Testing
 
@@ -807,6 +832,26 @@ the ROM-backed tests when the repository has the images as secrets
 gzip-compressed, then base64), checks each against the digest above, and
 fails if a test it exists for did not run. Without the secrets it reports the
 fixtures as not configured and runs nothing.
+
+### Releasing
+
+A release is a version tag. Set `version` in `Cargo.toml`, commit, then:
+
+```bash
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+The release workflow (`.github/workflows/release.yml`) refuses a tag that
+does not match `Cargo.toml`, runs the tests, builds the program for Windows,
+Linux and Mac, and attaches the three archives to the GitHub release of that
+tag. Running the workflow by hand from the Actions page does the same build
+without releasing anything.
+
+Tag a new version when a user would get a different result from it: a ROM's
+verdict, report lines or codes change, a command or option is added or
+changed, or a bug they could hit is fixed. Changes to documents, tests or
+internals alone do not need one.
 
 ### The screenshots
 
