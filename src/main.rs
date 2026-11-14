@@ -125,9 +125,13 @@ fn main() {
             println!("Running ECU Emulation on '{}' for {} cycles at {:.0} RPM...", rom_path, cycles, target_rpm);
 
             let mut bus = Bus::new();
-            if let Err(e) = bus.load_rom_file(rom_path) {
-                eprintln!("Failed to load ROM: {}", e);
-                process::exit(1);
+            match bus.load_rom_file(rom_path) {
+                Ok(Some(note)) => eprintln!("ROM note: {note}"),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("Failed to load ROM: {}", e);
+                    process::exit(1);
+                }
             }
 
             let mut cpu = Cpu::new();
@@ -170,9 +174,13 @@ fn main() {
             let count: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(25);
 
             let mut bus = Bus::new();
-            if let Err(e) = bus.load_rom_file(rom_path) {
-                eprintln!("Failed to load ROM: {}", e);
-                process::exit(1);
+            match bus.load_rom_file(rom_path) {
+                Ok(Some(note)) => eprintln!("ROM note: {note}"),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("Failed to load ROM: {}", e);
+                    process::exit(1);
+                }
             }
 
             let mut cpu = Cpu::new();

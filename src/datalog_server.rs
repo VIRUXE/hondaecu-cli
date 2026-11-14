@@ -17,6 +17,10 @@ pub struct DatalogServer;
 impl DatalogServer {
     /// Start the live serial datalogging TCP server at 127.0.0.1:38400 (or specified port)
     pub fn start_server(rom_path: &str, port: u16) -> std::io::Result<()> {
+        // Each client loads the ROM again; the note is said once, here.
+        if let Some(note) = Bus::new().load_rom_file(rom_path)? {
+            eprintln!("ROM note: {note}");
+        }
         let addr = format!("0.0.0.0:{}", port);
         let listener = TcpListener::bind(&addr)?;
         println!("============================================================");

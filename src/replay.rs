@@ -48,7 +48,9 @@ impl ReplayEngine {
         };
 
         let mut bus = Bus::new();
-        bus.load_rom_file(rom_path)?;
+        if let Some(note) = bus.load_rom_file(rom_path)? {
+            eprintln!("ROM note: {note}");
+        }
         if log_source == "launch-control-2step" && Self::is_stock_p28_230(&bus.rom) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -253,7 +255,9 @@ impl ReplayEngine {
         };
 
         let mut bus = Bus::new();
-        bus.load_rom_file(rom_path)?;
+        if let Some(note) = bus.load_rom_file(rom_path)? {
+            eprintln!("ROM note: {note}");
+        }
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
 

@@ -12,9 +12,13 @@ pub struct InteractiveShell;
 impl InteractiveShell {
     pub fn run(rom_path: &str) -> io::Result<()> {
         let mut bus = Bus::new();
-        if let Err(e) = bus.load_rom_file(rom_path) {
-            println!("Error loading ROM file '{}': {}", rom_path, e);
-            return Ok(());
+        match bus.load_rom_file(rom_path) {
+            Ok(Some(note)) => eprintln!("ROM note: {note}"),
+            Ok(None) => {}
+            Err(e) => {
+                println!("Error loading ROM file '{}': {}", rom_path, e);
+                return Ok(());
+            }
         }
 
         let mut cpu = Cpu::new();

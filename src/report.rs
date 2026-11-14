@@ -50,6 +50,18 @@ fn verdict_text(v: &Verdict) -> String {
 
 /// `car_file` is the name of the car file used, if any.
 pub fn text(report: &Report, setup: &Setup, rom_name: &str, car_file: Option<&str>) -> String {
+    text_with_note(report, setup, rom_name, None, car_file)
+}
+
+/// `text`, with the note about what was ignored in the ROM file, if any, on
+/// the line under the header.
+pub fn text_with_note(
+    report: &Report,
+    setup: &Setup,
+    rom_name: &str,
+    rom_note: Option<&str>,
+    car_file: Option<&str>,
+) -> String {
     let car = match car_file {
         Some(file) => format!("{file} (preset {})", setup.preset),
         None => setup.preset.to_string(),
@@ -64,6 +76,9 @@ pub fn text(report: &Report, setup: &Setup, rom_name: &str, car_file: Option<&st
         out.push_str(" (defaulted: all values, from the preset)");
     } else if !defaulted.is_empty() {
         out.push_str(&format!(" (defaulted: {})", defaulted.join(", ")));
+    }
+    if let Some(note) = rom_note {
+        out.push_str(&format!("\nROM note: {note}"));
     }
     out.push_str("\n\n");
     out.push_str(&format!("VERDICT: {}\n\n", verdict_text(&report.verdict)));
@@ -138,6 +153,18 @@ pub fn json_with_why(
     car_file: Option<&str>,
     why: Option<&crate::why::Why>,
 ) -> String {
+    json_full(report, setup, rom_name, None, car_file, why)
+}
+
+/// `json_with_why`, with `rom_note` (null when nothing was ignored).
+pub fn json_full(
+    report: &Report,
+    setup: &Setup,
+    rom_name: &str,
+    rom_note: Option<&str>,
+    car_file: Option<&str>,
+    why: Option<&crate::why::Why>,
+) -> String {
     let (verdict, reason) = match &report.verdict {
         Verdict::WorthBurning => ("worth_burning", "null".to_string()),
         Verdict::DoNotBurn(r) => ("do_not_burn", quote(r)),
@@ -148,6 +175,7 @@ pub fn json_with_why(
     let codes: Vec<String> = report.codes.iter().map(|c| c.to_string()).collect();
     let mut out = String::from("{\n");
     out.push_str(&format!("  \"rom\": {},\n", quote(rom_name)));
+    out.push_str(&format!("  \"rom_note\": {},\n", rom_note.map_or_else(|| "null".to_string(), quote)));
     out.push_str(&format!("  \"preset\": {},\n", quote(setup.preset)));
     out.push_str(&format!("  \"car_file\": {},\n", car_file.map_or_else(|| "null".to_string(), quote)));
     out.push_str(&format!("  \"setup\": {{\n{}\n  }},\n", setup_fields.join(",\n")));

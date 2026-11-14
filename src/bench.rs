@@ -176,6 +176,8 @@ pub struct Bench {
     /// Set only by `why.rs` while it re-runs a drive: records where data
     /// came from and the last instructions, and can pause the run.
     pub tracer: Option<Box<crate::why::Tracer>>,
+    /// What was ignored or chosen when the ROM file was read, if anything.
+    pub rom_note: Option<String>,
 }
 
 impl Bench {
@@ -186,14 +188,16 @@ impl Bench {
         bus.rom.copy_from_slice(rom);
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
-        Bench { cpu, bus, engine: EngineState::new(), log: RunLog::default(), tracer: None }
+        Bench { cpu, bus, engine: EngineState::new(), log: RunLog::default(), tracer: None, rom_note: None }
     }
 
     /// Same file rules as `Bus::load_rom_file`.
     pub fn from_file(path: &str) -> std::io::Result<Bench> {
         let mut loader = Bus::new();
-        loader.load_rom_file(path)?;
-        Ok(Bench::new(&loader.rom))
+        let rom_note = loader.load_rom_file(path)?;
+        let mut bench = Bench::new(&loader.rom);
+        bench.rom_note = rom_note;
+        Ok(bench)
     }
 
     /// True once the ROM has programmed the board's PPI (ports are outputs).

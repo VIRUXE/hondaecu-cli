@@ -619,6 +619,47 @@ impl AccessLog {
     }
 }
 
+/// Which 32768 bytes of a dump are the ROM, and what was set aside to get them.
+///
+/// - exactly 32768 bytes: all of them;
+/// - 32769 to 65535: the first 32768, the rest ignored (a stray byte, a text
+///   note from whoever dumped it);
+/// - exactly 65536 (a 32 KiB ROM burned to a 27C512): the two halves if
+///   identical, else the half that is not entirely FF or entirely 00; two
+///   different halves with no blank one are refused;
+/// - anything else is refused.
+///
+/// The note is plain words and is `Some` whenever something was ignored or a
+/// half was chosen.
+pub fn rom_image(data: &[u8]) -> Result<(&[u8], Option<String>), String> {
+    let n = data.len();
+    let plural = |k: usize| if k == 1 { "" } else { "s" };
+    if n == ROM_SIZE {
+        return Ok((data, None));
+    }
+    if n > ROM_SIZE && n < 2 * ROM_SIZE {
+        let extra = &data[ROM_SIZE..];
+        let what = if extra.len() == 1 { format!(" ({:02X}h)", extra[0]) } else { String::new() };
+        let note = format!("ignored {} extra byte{} at the end{what}", extra.len(), plural(extra.len()));
+        return Ok((&data[..ROM_SIZE], Some(note)));
+    }
+    if n == 2 * ROM_SIZE {
+        let (lower, upper) = data.split_at(ROM_SIZE);
+        if lower == upper {
+            return Ok((lower, Some("the two halves of the 64 KiB image are identical; used the lower half".to_string())));
+        }
+        let blank = |h: &[u8]| h.iter().all(|&b| b == 0xFF) || h.iter().all(|&b| b == 0x00);
+        if blank(upper) {
+            return Ok((lower, Some("used the lower half of a 64 KiB image (the upper half is blank)".to_string())));
+        }
+        if blank(lower) {
+            return Ok((upper, Some("used the upper half of a 64 KiB image (the lower half is blank)".to_string())));
+        }
+        return Err("a 64 KiB image whose two halves hold different data; cannot tell which half is the ROM (a ROM image is 32768 bytes)".to_string());
+    }
+    Err(format!("got {n} bytes; a ROM image is {ROM_SIZE} bytes"))
+}
+
 impl Bus {
     pub fn new() -> Self {
         let mut bus = Self {
@@ -725,26 +766,13 @@ impl Bus {
         bus
     }
 
-    pub fn load_rom_file(&mut self, path: &str) -> io::Result<()> {
+    /// Loads a ROM file by the rule in `rom_image`. Returns the note about
+    /// anything ignored or chosen, if there is one.
+    pub fn load_rom_file(&mut self, path: &str) -> io::Result<Option<String>> {
         let data = fs::read(path)?;
-        let image = match data.as_slice() {
-            image if image.len() == ROM_SIZE => image,
-            // Some P28 dumps carry one zero byte after the addressable 32 KiB
-            // image. Accept only that exact, known footer; never truncate an
-            // arbitrary larger file or pad a short one.
-            image if image.len() == ROM_SIZE + 1 && image[ROM_SIZE] == 0 => &image[..ROM_SIZE],
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "expected a {ROM_SIZE}-byte ROM image (optionally followed by one 00 byte), got {} bytes",
-                        data.len()
-                    ),
-                ));
-            }
-        };
+        let (image, note) = rom_image(&data).map_err(|m| io::Error::new(io::ErrorKind::InvalidData, m))?;
         self.rom.copy_from_slice(image);
-        Ok(())
+        Ok(note)
     }
 
     // Code Space Read (ROM)
@@ -1585,6 +1613,61 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rom_image_follows_the_size_rule() {
+        let rom = |n: usize| (0..n).map(|i| (i * 7 + 1) as u8).collect::<Vec<u8>>();
+        // too short
+        let e = super::rom_image(&rom(32767)).unwrap_err();
+        assert!(e.contains("32767") && e.contains("32768"));
+        // exact
+        let r = rom(32768);
+        let (img, note) = super::rom_image(&r).unwrap();
+        assert_eq!((img, note), (&r[..], None));
+        // one extra byte, named
+        let mut d = rom(32769);
+        d[32768] = 0xFF;
+        let (img, note) = super::rom_image(&d).unwrap();
+        assert_eq!(img, &d[..32768]);
+        assert_eq!(note.unwrap(), "ignored 1 extra byte at the end (FFh)");
+        // a text note after the ROM
+        let d = rom(32860);
+        let (img, note) = super::rom_image(&d).unwrap();
+        assert_eq!(img.len(), 32768);
+        assert_eq!(note.unwrap(), "ignored 92 extra bytes at the end");
+        // largest in-between
+        let d = rom(65535);
+        let (img, note) = super::rom_image(&d).unwrap();
+        assert_eq!(img.len(), 32768);
+        assert_eq!(note.unwrap(), "ignored 32767 extra bytes at the end");
+        // 64 KiB: identical halves
+        let half = rom(32768);
+        let both = [half.clone(), half.clone()].concat();
+        let (img, note) = super::rom_image(&both).unwrap();
+        assert_eq!(img, &half[..]);
+        assert!(note.unwrap().contains("identical"));
+        // 64 KiB: blank halves, FF and 00, each side
+        for fill in [0xFFu8, 0x00] {
+            let blank = vec![fill; 32768];
+            let upper = [half.clone(), blank.clone()].concat();
+            let (img, note) = super::rom_image(&upper).unwrap();
+            assert_eq!(img, &half[..]);
+            assert_eq!(note.unwrap(), "used the lower half of a 64 KiB image (the upper half is blank)");
+            let lower = [blank.clone(), half.clone()].concat();
+            let (img, note) = super::rom_image(&lower).unwrap();
+            assert_eq!(img, &half[..]);
+            assert_eq!(note.unwrap(), "used the upper half of a 64 KiB image (the lower half is blank)");
+        }
+        // 64 KiB: two different halves
+        let other: Vec<u8> = half.iter().map(|b| b ^ 0x55).collect();
+        let e = super::rom_image(&[half.clone(), other].concat()).unwrap_err();
+        assert!(e.contains("different data"));
+        // 64 KiB: two blanks are identical halves
+        assert!(super::rom_image(&vec![0xFF; 65536]).is_ok());
+        // too long
+        let e = super::rom_image(&rom(65537)).unwrap_err();
+        assert!(e.contains("65537") && e.contains("32768"));
+    }
+
     use super::*;
 
     #[test]

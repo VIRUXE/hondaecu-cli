@@ -21,9 +21,23 @@ hondaecu-cli check <rom.bin> [--ecu p28|p30] [--board-gearbox manual|automatic]
                              [--report <file>] [--no-prompt] [--no-why]
 ```
 
-The ROM is opened and size-checked first: 32768 bytes, optionally followed by
-one 00 byte; anything else is refused with exit status 2 before any question is
-asked.
+The ROM is opened and size-checked first, before any question is asked. Real
+dumps are messier than 32768 clean bytes, so the loader is not strict:
+
+| file size | what is used |
+|---|---|
+| exactly 32768 bytes | all of it |
+| 32769 to 65535 bytes | the first 32768 bytes; the rest is ignored (a stray `FF` or `00` byte, a text note from whoever dumped it) |
+| exactly 65536 bytes (a 32 KiB ROM burned to a 27C512) | either half if the two are identical; otherwise the half that is not entirely `FF` or entirely `00`. Two halves holding different data are refused |
+| anything else (under 32768 or over 65536 bytes) | refused, stating the size and that a ROM image is 32768 bytes |
+
+A refusal is exit status 2. Whenever bytes were ignored or a half was chosen,
+the report says so in plain words: a `ROM note:` line under the header (for
+example `ROM note: ignored 1 extra byte at the end (FFh)`, `ignored 92 extra
+bytes at the end`, `used the upper half of a 64 KiB image (the lower half is
+blank)`) and a `rom_note` field in the JSON (`null` when there is none). The
+other commands (`trace`, `replay`, `run`, `disasm`, `interactive`, `datalog`)
+print the same note once to stderr. The rule is one function, `bus::rom_image`.
 
 ### Describing the car
 
@@ -1044,8 +1058,8 @@ these runs changed the model or the verdict rules. The lamp rule changed afterwa
 | `check ../test-roms/P28-ERMbaseline.bin` | 1 | `VERDICT: DO NOT BURN - settles after power-on: resets at 5.3 s, 10.6 s, 15.9 s and 17 more times (program address 237Dh)` (20 resets, every 5.3 s) | `settles after power-on ... PROBLEM: resets at 5.3 s, ...`. Since the final review its `codes` line is `could not tell: the light stayed dark with the service connector grounded; ...`: the lamp stays dark through the read-out, in which the ROM resets every 5.3 s (not traced further; the verdict does not depend on it). True: the ROM's own checksum fails (sum F9h, debug byte 547Eh = 00h); behind it, the P72 code's knock check, as for `p72.bin` (same section, ERM baseline) |
 | `check ../test-roms/lyonnel-2.0-launch-ok.bin` | 0 | `VERDICT: WORTH BURNING` | none. `check-engine light ....... ok: off at the end of the drive; it lit 4 times during key on and once during full throttle (a start-up flash or a shift light looks like this)`. No fault is stored; the lamp is a key-on flash display and a shift light. Until the lamp rule changed this was `DO NOT BURN - check-engine light: lit at 2.7 s, after the bulb check` (same section, lyonnel). Same result with `--ecu p30` |
 | `check ../hts_D16Z6Baserom.bin` | 0 | `VERDICT: WORTH BURNING` | none (fuel stops at 7420 rpm, VTEC at 4755 rpm) |
-| `check ../../ecu/bins/p06.bin` | 2 | (refused) `cannot use ROM ../../ecu/bins/p06.bin: expected a 32768-byte ROM image (optionally followed by one 00 byte), got 32769 bytes` | n/a |
-| `check ../../ecu/bins/p1j.bin` | 2 | (refused) `... got 32860 bytes` | n/a |
+| `check ../../ecu/bins/p06.bin` | 0 | `VERDICT: WORTH BURNING` | none. 32769 bytes; `ROM note: ignored 1 extra byte at the end (FFh)` (before the loader took any size but 32768 or 32769 with a final `00`, this file was refused) |
+| `check ../../ecu/bins/p1j.bin` | 1 | `VERDICT: DO NOT BURN - check-engine light: on at the end of the drive (lit since 2.1 s)` | `ROM note: ignored 92 extra bytes at the end` (a 92-byte text note after the ROM; was refused as 32860 bytes) |
 
 No run ended `COULD NOT TELL`. Things these runs show that nothing here
 explains yet:

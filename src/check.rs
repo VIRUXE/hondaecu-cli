@@ -367,14 +367,15 @@ pub fn run(
     let why = trace.then(|| why::explain(&rom, &setup, &result));
     let name = rom_name(&args.rom);
     let car_file = car_file_name(&args);
-    let mut text = report::text(&report, &setup, &name, car_file.as_deref());
+    let note = bench.rom_note.as_deref();
+    let mut text = report::text_with_note(&report, &setup, &name, note, car_file.as_deref());
     if let Some(why) = &why {
         text.push('\n');
         text.push_str(&why::text_section(why));
     }
     let _ = write!(out, "{text}");
     if let Some(path) = &args.report {
-        let json = report::json_with_why(&report, &setup, &name, car_file.as_deref(), why.as_ref());
+        let json = report::json_full(&report, &setup, &name, note, car_file.as_deref(), why.as_ref());
         if let Err(e) = std::fs::write(path, json) {
             let _ = writeln!(err, "cannot write report {path}: {e}");
             status = 2;
@@ -438,7 +439,36 @@ mod tests {
         let path = temp_file(&[0u8; 100]);
         let (status, _, err) = drive(&["check", &path], "", false);
         assert_eq!(status, 2);
-        assert!(err.contains("32768"));
+        assert!(err.contains("100 bytes") && err.contains("32768"), "{err}");
+    }
+
+    #[test]
+    fn a_rom_with_a_stray_byte_runs_and_says_so_in_text_and_json() {
+        let mut bytes = vec![0xB4u8; 32768];
+        bytes.push(0xFF);
+        let rom = temp_file(&bytes);
+        let json = unique_path("note.json");
+        let (_, out, err) = drive(&["check", &rom, "--no-prompt", "--no-why", "--report", &json], "", false);
+        assert!(err.is_empty(), "{err}");
+        let header: Vec<&str> = out.lines().take(2).collect();
+        assert!(header[1] == "ROM note: ignored 1 extra byte at the end (FFh)", "{out}");
+        let json = std::fs::read_to_string(&json).unwrap();
+        assert!(json.contains("\"rom_note\": \"ignored 1 extra byte at the end (FFh)\""), "{json}");
+
+        let clean = temp_file(&vec![0xB4u8; 32768]);
+        let json = unique_path("nonote.json");
+        let (_, out, _) = drive(&["check", &clean, "--no-prompt", "--no-why", "--report", &json], "", false);
+        assert!(!out.contains("ROM note"));
+        assert!(std::fs::read_to_string(&json).unwrap().contains("\"rom_note\": null"));
+    }
+
+    #[test]
+    fn a_64_kib_image_with_two_different_halves_is_refused() {
+        let mut bytes = vec![0xB4u8; 65536];
+        bytes[40000] = 0x11;
+        let (status, _, err) = drive(&["check", &temp_file(&bytes), "--no-prompt"], "", false);
+        assert_eq!(status, 2);
+        assert!(err.contains("different data"), "{err}");
     }
 
     #[test]
