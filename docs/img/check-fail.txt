@@ -1,0 +1,18 @@
+$ hondaecu-cli check P28-230.bin --car my-civic.txt --no-why --report result.json
+ROM: P28-230.bin   ECU: P28 manual   Car: my-civic.txt (preset stock-p28-manual)
+ROM note: ignored 1 extra byte at the end (00h)
+
+VERDICT: DO NOT BURN - check-engine light: on at the end of the drive (lit since 8.8 s)
+
+VALID FOR THIS ECU ......... yes
+  executes ................. ok: ran without hitting an invalid instruction
+  settles after power-on ... ok: settled, no resets
+  talks only to this board . ok: no access outside the board
+RUNS A BASIC SETUP ......... no
+  fuel pump prime .......... ok: on for 2.1 s, then off
+  cranking ................. ok: all four injectors fired (4, 4, 4, 4 openings)
+  warm idle ................ ok: injectors opened 53, 54, 53, 53 times and 214 sparks in 53.3 engine cycles
+  full throttle sweep ...... ok: fuel stops at 7425 rpm, VTEC switches on at 4875 rpm
+  check-engine light ....... PROBLEM: on at the end of the drive (lit since 8.8 s)
+  codes .................... PROBLEM: 20 ELD Electrical Load Detector, 41 O2 Sensor Heater
+NOT JUDGED: fuelling, ignition timing, anything that needs a responding engine

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="870" height="408" viewBox="0 0 870 408" role="img" aria-label="hondaecu-cli check">
+<rect width="870" height="408" rx="8" fill="#0d1117"/>
+<path d="M8 0H862 a8 8 0 0 1 8 8V30H0V8a8 8 0 0 1 8-8z" fill="#1f2630"/>
+<circle cx="20" cy="15" r="6" fill="#ff5f56"/>
+<circle cx="40" cy="15" r="6" fill="#ffbd2e"/>
+<circle cx="60" cy="15" r="6" fill="#27c93f"/>
+<text x="435" y="19" fill="#6e7681" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12" text-anchor="middle">hondaecu-cli check</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#c9d1d9">
+<text x="18" y="61" xml:space="preserve" style="white-space:pre" textLength="343.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="bold">$ </tspan><tspan fill="#f0f6fc" font-weight="bold">hondaecu-cli check P28-230.bin --no-prompt</tspan></text>
+<text x="18" y="79" xml:space="preserve" style="white-space:pre" textLength="772.2" lengthAdjust="spacingAndGlyphs">ROM: P28-230.bin   ECU: P28 manual   Car: stock-p28-manual (defaulted: all values, from the preset)</text>
+<text x="18" y="97" xml:space="preserve" style="white-space:pre" textLength="366.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#58a6ff" font-weight="bold">ROM note:</tspan> ignored 1 extra byte at the end (00h)</text>
+<text x="18" y="133" xml:space="preserve" style="white-space:pre" textLength="171.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="bold">VERDICT: WORTH BURNING</tspan></text>
+<text x="18" y="169" xml:space="preserve" style="white-space:pre" textLength="249.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#f0f6fc" font-weight="bold">VALID FOR THIS ECU ......... </tspan><tspan fill="#3fb950" font-weight="bold">yes</tspan></text>
+<text x="18" y="187" xml:space="preserve" style="white-space:pre" textLength="585.0" lengthAdjust="spacingAndGlyphs">  executes ................. <tspan fill="#3fb950" font-weight="bold">ok:</tspan> ran without hitting an invalid instruction</text>
+<text x="18" y="205" xml:space="preserve" style="white-space:pre" textLength="397.8" lengthAdjust="spacingAndGlyphs">  settles after power-on ... <tspan fill="#3fb950" font-weight="bold">ok:</tspan> settled, no resets</text>
+<text x="18" y="223" xml:space="preserve" style="white-space:pre" textLength="468.0" lengthAdjust="spacingAndGlyphs">  talks only to this board . <tspan fill="#3fb950" font-weight="bold">ok:</tspan> no access outside the board</text>
+<text x="18" y="241" xml:space="preserve" style="white-space:pre" textLength="249.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#f0f6fc" font-weight="bold">RUNS A BASIC SETUP ......... </tspan><tspan fill="#3fb950" font-weight="bold">yes</tspan></text>
+<text x="18" y="259" xml:space="preserve" style="white-space:pre" textLength="429.0" lengthAdjust="spacingAndGlyphs">  fuel pump prime .......... <tspan fill="#3fb950" font-weight="bold">ok:</tspan> on for 2.1 s, then off</text>
+<text x="18" y="277" xml:space="preserve" style="white-space:pre" textLength="616.2" lengthAdjust="spacingAndGlyphs">  cranking ................. <tspan fill="#3fb950" font-weight="bold">ok:</tspan> all four injectors fired (4, 4, 4, 4 openings)</text>
+<text x="18" y="295" xml:space="preserve" style="white-space:pre" textLength="834.6" lengthAdjust="spacingAndGlyphs">  warm idle ................ <tspan fill="#3fb950" font-weight="bold">ok:</tspan> injectors opened 53, 54, 53, 53 times and 214 sparks in 53.3 engine cycles</text>
+<text x="18" y="313" xml:space="preserve" style="white-space:pre" textLength="460.2" lengthAdjust="spacingAndGlyphs">  idle, A/C on ............. <tspan fill="#3fb950" font-weight="bold">ok:</tspan> the A/C clutch was engaged</text>
+<text x="18" y="331" xml:space="preserve" style="white-space:pre" textLength="663.0" lengthAdjust="spacingAndGlyphs">  full throttle sweep ...... <tspan fill="#3fb950" font-weight="bold">ok:</tspan> fuel stops at 7420 rpm, VTEC switches on at 4875 rpm</text>
+<text x="18" y="349" xml:space="preserve" style="white-space:pre" textLength="491.4" lengthAdjust="spacingAndGlyphs">  check-engine light ....... <tspan fill="#3fb950" font-weight="bold">ok:</tspan> never lit after the bulb check</text>
+<text x="18" y="367" xml:space="preserve" style="white-space:pre" textLength="678.6" lengthAdjust="spacingAndGlyphs">  codes .................... <tspan fill="#3fb950" font-weight="bold">ok:</tspan> none blinked (lamp steady with the connector grounded)</text>
+<text x="18" y="385" xml:space="preserve" style="white-space:pre" textLength="608.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681">NOT JUDGED: fuelling, ignition timing, anything that needs a responding engine</tspan></text>
+</g>
+</svg>

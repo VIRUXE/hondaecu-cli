@@ -1,0 +1,51 @@
+$ hondaecu-cli check 203stock.bin --no-prompt
+ROM: 203stock.bin   ECU: P28 manual   Car: stock-p28-manual (defaulted: all values, from the preset)
+
+VERDICT: DO NOT BURN - check-engine light: on at the end of the drive (lit since 2.2 s)
+...
+  check-engine light ....... PROBLEM: on at the end of the drive (lit since 2.2 s)
+  codes .................... PROBLEM: none blinked, although the check-engine light is on (the ROM is showing a fault it does not blink)
+...
+
+WHY THE LIGHT IS ON (automatic trace: at each level the program picks what to follow by a rule of thumb; check it against the evidence shown)
+...
+
+  1. 42AEh  MB 022h.4, C   at 70.504 s
+     set P1.4, the ROM's image of the lamp bit (82C55 port C bit 4), at the last time before 70.51 s
+     path:
+        ...
+        26CEh  RB off 031h.2                          wrote 231h:89->89
+        26D1h  JNE 026D4h                   not taken
+        26D3h  RT
+        4273h  RC
+        4274h  LB A, off 0BCh                         read 2BCh=00
+        4276h  JNE 0427Eh                   not taken
+        4278h  JBS off 011h.0, 0427Eh       not taken read 211h.0=0
+        427Bh  MB C, off 017h.4                       read 217h.4=0
+        427Eh  MB 020h.7, C                           wrote 020h:4B->4B
+      * 4281h  JBS off 010h.7, 042B1h       not taken read 210h.7=0
+      * 4284h  JBS off 018h.5, 042ADh       taken     read 218h.5=1
+      * 42ADh  SC
+      > 42AEh  MB 022h.4, C                           wrote 022h:72->72
+     followed: 218h bit 5 (= 1), read at 4284h, set by 4AFAh at 2.193 s
+
+  2. 4AFAh  SB off 018h.5   at 2.193 s
+     last set 218h bit 5 before it was read
+...
+     followed: 214h (= 80h; its bit 7 is the one followed), read at 4AF3h, set by 51C5h at 2.192 s
+
+  3. 51C5h  SBR 00212h[X1]   at 2.192 s
+     last set 214h bit 7 before it was read
+...
+     followed: 09Ah (= 08h; its bit 3 is the one followed), read at 4991h, set by 2824h at 0.160 s
+
+  4. 2824h  MB 09Ah.3, C   at 0.160 s
+     last set 09Ah bit 3 before it was read
+...
+      * 27F7h  JBR off 027h.6, 0281Ch       not taken read 227h.6=1
+      * 27FAh  JBS off 014h.7, 0281Ch       not taken read 214h.7=0
+        27FDh  MOV DP, #00F00h                        wrote 084h:B6->00 085h:00->0F
+      * 2800h  MB C, [DP].2                           read 0F00h.2=1 (outside)
+...
+      * 2823h  SC
+      > 2824h  MB 09Ah.3, C                           wrote 09Ah:00->08
