@@ -242,6 +242,11 @@ When the read-out stopped at 180 s before the blinked sequence had repeated,
 the `codes` line ends with "(the list may be incomplete: the light was still
 showing new codes when the read-out ended)".
 
+The `codes` line lists the faults the ROM showed on this run, not every
+fault the car has: a stored fault can change how the ROM runs the engine and
+keep another check from ever running its course (on the stock P28 a stored
+14 hides 17; "One code hides another" below).
+
 **The bulb check must be seen.** `RunResult::bulb_check_seen` is true when
 the board log shows the lamp lit at some point in `key on`. Without it a
 lamp that stays dark is not evidence of anything, so both lamp lines are
@@ -810,6 +815,67 @@ read that as a code 1, because it counted the lamp's dark stretch before
 the window as the gap that starts a run. It now counts that gap from the
 window's start at the earliest, so the first run read is one that follows a
 full gap inside the window (`blink.rs`).
+
+### One code hides another: a stored 14 hides 17
+
+`--set speed_sensor=no` blinks 17; `--set iacv=none --set speed_sensor=no`
+blinks only 14, and only 14 is stored. Fault 17 is **never raised**: `99h.4`
+stays clear for the whole run, so the debounce pass (0x49A0..0x49D9, one
+shared slot `2A7h`/`2C1h`) never sees it. Nothing is raised and then dropped
+or stored and not blinked.
+
+What stops it is the fuel-cut decision at 0x17D0..0x18BD. With code 14
+stored (`113h.5`, set with `213h.5` at 0x51C1), or the IACV check's flag
+`99h.3` raised, it does not take the normal route (0x17DF, 0x1803):
+
+```
+17D0  RB   PSWL.4               ; deceleration fuel cut off
+17D2  RB   PSWL.5               ; the other fuel cut off
+17D7  JBS  113h.5, 17E5         ; code 14 stored
+17DA  MB   C, 099h.3 ; JLT 17E5 ; or the IACV fault raised now
+17E5  JBS  112h.6, 17FB         ; code 7 (throttle sensor) stored: 80h
+17E8  MB   C, 098h.2 ; JLT 17FB
+17ED  CMPB 0B9h, #2Bh ; JGE 1803 ; throttle byte (AI7) at least 2Bh: normal route
+17F3  MOV  X1, #6B30h ; VCAL 2   ; limit by throttle: 2Bh -> 62h, 6Bh -> A9h
+17FD  CMPB A, 12Dh ; JGE 1856   ; rpm code at or below the limit: no cut here
+1801  SJ   1846
+1846  SB   PSWL.5               ; above it: fuel cut, 11Ch.5 (0x18B8)
+```
+
+So with the throttle closed the ROM cuts fuel whenever the rpm code `12Dh`
+is above 62h (released at about 1530 rpm on the script's sweep), through
+`11Ch.5`; it never reaches 0x18B1 `SB PSWL.4`, the only place the
+deceleration fuel-cut flag `11Ch.4` is set (copied at 0x18BD, then to
+`21Ch.4`). At or below 62h it goes to 0x1856, which needs `126h.2` (rpm
+code above 73h, 0x17C4..0x17CD) to go on towards 0x18B1, so it ends at
+0x185C instead. The VSS check takes its carry from `21Ch.4` (0x3C88 `MB C,
+21Ch.4`, stored at 0x3C8B), so with code 14 stored it can never raise
+`99h.4` at closed throttle. Observed on the two runs, `lift off`: without
+the IACV fault 0x18B1 ran 1995 times, `21Ch.4` was set, `99h.4` raised from
+about 3500 rpm and code 17 stored at 58 s; with it 0x1846 ran 1985 times,
+0x18B1 never in the whole run, `21Ch` read 6Ch/6Dh (bit 5 set, bit 4
+clear), and `98h..9Bh` stayed 0. Code 14 was stored at 12.7 s, long before
+`lift off`.
+
+**This is the ROM's behaviour**, not the script's or the board's: the path
+depends on RAM the ROM writes itself (`113h.5`, `11Ch`, `21Ch`) and on the
+throttle byte and engine speed, which in `lift off` are what a real car
+coasting with the throttle shut gives. A real car with both faults would
+also show only 14, until code 14 is cleared and the valve repaired; on the
+next drive 17 would appear. Whether the normal route can set `11Ch.4` with
+the throttle byte at 2Bh or more (throttle partly open) was not traced.
+Acceptance `a_stored_iacv_fault_keeps_the_rom_from_seeing_a_missing_speed_sensor`
+pins it: the codes, then 8 s held at 3000 rpm, closed throttle, 25 kPa, in
+gear, in which 0x3C88 is reached (every other gate open), 0x1846 runs,
+0x18B1 never does and the carry stored at 0x3C8B is never set. The same
+hold without the IACV fault (and with 17 cleared) reaches 0x18B1 and raises
+`99h.4`.
+
+**What this means for a report.** The `codes` line lists the faults the ROM
+stored and blinked on this run, not every fault the car has. A stored fault
+can change how the ROM runs the engine (here, fuel cut) and so keep another
+check's conditions from ever being met; that fault then does not appear
+until the first is cleared.
 
 ### What the stock ROM does with AI3
 

@@ -252,6 +252,53 @@ fn case_6_no_speed_sensor_stores_code_17() {
 
 #[test]
 #[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn a_stored_iacv_fault_keeps_the_rom_from_seeing_a_missing_speed_sensor() {
+    // The ROM's own behaviour (docs/CHECK.md, "One code hides another"):
+    // with code 14 stored (113h.5) the closed-throttle fuel-cut decision
+    // takes 0x17D7 JBS 113h.5, 17E5 and cuts fuel above rpm code 62h with
+    // SB PSWL.5 at 0x1846 (11Ch.5), never reaching 0x18B1 SB PSWL.4, the
+    // deceleration fuel cut (11Ch.4, copied to 21Ch.4). The VSS check takes
+    // its carry from 21Ch.4 (0x3C88), so 99h.4 is never raised and code 17
+    // is never stored: only 14 is blinked although the car has both faults.
+    let mut setup = preset("stock-p28-manual");
+    setup.set("iacv", "none").unwrap();
+    setup.set("speed_sensor", "no").unwrap();
+    let (result, report, mut bench) = check_bench(Bench::from_file(&rom()).unwrap(), &setup);
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
+    assert_eq!(result.lamp, Lamp::Codes(vec![14]));
+    assert_eq!(report.codes, vec![14]);
+    assert_eq!(stored_codes(&bench), vec![14]);
+
+    // Then hold the conditions the VSS check needs, as in `lift off` at its
+    // slowest (closed throttle, 25 kPa, in gear, rpm code below B0h): the
+    // ROM cuts fuel by the IACV route only, and 99h.4 stays clear.
+    let e = &mut bench.engine;
+    (e.rpm, e.map_kpa, e.tps_pct, e.ect_celsius, e.speed_kmh) = (3000.0, 25.0, 0.0, 88.0, 80.0);
+    bench.engine.sync_sensors_to_bus(&mut bench.bus);
+    let in_gear = crate::wiring::Switches { in_gear: true, ..Default::default() };
+    crate::wiring::apply_switches(&mut bench.bus, &setup, &in_gear);
+    // Program addresses are counted as the next instruction to run. At
+    // 0x3C8B the carry is what MB 099h.4, C will store; 0x3C88 is reached
+    // only when every other gate of the check is open.
+    let (mut iacv_cut, mut decel_cut, mut gates_open, mut raised) = (0u64, 0u64, 0u64, 0u64);
+    assert!(bench.run_observed(8.0, |b| match b.cpu.pc {
+        0x1846 => iacv_cut += 1,
+        0x18B1 => decel_cut += 1,
+        0x3C88 => gates_open += 1,
+        0x3C8B => raised += b.cpu.cf as u64,
+        _ => {}
+    }));
+    assert!(bench.bus.ram[0x236] < 0xB0, "rpm code {:02X}h", bench.bus.ram[0x236]);
+    assert!(iacv_cut > 100, "0x1846 reached {iacv_cut} times");
+    assert_eq!(decel_cut, 0, "0x18B1 reached");
+    assert!(gates_open > 10, "0x3C88 reached {gates_open} times");
+    assert_eq!(raised, 0, "99h.4 raised");
+    assert_eq!(bench.bus.ram[0x21C] & 0x10, 0, "21Ch.4");
+    assert_eq!(stored_codes(&bench), vec![14]);
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
 fn case_6_no_vtec_stores_code_21() {
     // With the solenoid unplugged its feedback, port A bit 5, reads
     // "powered" (Bomarc sheet 8) while the ROM keeps PC0 low. The check at
