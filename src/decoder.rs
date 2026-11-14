@@ -609,7 +609,7 @@ mod tests {
             let got = decode(dd, |i| win.get(i).copied().unwrap_or(0));
 
             let (got_mnem, got_len) = match &got {
-                Some(d) => (d.mnemonic.split(|c| c == ' ' || c == ',').next().unwrap(), d.len),
+                Some(d) => (d.mnemonic.split([' ', ',']).next().unwrap(), d.len),
                 None => ("<none>", 0),
             };
             if got_len == want_len {

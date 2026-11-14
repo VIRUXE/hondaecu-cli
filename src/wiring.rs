@@ -413,7 +413,7 @@ mod tests {
         apply_static(&mut bus, &with("eld", "no"));
         assert_eq!(bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT], ELD_OPEN_COUNTS);
         // 4.55 V: above the ROM's DCh limit (0x3CF4).
-        assert!(ELD_OPEN_COUNTS >> 2 > 0xDC);
+        const { assert!(ELD_OPEN_COUNTS >> 2 > 0xDC) };
         let mut bus = Bus::new();
         apply_static(&mut bus, &stock());
         assert_eq!(bus.p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT], Bus::new().p28_mux_inputs[P28_MUX_U5_ADCR1][P28_U5_ELD_SELECT]);

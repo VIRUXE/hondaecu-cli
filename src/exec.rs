@@ -493,9 +493,7 @@ impl<'a> Exec<'a> {
                 // is specified. Preserve the operands in that case.
                 if byte {
                     let divisor = self.read(&Arg::R(0), true, false);
-                    if divisor == 0 {
-                        self.cpu.cf = true;
-                    } else {
+                    if let Some(divisor) = std::num::NonZero::new(divisor) {
                         let dividend = self.cpu.a;
                         let quotient = dividend / divisor;
                         let remainder = dividend % divisor;
@@ -503,12 +501,12 @@ impl<'a> Exec<'a> {
                         self.write(&Arg::R(1), true, remainder);
                         self.cpu.cf = false;
                         self.set_zf(quotient, false);
+                    } else {
+                        self.cpu.cf = true;
                     }
                 } else {
                     let divisor = self.read(&Arg::Er(2), false, false) as u32;
-                    if divisor == 0 {
-                        self.cpu.cf = true;
-                    } else {
+                    if let Some(divisor) = std::num::NonZero::new(divisor) {
                         let dividend =
                             ((self.read(&Arg::Er(0), false, false) as u32) << 16)
                                 | self.cpu.a as u32;
@@ -519,6 +517,8 @@ impl<'a> Exec<'a> {
                         self.write(&Arg::Er(1), false, remainder as u16);
                         self.cpu.cf = false;
                         self.cpu.zf = quotient == 0;
+                    } else {
+                        self.cpu.cf = true;
                     }
                 }
             }
@@ -853,7 +853,8 @@ mod tests {
     #[test]
     fn step_charges_the_manuals_machine_cycles() {
         // (encoding, DD, ZF, DP, mnemonic, cycles)
-        let cases: &[(&[u8], bool, bool, u16, &str, u64)] = &[
+        type Case = (&'static [u8], bool, bool, u16, &'static str, u64);
+        let cases: &[Case] = &[
             (&[0x86, 0x34, 0x12], true, false, 0x0300, "ADD A, #N16", 6),
             (&[0x08], true, false, 0x0300, "ADD A, er0", 3),
             (&[0xF4, 0x40], false, false, 0x0300, "LB A, off N8", 4),
@@ -899,7 +900,8 @@ mod tests {
         const ON_CHIP: u16 = 0x0020; // LRB: page 1, bank at 0100h
         const OFF_CHIP: u16 = 0x00A0; // LRB: page 5, bank at 0500h
         // (encoding, LRB, DP, SSP, mnemonic, cycles)
-        let cases: &[(&[u8], u16, u16, u16, &str, u64)] = &[
+        type Case = (&'static [u8], u16, u16, u16, &'static str, u64);
+        let cases: &[Case] = &[
             (&[0xF2], ON_CHIP, 0x0300, 0x0400, "LB A, [DP]", 4),
             (&[0xF2], ON_CHIP, 0x4700, 0x0400, "LB A, [DP]", 6),
             (&[0xD2], ON_CHIP, 0x0300, 0x0400, "STB A, [DP]", 4),

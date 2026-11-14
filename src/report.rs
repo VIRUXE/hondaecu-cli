@@ -351,7 +351,7 @@ mod tests {
         assert!(out.contains(r#"q\" b\\ n\n t\t c\u0001 é"#), "{out}");
         // Raw newlines are only layout between tokens, never inside a string.
         for l in out.lines() {
-            assert_eq!(l.matches('"').count() - l.matches("\\\"").count() & 1, 0, "{l}");
+            assert_eq!((l.matches('"').count() - l.matches("\\\"").count()) & 1, 0, "{l}");
         }
         assert!(!out.contains('\t'));
         assert!(!out.contains('\u{1}'));

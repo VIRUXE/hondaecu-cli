@@ -251,7 +251,7 @@ impl ReplayEngine {
         let hz = crate::bus::CPU_HZ;
         let hx = |s: &str| u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
         let list = |s: Option<&String>| -> Vec<u16> {
-            s.map(|s| s.split(',').filter_map(|x| hx(x)).collect()).unwrap_or_default()
+            s.map(|s| s.split(',').filter_map(&hx).collect()).unwrap_or_default()
         };
 
         let mut bus = Bus::new();
@@ -340,7 +340,7 @@ impl ReplayEngine {
 
         let end = cpu.cycles + (secs * hz as f64) as u64;
         while cpu.cycles < end && !cpu.halted {
-            if let Some((a, v)) = force { if a < bus.ram.len() { bus.ram[a] = v; } }
+            if let Some((a, v)) = force && a < bus.ram.len() { bus.ram[a] = v; }
             let pc = cpu.pc;
             match mode {
                 "pchist" => { *hist.entry(pc).or_default() += 1; }
@@ -387,7 +387,7 @@ impl ReplayEngine {
             "pchist" => {
                 let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(25);
                 let mut v: Vec<_> = hist.into_iter().collect();
-                v.sort_by(|a, b| b.1.cmp(&a.1));
+                v.sort_by_key(|a| std::cmp::Reverse(a.1));
                 for (pc, c) in v.into_iter().take(n) { println!("PCHIST {pc:04X} {c}"); }
             }
             "snap" => {
@@ -751,7 +751,7 @@ impl ReplayEngine {
             "accel-stomp" => {
                 for i in 0..=50 {
                     let ms = i * 50;
-                    let is_stomp = i >= 10 && i <= 30;
+                    let is_stomp = (10..=30).contains(&i);
                     let tps = if is_stomp { 100.0 } else { 15.0 };
                     let map = if is_stomp { 98.0 } else { 38.0 };
                     let rpm = 2500.0 + (if is_stomp { (i - 10) as f64 * 150.0 } else { 0.0 });

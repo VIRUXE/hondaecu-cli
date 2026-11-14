@@ -947,7 +947,7 @@ fn no_iacv_traces_the_light_to_the_valve_current_input() {
     let text = &out[out.find("WHY THE LIGHT IS ON").expect("the section is printed")..];
     let levels = why_levels(text);
     assert!(levels.iter().any(|a| (0x3C52..=0x3C71).contains(a)), "{levels:04X?}\n{text}");
-    let last_stop = text.lines().filter(|l| l.trim_start().starts_with("stopped:")).last().unwrap_or("");
+    let last_stop = text.lines().rfind(|l| l.trim_start().starts_with("stopped:")).unwrap_or("");
     assert!(last_stop.contains("A/D result AI4, IACV coil current"), "{text}");
     // The section comes after the lines and adds none.
     assert!(out.find("NOT JUDGED").unwrap() < out.find("WHY THE LIGHT IS ON").unwrap());

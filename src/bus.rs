@@ -779,10 +779,10 @@ impl Bus {
     pub fn read_code_u8(&self, addr: u16) -> u8 {
         let idx = (addr as usize) & (ROM_SIZE - 1);
         let value = self.rom[idx];
-        if let Some(log) = self.access.as_deref() {
-            if log.on {
-                log.code.borrow_mut().push((addr, value));
-            }
+        if let Some(log) = self.access.as_deref()
+            && log.on
+        {
+            log.code.borrow_mut().push((addr, value));
         }
         value
     }

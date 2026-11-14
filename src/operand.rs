@@ -116,12 +116,11 @@ fn parse_arg(s: &str) -> Option<Arg> {
     }
 
     // Bit suffix: "<base>.<n>". Split from the right so "N16[X1].3" works.
-    if let Some((base, bit)) = s.rsplit_once('.') {
-        if bit.len() == 1 {
-            if let Some(n) = bit.chars().next().unwrap().to_digit(8) {
-                return Some(Arg::Bit(Box::new(parse_arg(base)?), n as u8));
-            }
-        }
+    if let Some((base, bit)) = s.rsplit_once('.')
+        && bit.len() == 1
+        && let Some(n) = bit.chars().next().unwrap().to_digit(8)
+    {
+        return Some(Arg::Bit(Box::new(parse_arg(base)?), n as u8));
     }
 
     // Immediates.
@@ -141,18 +140,18 @@ fn parse_arg(s: &str) -> Option<Arg> {
     }
 
     // Indexed: "N16[X1]", "S8[USP]", "N16[N8]".
-    if s.ends_with(']') {
-        if let Some(open) = s.find('[') {
-            let (disp, base) = (&s[..open], &s[open + 1..s.len() - 1]);
-            return Some(Arg::Mem(match (disp, base) {
-                ("S8", "USP") => Mem::IdxUsp,
-                ("N16", "N8") => Mem::IdxMemN8,
-                ("N16", "off N8") => Mem::IdxMemOff,
-                ("N16", b) => Mem::IdxReg(parse_reg(b)?),
-                ("N'16", b) => Mem::IdxRegAlt(parse_reg(b)?),
-                _ => return None,
-            }));
-        }
+    if s.ends_with(']')
+        && let Some(open) = s.find('[')
+    {
+        let (disp, base) = (&s[..open], &s[open + 1..s.len() - 1]);
+        return Some(Arg::Mem(match (disp, base) {
+            ("S8", "USP") => Mem::IdxUsp,
+            ("N16", "N8") => Mem::IdxMemN8,
+            ("N16", "off N8") => Mem::IdxMemOff,
+            ("N16", b) => Mem::IdxReg(parse_reg(b)?),
+            ("N'16", b) => Mem::IdxRegAlt(parse_reg(b)?),
+            _ => return None,
+        }));
     }
 
     // LRB-paged direct.

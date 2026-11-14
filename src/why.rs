@@ -51,7 +51,7 @@ const WRITERS: usize = 4;
 
 /// One executed instruction, as provenance remembers it. `index` is the
 /// instruction count after it (`Cpu::instructions`); 0 is "never".
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Stamp {
     pub pc: u16,
     pub index: u64,
@@ -64,12 +64,6 @@ pub struct Stamp {
     /// A byte write whose value came from the instruction itself (an
     /// immediate or a clear): it read no data and no register.
     pub constant: bool,
-}
-
-impl Default for Stamp {
-    fn default() -> Self {
-        Stamp { pc: 0, index: 0, cycles: 0, counted: false, op: "", constant: false }
-    }
 }
 
 impl Stamp {
@@ -339,10 +333,10 @@ impl Tracer {
             log.on = false;
         }
         let (mnemonic, dispatched) = result?;
-        if kept && dispatched {
-            if let Some(last) = self.ring.back_mut() {
-                last.interrupted = true;
-            }
+        if kept && dispatched
+            && let Some(last) = self.ring.back_mut()
+        {
+            last.interrupted = true;
         }
         if self.stop_at_index.is_some_and(|n| cpu.instructions >= n)
             || self.stop_at_cycles.is_some_and(|c| cpu.cycles >= c)
@@ -556,7 +550,7 @@ pub fn explain(rom: &[u8], setup: &Setup, result: &RunResult) -> Why {
     let first = traced_run(rom, setup, first);
     let is_recent = |w: &&LampWrite| w.stamp.cycles + recent >= until_cycles;
     let (start, what) = match (first.p1_lamp.as_ref().filter(is_recent), first.port_c_lamp.as_ref().filter(is_recent)) {
-        (Some(w), _) => (w.clone(), format!("set P1.4, the ROM's image of the lamp bit (82C55 port C bit 4)")),
+        (Some(w), _) => (w.clone(), "set P1.4, the ROM's image of the lamp bit (82C55 port C bit 4)".to_string()),
         (None, Some(w)) => (w.clone(), "wrote 82C55 port C with the lamp bit (bit 4) set".to_string()),
         (None, None) => {
             return empty(&format!(
@@ -569,7 +563,7 @@ pub fn explain(rom: &[u8], setup: &Setup, result: &RunResult) -> Why {
     );
     let ring = start.ring.unwrap_or_else(|| ring_at(rom, setup, start.stamp.index));
     let did = format!("{what}, at the last time before {until:.2} s");
-    walk(rom, setup, ring, from, Some(did), |rom, setup, index| ring_at(rom, setup, index))
+    walk(rom, setup, ring, from, Some(did), ring_at)
 }
 
 /// Candidates tried at one level before giving up on it.
@@ -1842,9 +1836,9 @@ mod tests {
         let clear = Stamp { op: "STB", ..stamp(0x0400, 0x05) };
         let sbr = Stamp { op: "SBR", ..stamp(0x51C5, 0x50) };
         let mut word = Read { addr: 0x214, value: 0x80, outside: 0, mask: 0xFF, stamps: Default::default() };
-        for b in 0..8 {
+        for (b, source) in word.stamps.iter_mut().enumerate() {
             let s = if b == 7 { sbr } else { clear };
-            word.stamps[b] = Source { written: s, origin: s, changed: s, origin_change: s };
+            *source = Source { written: s, origin: s, changed: s, origin_change: s };
         }
         ld.reads = vec![word];
         let shown = [&ld];

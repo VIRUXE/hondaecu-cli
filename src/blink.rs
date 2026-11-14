@@ -107,7 +107,7 @@ struct Reading {
 
 fn read(edges: &[(f64, bool)], from: f64, to: f64) -> Reading {
     let before = edges.iter().rposition(|e| e.0 <= from);
-    let mut lit = before.map_or(false, |i| edges[i].1);
+    let mut lit = before.is_some_and(|i| edges[i].1);
     // When the lamp last went dark; a lamp dark since power-on (the first
     // edge, or none) counts as having been dark forever.
     let mut dark_since = match before {

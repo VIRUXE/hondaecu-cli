@@ -258,7 +258,7 @@ impl EngineState {
         let half = self.half_tooth_count;
         self.half_tooth_count = (half + 1) % 48;
         let tooth = half / 2;
-        if half % 2 == 0 {
+        if half.is_multiple_of(2) {
             self.ckp_pulse_count += 1;
             irq |= bus.timer_capture_edge(P28_CKP_CAPTURE_TIMER);
         } else {

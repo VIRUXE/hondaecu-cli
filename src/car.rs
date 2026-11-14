@@ -62,11 +62,11 @@ pub fn file_preset(text: &str) -> Result<Option<&'static str>, String> {
     for (i, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.starts_with('#') { continue; }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim().eq_ignore_ascii_case("preset") {
-                let p = preset_value(value).map_err(|e| format!("line {}: {e}", i + 1))?;
-                found.get_or_insert(p);
-            }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("preset")
+        {
+            let p = preset_value(value).map_err(|e| format!("line {}: {e}", i + 1))?;
+            found.get_or_insert(p);
         }
     }
     Ok(found)

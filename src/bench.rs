@@ -256,11 +256,11 @@ impl Bench {
                 }
             }
 
-            if let (Some(b), Some(c)) = (self.bus.ppi.output(PORT_B), self.bus.ppi.output(PORT_C)) {
-                if self.log.board.last().map(|&(_, lb, lc)| (lb, lc)) != Some((b, c)) {
-                    let t = self.seconds();
-                    self.log.board.push((t, b, c));
-                }
+            if let (Some(b), Some(c)) = (self.bus.ppi.output(PORT_B), self.bus.ppi.output(PORT_C))
+                && self.log.board.last().map(|&(_, lb, lc)| (lb, lc)) != Some((b, c))
+            {
+                let t = self.seconds();
+                self.log.board.push((t, b, c));
             }
 
             if self.log.watchdog_starved_at.is_none() {

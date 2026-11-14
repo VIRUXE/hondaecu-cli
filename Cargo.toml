@@ -2,6 +2,7 @@
 name = "hondaecu-cli"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.100"
 authors = ["VIRUXE"]
 description = "A high-performance OKI MSM66207 virtual CPU emulator and ROM testing suite in Rust for Honda OBD1 ECUs"
 license = "Unlicense"

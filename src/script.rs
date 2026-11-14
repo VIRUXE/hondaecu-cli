@@ -119,10 +119,10 @@ impl FuelStop {
         if opens != self.opens {
             self.opens = opens;
             self.last_open = Some((engine_cycles, rpm));
-        } else if let Some((at, open_rpm)) = self.last_open {
-            if engine_cycles - at >= FUEL_STOP_CYCLES {
-                self.stopped_rpm = Some(open_rpm);
-            }
+        } else if let Some((at, open_rpm)) = self.last_open
+            && engine_cycles - at >= FUEL_STOP_CYCLES
+        {
+            self.stopped_rpm = Some(open_rpm);
         }
     }
 
