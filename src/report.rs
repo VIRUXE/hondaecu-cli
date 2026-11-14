@@ -127,6 +127,17 @@ fn section_json(s: &Section) -> String {
 
 /// `car_file` is the name of the car file used, if any.
 pub fn json(report: &Report, setup: &Setup, rom_name: &str, car_file: Option<&str>) -> String {
+    json_with_why(report, setup, rom_name, car_file, None)
+}
+
+/// `json`, with the `why_the_light_is_on` levels when the trace ran.
+pub fn json_with_why(
+    report: &Report,
+    setup: &Setup,
+    rom_name: &str,
+    car_file: Option<&str>,
+    why: Option<&crate::why::Why>,
+) -> String {
     let (verdict, reason) = match &report.verdict {
         Verdict::WorthBurning => ("worth_burning", "null".to_string()),
         Verdict::DoNotBurn(r) => ("do_not_burn", quote(r)),
@@ -153,9 +164,13 @@ pub fn json(report: &Report, setup: &Setup, rom_name: &str, car_file: Option<&st
     ));
     out.push_str(&format!("  \"codes\": [{}],\n", codes.join(", ")));
     out.push_str(&format!(
-        "  \"not_judged\": {}\n",
-        string_array(report.not_judged.iter().map(|s| s.to_string()))
+        "  \"not_judged\": {}{}\n",
+        string_array(report.not_judged.iter().map(|s| s.to_string())),
+        if why.is_some() { "," } else { "" }
     ));
+    if let Some(why) = why {
+        out.push_str(&format!("  \"why_the_light_is_on\": {}\n", crate::why::json_levels(why)));
+    }
     out.push_str("}\n");
     out
 }

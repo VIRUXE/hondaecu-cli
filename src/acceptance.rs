@@ -838,3 +838,88 @@ fn lyonnel_flashes_the_lamp_and_uses_it_as_a_shift_light_and_is_worth_burning() 
     assert_eq!(result.mil_first_lit_after_bulb_check, None);
     assert!(result.mil_lit_spans.is_empty());
 }
+// ---- why the light is on (`why.rs`) ----------------------------------------
+
+/// The level addresses of a `WHY THE LIGHT IS ON` text section, in order.
+fn why_levels(text: &str) -> Vec<u16> {
+    text.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("  ")?;
+            let (n, rest) = rest.split_once(". ")?;
+            n.parse::<u32>().ok()?;
+            u16::from_str_radix(rest.get(..4)?, 16).ok()
+        })
+        .collect()
+}
+
+/// `wanted` appears in `levels` in this order, others between allowed.
+fn in_order(levels: &[u16], wanted: &[u16]) -> bool {
+    let mut it = levels.iter();
+    wanted.iter().all(|w| it.any(|l| l == w))
+}
+
+#[test]
+#[cfg_attr(not(feature = "p30-rom"), ignore = "needs the stock P30 ROM: enable feature p30-rom")]
+fn stock_p30_on_a_p28_box_traces_the_light_to_the_missing_heartbeat() {
+    // docs/CHECK.md, "Why the light is on": the worked example. 42AEh sets
+    // the lamp bit because 218h.5 is set (4284h); 4AFAh set it from 214h;
+    // 51C5h stored fault 24 there; 2824h set the fault flag 9Ah.3 because
+    // the countdown 2E8h ran out, reloaded only when port A bit 2 changes.
+    let mut setup = preset("stock-p30");
+    setup.set("ecu", "p28").unwrap();
+    let bench = Bench::from_file(&p30_rom()).unwrap();
+    let rom = bench.bus.rom.clone();
+    let (result, report, _) = check_bench(bench, &setup);
+    assert!(result.mil_lit_at_end_of_drive);
+    let why = crate::why::explain(&rom, &setup, &result);
+    let text = crate::why::text_section(&why);
+    let levels = why_levels(&text);
+    assert!(in_order(&levels, &[0x42AE, 0x4AFA, 0x51C5, 0x2824]), "{levels:04X?}\n{text}");
+    let stop = why.levels.last().and_then(|l| l.stopped_because.clone()).unwrap_or_default();
+    assert!(stop.contains("0F00h bit 2") || stop.contains("2E8h"), "{text}");
+    assert!(stop.contains("knock-board heartbeat"), "{text}");
+    // The trace changes nothing it reports on.
+    assert!(matches!(&report.verdict, Verdict::DoNotBurn(_)), "{report:#?}");
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn no_iacv_traces_the_light_to_the_valve_current_input() {
+    // The whole command, with the JSON report. The chain reaches the IACV
+    // current check 0x3C52..0x3C71 and ends at the A/D result of AI4.
+    let json = std::env::temp_dir()
+        .join(format!("hondaecu-why-iacv-{}.json", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let args: Vec<String> =
+        ["check", &rom(), "--no-prompt", "--set", "iacv=none", "--report", &json].iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = crate::check::run(&args, &mut "".as_bytes(), false, &mut out, &mut err);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(status, 1, "the trace does not change the exit status\n{out}");
+    let text = &out[out.find("WHY THE LIGHT IS ON").expect("the section is printed")..];
+    let levels = why_levels(text);
+    assert!(levels.iter().any(|a| (0x3C52..=0x3C71).contains(a)), "{levels:04X?}\n{text}");
+    let last_stop = text.lines().filter(|l| l.trim_start().starts_with("stopped:")).last().unwrap_or("");
+    assert!(last_stop.contains("A/D result AI4, IACV coil current"), "{text}");
+    // The section comes after the lines and adds none.
+    assert!(out.find("NOT JUDGED").unwrap() < out.find("WHY THE LIGHT IS ON").unwrap());
+    let json = std::fs::read_to_string(&json).unwrap();
+    assert!(json.contains("\"why_the_light_is_on\": [") && json.contains("\"stopped_because\": \"the path reads an input"), "{json}");
+    assert!(json.contains("\"address\": \"3C71h\""), "{json}");
+}
+
+#[test]
+#[cfg_attr(not(feature = "p28-rom"), ignore = "needs the stock P28 ROM: enable feature p28-rom")]
+fn a_clean_stock_p28_run_has_no_trace() {
+    // The lamp is dark at the end of the drive: no section, and the bench
+    // never carried a tracer.
+    let (result, report, bench) = check_bench(Bench::from_file(&rom()).unwrap(), &preset("stock-p28-manual"));
+    assert_eq!(report.verdict, Verdict::WorthBurning, "{report:#?}");
+    assert!(!result.mil_lit_at_end_of_drive);
+    assert!(bench.tracer.is_none() && bench.bus.access.is_none());
+    let args: Vec<String> = ["check", &rom(), "--no-prompt"].iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(crate::check::run(&args, &mut "".as_bytes(), false, &mut out, &mut err), 0);
+    assert!(!String::from_utf8(out).unwrap().contains("WHY THE LIGHT"));
+}

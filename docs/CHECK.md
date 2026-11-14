@@ -18,7 +18,7 @@ observed to do; no result is a constant.
 ```
 hondaecu-cli check <rom.bin> [--ecu p28|p30] [--board-gearbox manual|automatic]
                              [--car <preset-name|file>] [--set key=value]...
-                             [--report <file>] [--no-prompt]
+                             [--report <file>] [--no-prompt] [--no-why]
 ```
 
 The ROM is opened and size-checked first: 32768 bytes, optionally followed by
@@ -315,6 +315,133 @@ blinked, and `blink::full_period` finds the cycle once it has been seen twice
 A problem always wins over a could-not-tell. A line's `ok` means only that
 what the script looked at looked right; the `NOT JUDGED` line says what it
 did not look at.
+
+## Why the light is on
+
+When the lamp is lit at the end of the drive (`mil_lit_at_end_of_drive`),
+the text report ends with a section `WHY THE LIGHT IS ON`, and the JSON
+report gains `why_the_light_is_on`, an array of levels (`at`, `address`,
+`instruction`, `did`, `path`, `followed`, `others`, `stopped_because`,
+`copy`). It answers "where does the ROM decide to light the lamp, and on
+what": the instruction that drove the lamp bit, then each cause behind it,
+with addresses, disassembly, values and times, back to an input from outside
+the CPU or a constant in the ROM. It is an **automatic trace**: at each level
+a rule of thumb picks what to follow, and the section says so. It adds no
+line, and it cannot change the verdict or the exit status. `--no-why` skips
+it. A run whose lamp is dark at the end costs nothing extra.
+
+`why.rs` holds it. It knows no ROM's addresses: it works on any image the
+emulator runs.
+
+### How it is traced
+
+**Provenance.** While a `Tracer` rides on the bench (`Bench::tracer`), the
+bus logs the data reads and writes of the instruction executing
+(`Bus::access`), and after each instruction the tracer records, for every bit
+of on-chip data memory (`0x0000..0x047F`), the instruction that last changed
+it, the one that last wrote it, and the last such write and change that was
+not the byte counting on itself (a `DEC`, a shift, an `XCHG`): for a counter,
+its last load. Times are ECU time; instructions are numbered by
+`Cpu::instructions`. Without a tracer the bench pays one test per instruction
+and the bus one per access; the plain `check` run is as fast as before.
+
+**The path.** Near a chosen instruction the tracer also keeps a ring of the
+last 512 instructions (`RING`): address, decoding context, whether a
+conditional branch was taken, the registers and flags it reads and writes
+(`registers`), and the data it read with each bit's provenance at that
+moment. The brief suggested 64; the IACV and fault-store chains below need
+the reads of a whole fault-store pass (a loop over a dozen fault bits) or of
+an IACV controller pass with two calls to a clamp routine, which do not fit
+in 64. Only the instructions before the chosen one are kept, so the cost is
+a few megabytes at most, not a whole run.
+
+**The walk.** The emulator is deterministic, so `explain` re-runs the same
+drive (same ROM, same car) and pauses at the instant it wants:
+
+1. The first run goes to the end of the last lit span (the start of the
+   read-out) and finds the last instruction that set bit 4 of P1, the ROM's
+   image of the lamp bit (82C55 port C bit 4), or failing that one that wrote
+   port C with bit 4 set, in the last second. The last *write* is used, not
+   the last change: a ROM that lit the lamp in the bulb check and keeps it
+   lit for a fault changes the bit at power-on and rewrites it every pass
+   after. That instruction is level 1.
+2. At each level the path into the instruction is cut to what belongs to it:
+   interrupt handlers that ran in between are left out (and a level inside a
+   handler stops at its entry); calls and returns are followed through.
+3. A backward **slice** marks (`*`) the instructions the level's instruction
+   depends on: one that writes a register, flag or byte still needed, and a
+   conditional branch whose other way could have avoided the path or changed
+   what it computed. Whether a branch matters is decided by following every
+   route of the code from its other way (`rejoins`): it does not matter when
+   all routes come back to the path without skipping a marked instruction or
+   setting a needed register; a route into `BRK` (a sanity check resetting
+   the CPU) does not count; inside a routine the path returns from, a return
+   goes back where the path returned.
+4. **What to follow** (`choose`). Among the data the marked instructions
+   read: an input from outside the CPU ends the chain (an external address,
+   an A/D result, the input pins of a port, the transition detectors, the
+   interrupt requests; named from the board model where it has a name).
+   Otherwise on-chip data, followed to its source: for a register of the
+   local bank (r0..r7, scratch) its last write, for anything else its last
+   change, and for a byte that counted on itself since, its last load. The
+   order: data written by another routine first, the routine's own
+   bookkeeping (written by code within 40h bytes of an instruction of the
+   path) after it, a write of a bare constant (a loop index set up) last;
+   within each, the read nearest the instruction first, then the most recent
+   source. Otherwise a ROM constant read by `LC`/`LCB`/`CMPC` ends the
+   chain. A pure copy (`MOV`/`L`/`ST` and nothing else marked) is shown but
+   does not count toward the depth.
+5. The next level re-runs to the instruction followed. A choice whose chain
+   ends without an input or a ROM constant is given up for the next
+   candidate (three per level, 24 re-runs in all), and the level says what
+   was tried. The walk stops at six levels.
+
+Every level prints the instruction and its time, what it did, up to twelve
+instructions before it (and up to six earlier marked ones), the reads and
+writes with resolved addresses, what was followed, and what else was read.
+`HONDAECU_WHY_DEBUG=1` prints every level tried, abandoned ones included, on
+standard error.
+
+### What it gave on the images at hand
+
+- **Stock P30 (mask 203) on a P28 box**: `42AEh MB P1.4, C` (218h.5 read at
+  `4284h`), `4AFAh SB 218h.5` (from 214h at `4AF3h`), `51C5h SBR 212h[X1]`
+  (fault 24 stored at 2.19 s; followed 9Ah bit 3 read at `4991h`),
+  `2824h MB 9Ah.3, C` at 0.16 s, stopped at the read of `0F00h` bit 2 at
+  `2800h`, the knock-board heartbeat. The level also lists 2E8h, "set by
+  2818h at 0.057 s, then counted on by itself": the countdown and its only
+  reload. This is the chain traced by hand.
+- **Stock P28 with `iacv = none`**: `42AEh`, `4AFAh`, `51C5h` (code 14),
+  `3C71h MB 99h.3, C` at 7.53 s (the IACV current check; followed 2BDh read
+  at `3C6Ch`), `28CCh STB A, 2BDh` (the IACV controller: the on-time clamped
+  at a limit; it first tried the target current 25Ah, whose source `31C8h`
+  leads nowhere), `0138h ST A, er2` in the timer-1 handler, stopped at the
+  A/D result of AI4, the IACV coil current.
+- **P07-225**: `38B3h MB P1.4, C`, `3EFEh` (216h.5), `44F3h` (fault stored
+  at 5.16 s in 212h bit 5), `358Bh MB 0B2h.1, C` at 0.04 s (from 22Fh bit 4),
+  `452Ah STB A, 22Fh`, stopped at the read of `0F00h`, 82C55 port A, as a
+  whole byte (`XORB A, #037h` between: bit 4 inverted).
+
+### Limits
+
+- The choice is a heuristic built on these three chains. The rejected
+  rules, for the record: the most recent change first followed the fault
+  store's own bookkeeping (0EAh) on the IACV image; a flag set by a bit
+  instruction first followed the IACV check's enable gate (`217h.5`, the end
+  of cranking) instead of its trigger. Gates and triggers both decide a
+  check; the trace prefers the last test before the decision. Where it goes
+  elsewhere, the "also read" list names the alternatives with their sources
+  so a person can follow another by hand.
+- Data passed in CPU registers (A, the flags) is followed only inside the
+  path; a value that sits in A across more than the ring is lost.
+- Writes the hardware makes (A/D results, timers, request flags) have no
+  instruction behind them: such reads are inputs or, for timers, timer
+  control, the serial unit and the PWM counters, are listed but not
+  followed. An interrupt's own stack frame is not attributed.
+- A whole-byte input names the byte; when the level was entered for one
+  bit, the stop says which bit that was, as a lead to check, not a finding.
+- The re-runs cost time: about 30 to 60 s more on top of the run on the
+  images above.
 
 ## Assumptions
 

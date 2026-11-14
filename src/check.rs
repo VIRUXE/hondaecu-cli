@@ -8,6 +8,7 @@ use crate::car::{file_preset, EcuModel, Setup, KEYS, PRESETS};
 use crate::report;
 use crate::script;
 use crate::verdict;
+use crate::why;
 
 pub const USAGE: &str = "\
 Usage: hondaecu-cli check <rom.bin> [options]
@@ -17,6 +18,7 @@ Usage: hondaecu-cli check <rom.bin> [options]
   --set key=value                    set one car value; may be repeated
   --report <file>                    also write the result as JSON
   --no-prompt                        never ask questions; anything not given takes its default
+  --no-why                           skip the trace of why the check-engine light is on
 Exit status: 0 worth burning, 1 do not burn, 2 bad command line or unreadable file, 3 could not tell.";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +28,7 @@ pub struct Args {
     pub sets: Vec<(String, String)>,
     pub report: Option<String>,
     pub no_prompt: bool,
+    pub no_why: bool,
 }
 
 /// `args[0]` is the command name (`check` or `test`) and is skipped.
@@ -35,6 +38,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut sets = Vec::new();
     let mut report = None;
     let mut no_prompt = false;
+    let mut no_why = false;
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |flag: &str| {
@@ -46,6 +50,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--car" => car = Some(value("--car")?),
             "--report" => report = Some(value("--report")?),
             "--no-prompt" => no_prompt = true,
+            "--no-why" => no_why = true,
             "--set" => {
                 let v = value("--set")?;
                 let (k, val) = v
@@ -62,7 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         }
     }
     let rom = rom.ok_or_else(|| "no ROM file given".to_string())?;
-    Ok(Args { rom, car, sets, report, no_prompt })
+    Ok(Args { rom, car, sets, report, no_prompt, no_why })
 }
 
 /// The default shown at the preset question (asked only without `--car`):
@@ -350,13 +355,27 @@ pub fn run(
         let _ = writeln!(out, "Running the ROM (about half a minute)...");
     }
 
+    let rom = bench.bus.rom.clone();
     let result = script::run(&mut bench, &setup);
     let report = verdict::judge(&result, &setup);
+    // Only a lamp lit at the end of the drive is traced; the trace re-runs
+    // the drive and cannot change the verdict.
+    let trace = result.mil_lit_at_end_of_drive && !args.no_why;
+    if trace && interactive {
+        let _ = writeln!(out, "The check-engine light is on at the end: tracing why (about a minute more)...");
+    }
+    let why = trace.then(|| why::explain(&rom, &setup, &result));
     let name = rom_name(&args.rom);
     let car_file = car_file_name(&args);
-    let _ = write!(out, "{}", report::text(&report, &setup, &name, car_file.as_deref()));
+    let mut text = report::text(&report, &setup, &name, car_file.as_deref());
+    if let Some(why) = &why {
+        text.push('\n');
+        text.push_str(&why::text_section(why));
+    }
+    let _ = write!(out, "{text}");
     if let Some(path) = &args.report {
-        if let Err(e) = std::fs::write(path, report::json(&report, &setup, &name, car_file.as_deref())) {
+        let json = report::json_with_why(&report, &setup, &name, car_file.as_deref(), why.as_ref());
+        if let Err(e) = std::fs::write(path, json) {
             let _ = writeln!(err, "cannot write report {path}: {e}");
             status = 2;
         }
@@ -514,6 +533,13 @@ mod tests {
         let json = std::fs::read_to_string(&json).unwrap();
         assert!(json.contains("\"vtec\": \"yes\"") && json.contains("\"gearbox\": \"manual\""));
         assert!(json.contains("\"knock_sensor\": \"yes\""));
+    }
+
+    #[test]
+    fn no_why_is_a_flag_and_off_by_default() {
+        assert!(!parse_args(&strings(&["check", "rom.bin"])).unwrap().no_why);
+        assert!(parse_args(&strings(&["check", "rom.bin", "--no-why"])).unwrap().no_why);
+        assert!(USAGE.contains("--no-why"));
     }
 
     #[test]

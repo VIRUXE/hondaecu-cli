@@ -147,7 +147,7 @@ const P28_PPI_REGISTER_SHIFT: u32 = 12;
 pub const P28_PPI_A_ACTIVE_LOW: u8 = 0x38;
 
 /// Register index of an external data address that selects the P28 82C55.
-fn p28_ppi_register(addr: u16) -> Option<u8> {
+pub fn p28_ppi_register(addr: u16) -> Option<u8> {
     (addr & P28_PPI_SELECT_LOW == 0).then_some(((addr >> P28_PPI_REGISTER_SHIFT) & 0x03) as u8)
 }
 
@@ -573,6 +573,50 @@ pub struct Bus {
     // Serial Datalogging UART Buffers
     pub serial_rx_queue: Vec<u8>,
     pub serial_tx_queue: Vec<u8>,
+
+    /// The data accesses of the instruction being executed, kept only while
+    /// `why.rs` traces a run (`AccessLog::on`). `None` the rest of the time:
+    /// then every access pays one test of this field and nothing else.
+    pub access: Option<Box<AccessLog>>,
+}
+
+/// One data read seen by `Bus::access`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataRead {
+    pub addr: u16,
+    pub value: u8,
+    /// Bits of the value that come from outside the CPU's own writes: all of
+    /// an external read, an A/D result, a timer or a request flag; the input
+    /// pins of a port; none of plain RAM (`Bus::outside_bits`).
+    pub outside: u8,
+}
+
+/// One data write seen by `Bus::access`. `old` is 0 for an external address.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataWrite {
+    pub addr: u16,
+    pub old: u8,
+    pub new: u8,
+}
+
+/// The accesses of one instruction. Observation only: recording changes no
+/// value read or written.
+#[derive(Debug, Default)]
+pub struct AccessLog {
+    pub on: bool,
+    pub reads: Vec<DataRead>,
+    pub writes: Vec<DataWrite>,
+    /// Code-space reads, instruction fetches included (`read_code_u8` takes
+    /// `&self`, hence the cell).
+    pub code: std::cell::RefCell<Vec<(u16, u8)>>,
+}
+
+impl AccessLog {
+    pub fn clear(&mut self) {
+        self.reads.clear();
+        self.writes.clear();
+        self.code.get_mut().clear();
+    }
 }
 
 impl Bus {
@@ -633,6 +677,7 @@ impl Bus {
             adc_cycles_remaining: None,
             serial_rx_queue: Vec::new(),
             serial_tx_queue: Vec::new(),
+            access: None,
         };
         // Board-configuration inputs. Each is a pair of resistor positions,
         // one to +5 V and one to ground, and a board fits a link, a single
@@ -705,7 +750,13 @@ impl Bus {
     // Code Space Read (ROM)
     pub fn read_code_u8(&self, addr: u16) -> u8 {
         let idx = (addr as usize) & (ROM_SIZE - 1);
-        self.rom[idx]
+        let value = self.rom[idx];
+        if let Some(log) = self.access.as_deref() {
+            if log.on {
+                log.code.borrow_mut().push((addr, value));
+            }
+        }
+        value
     }
 
     pub fn read_code_u16(&self, addr: u16) -> u16 {
@@ -716,6 +767,37 @@ impl Bus {
 
     // Data Space Read (RAM & SFRs)
     pub fn read_data_u8(&mut self, addr: u16) -> u8 {
+        let value = self.read_data_u8_untraced(addr);
+        if self.access.as_deref().is_some_and(|log| log.on) {
+            let outside = self.outside_bits(addr);
+            if let Some(log) = self.access.as_deref_mut() {
+                log.reads.push(DataRead { addr, value, outside });
+            }
+        }
+        value
+    }
+
+    /// Bits of a data byte that something other than the CPU's own writes
+    /// decides, for `DataRead::outside`. Reads registers only.
+    pub fn outside_bits(&self, addr: u16) -> u8 {
+        if addr >= EXTERNAL_DATA_START {
+            return 0xFF;
+        }
+        if let Some(&(_, mode, sf)) = PORTS.iter().find(|(d, _, _)| *d == addr) {
+            // Output bits read back their own latch; the rest are pins or a
+            // peripheral.
+            let sf_bits = sf.map_or(0, |a| self.ram[a as usize]);
+            return !self.ram[mode as usize] | sf_bits;
+        }
+        match addr {
+            // IRQ request flags, the timers and their control and transition
+            // registers, the serial unit, the A/D results, the PWM counters.
+            0x18..=0x19 | 0x30..=0x47 | 0x50..=0x57 | 0x60..=0x6F | 0x70..=0x71 | 0x74..=0x75 => 0xFF,
+            _ => 0,
+        }
+    }
+
+    fn read_data_u8_untraced(&mut self, addr: u16) -> u8 {
         if addr >= EXTERNAL_DATA_START {
             return self.read_external(addr);
         }
@@ -1116,11 +1198,17 @@ impl Bus {
         }
 
         if addr >= EXTERNAL_DATA_START {
+            if let Some(log) = self.access.as_deref_mut().filter(|log| log.on) {
+                log.writes.push(DataWrite { addr, old: 0, new: val });
+            }
             self.write_external(addr, val);
             return;
         }
         let idx = addr as usize;
         let old = self.ram[idx];
+        if let Some(log) = self.access.as_deref_mut().filter(|log| log.on) {
+            log.writes.push(DataWrite { addr, old, new: val });
+        }
         self.ram[idx] = val;
 
         // SFR side-effects

@@ -58,7 +58,21 @@ pub fn step_machine_dispatched(
     engine: &mut EngineState,
     crank: bool,
 ) -> Result<(&'static str, bool), Stop> {
+    step_machine_with(cpu, bus, engine, crank, |_, _, _, _| {})
+}
+
+/// `step_machine_dispatched`, calling `after_exec` with the instruction's
+/// address and decoding once it has executed and before timers or
+/// interrupts run. `why.rs` observes through it; it must change nothing.
+pub fn step_machine_with(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    engine: &mut EngineState,
+    crank: bool,
+    after_exec: impl FnOnce(&mut Cpu, &mut Bus, u16, &crate::decoder::Decoded),
+) -> Result<(&'static str, bool), Stop> {
     let before = cpu.cycles;
+    let pc = cpu.pc;
     let decoded = match exec::step(cpu, bus) {
         Ok(decoded) => decoded,
         Err(error) => {
@@ -66,6 +80,7 @@ pub fn step_machine_dispatched(
             return Err(error.into());
         }
     };
+    after_exec(cpu, bus, pc, &decoded);
     let mut irq = bus.tick_timers((cpu.cycles - before) as u32);
     if crank {
         irq |= engine.check_distributor_pulses(bus, cpu.cycles, CPU_HZ);
@@ -158,6 +173,9 @@ pub struct Bench {
     pub bus: Bus,
     pub engine: EngineState,
     pub log: RunLog,
+    /// Set only by `why.rs` while it re-runs a drive: records where data
+    /// came from and the last instructions, and can pause the run.
+    pub tracer: Option<Box<crate::why::Tracer>>,
 }
 
 impl Bench {
@@ -168,7 +186,7 @@ impl Bench {
         bus.rom.copy_from_slice(rom);
         let mut cpu = Cpu::new();
         cpu.pc = bus.read_code_u16(0x0000);
-        Bench { cpu, bus, engine: EngineState::new(), log: RunLog::default() }
+        Bench { cpu, bus, engine: EngineState::new(), log: RunLog::default(), tracer: None }
     }
 
     /// Same file rules as `Bus::load_rom_file`.
@@ -203,7 +221,18 @@ impl Bench {
         while self.cpu.cycles < end {
             let pc = self.cpu.pc;
             let crank = self.engine.rpm > 0.0;
-            match step_machine(&mut self.cpu, &mut self.bus, &mut self.engine, crank) {
+            let stepped = match self.tracer.as_deref_mut() {
+                None => step_machine(&mut self.cpu, &mut self.bus, &mut self.engine, crank),
+                Some(tracer) => {
+                    if tracer.paused {
+                        // The instant the trace wanted is reached: the rest
+                        // of the drive runs no instruction.
+                        return true;
+                    }
+                    tracer.step(&mut self.cpu, &mut self.bus, &mut self.engine, crank)
+                }
+            };
+            match stepped {
                 Ok(mnemonic) => {
                     if mnemonic == "BRK" {
                         let t = self.seconds();

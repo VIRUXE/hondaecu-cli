@@ -13,6 +13,7 @@ mod blink;
 mod script;
 mod verdict;
 mod report;
+mod why;
 mod ppi82c55;
 mod engine;
 mod interpreter;
@@ -47,7 +48,7 @@ fn print_usage() {
     println!("Usage:");
     println!("  hondaecu-cli check <rom.bin> [options]                    Run the ROM on a described car and say if it is worth burning");
     println!("      options: --ecu p28|p30  --board-gearbox manual|automatic  --car <preset|file>");
-    println!("               --set key=value  --report <file>  --no-prompt   (`test` does the same)");
+    println!("               --set key=value  --report <file>  --no-prompt  --no-why   (`test` does the same)");
     println!("      exit status: 0 worth burning, 1 do not burn, 2 bad command line or file, 3 could not tell");
     println!("  hondaecu-cli datalog <rom.bin> [port]                     Start live serial datalogging TCP server (Port 38400)");
     println!("  hondaecu-cli replay <rom.bin> <log.csv|preset> [out.csv]  Replay CSV datalog / engine scenario through ECU");
