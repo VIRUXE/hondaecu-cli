@@ -777,8 +777,9 @@ compatibility and real-time pacing are not guaranteed.
 
 You only need this to work on the code, or to run it on a computer the
 [releases](https://github.com/VIRUXE/hondaecu-cli/releases) have no file for.
-It needs [Rust](https://www.rust-lang.org/tools/install) and nothing else; the
-project is developed with Rust 1.94.
+It needs [Rust](https://www.rust-lang.org/tools/install) and nothing else. The
+releases are built with the latest stable Rust; 1.94 or newer is known to
+work.
 
 ```bash
 git clone https://github.com/VIRUXE/hondaecu-cli.git
