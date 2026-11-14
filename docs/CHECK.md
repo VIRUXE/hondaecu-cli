@@ -457,8 +457,18 @@ standard error.
   instruction behind them: such reads are inputs or, for timers, timer
   control, the serial unit and the PWM counters, are listed but not
   followed. An interrupt's own stack frame is not attributed.
+- A byte read whole is followed to the byte's last change (the bit with
+  the latest source decides). A bit is named only when that change was a bit
+  instruction, which changed that bit alone: "214h (= 80h), read whole at
+  4AF3h; the last of its bits to change was bit 7, 1 at that read, set by
+  51C5h". A byte last written whole (a load, a store, a countdown) names
+  none: "2E8h (= 01h), read at 5210h, set by 2818h at 0.057 s, then counted
+  on by itself". Until 2026-11 every byte read whole named the bit the
+  search landed on, "(= 01h; its bit 1 is the one followed)", although for a
+  whole write that bit is arbitrary and here was 0 in the value shown.
 - A whole-byte input names the byte; when the level was entered for one
-  bit, the stop says which bit that was, as a lead to check, not a finding.
+  named bit, the stop says which bit that was, as a lead to check, not a
+  finding.
 - The re-runs cost time: about 30 to 60 s more on top of the run on the
   images above.
 

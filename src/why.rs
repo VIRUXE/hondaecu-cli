@@ -675,7 +675,7 @@ impl<F: FnMut(&[u8], &Setup, u64) -> Vec<Step>> Walker<'_, F> {
                         tried.push(format!("{} (the re-run did not reach {:04X}h again)", c.name(), c.follow.pc));
                         continue;
                     }
-                    let entered = (c.addr, c.bit.or(c.last_bit));
+                    let entered = (c.addr, c.bit_named());
                     let (sub, outcome) = self.descend(next, Some(c.changed_text()), entered, depth_after, visited);
                     if outcome == Outcome::Answered {
                         found = Some((c.clone(), sub, outcome));
@@ -821,7 +821,9 @@ pub struct Candidate {
     pub written: Stamp,
     pub changed: Stamp,
     pub follow: Stamp,
-    /// For a whole byte, the bit whose source is followed.
+    /// For a whole byte, the bit whose source is followed: the one with
+    /// the latest source, so that source is the byte's last change. Named
+    /// only when that change was a bit instruction (`bit_named`).
     pub last_bit: Option<u8>,
 }
 
@@ -834,10 +836,33 @@ impl Candidate {
         } else {
             format!("{:03X}h", self.addr)
         };
-        match (self.bit, self.last_bit) {
-            (Some(b), _) => format!("{place} bit {b} (= {})", (self.value >> b) & 1),
-            (None, Some(b)) => format!("{place} (= {:02X}h; its bit {b} is the one followed)", self.value),
-            (None, None) => format!("{place} (= {:02X}h)", self.value),
+        match self.bit {
+            Some(b) => format!("{place} bit {b} (= {})", (self.value >> b) & 1),
+            None => format!("{place} (= {:02X}h)", self.value),
+        }
+    }
+
+    /// The bit worth naming: the one the instruction tested, or, for a byte
+    /// read whole, the bit whose change is the source followed when a bit
+    /// instruction made it (that change touched this bit alone) and nothing
+    /// counted on the byte since. A byte written whole has no bit of its
+    /// own to name: every bit came from that write, and which one the
+    /// search happened to land on (`last_bit`) means nothing.
+    fn bit_named(&self) -> Option<u8> {
+        self.bit.or(self.last_bit.filter(|_| is_bit_write(self.follow.op) && !self.counting()))
+    }
+
+    /// The name and where it was read; for a byte read whole whose last
+    /// change was one bit, which bit and its value at the read.
+    fn read_text(&self) -> String {
+        match (self.bit, self.bit_named()) {
+            (None, Some(b)) => format!(
+                "{}, read whole at {:04X}h; the last of its bits to change was bit {b}, {} at that read",
+                self.name(),
+                self.at_pc,
+                (self.value >> b) & 1
+            ),
+            _ => format!("{}, read at {:04X}h", self.name(), self.at_pc),
         }
     }
 
@@ -872,7 +897,7 @@ impl Candidate {
             Kind::OnChip if !self.follow.is_set() => {
                 format!("{}, read at {:04X}h, not written since power-on", self.name(), self.at_pc)
             }
-            Kind::OnChip => format!("{}, read at {:04X}h, {}", self.name(), self.at_pc, self.source()),
+            Kind::OnChip => format!("{}, {}", self.read_text(), self.source()),
             Kind::Input => {
                 let board = board_name(self.addr, self.bit).map_or(String::new(), |n| format!(": {n}"));
                 format!("{}, read at {:04X}h, from outside the CPU{board}", self.name(), self.at_pc)
@@ -882,12 +907,12 @@ impl Candidate {
     }
 
     fn follow_text(&self) -> String {
-        format!("{}, read at {:04X}h, {}", self.name(), self.at_pc, self.source())
+        format!("{}, {}", self.read_text(), self.source())
     }
 
     /// What the next level's instruction did, said from this level.
     fn changed_text(&self) -> String {
-        let what = match self.bit.or(self.last_bit) {
+        let what = match self.bit_named() {
             Some(b) => format!("{:03X}h bit {b}", self.addr),
             None => format!("{:03X}h", self.addr),
         };
@@ -1782,6 +1807,57 @@ mod tests {
             }
             Decision::Follow(_) => panic!("an input on the path must end the chain"),
         }
+    }
+
+    #[test]
+    fn a_byte_read_whole_names_a_bit_only_when_one_bit_changed_last() {
+        // The P30 countdown 2E8h: loaded with 0Ah by 2818h, counted down by
+        // 5210h to 01h, then read whole. Bits 1 and 3 were last changed by
+        // counting and came from the load; bit 0 has no load behind it. The
+        // search lands on bit 1, which is 0 in the 01h read: naming it said
+        // "2E8h (= 01h; its bit 1 is the one followed)". The load wrote the
+        // whole byte, so no bit is named.
+        let load = Stamp { op: "MOVB", ..stamp(0x2818, 0x10) };
+        let dec = Stamp { op: "DEC", counted: true, ..stamp(0x5210, 0x60) };
+        let mut ld = step(3, 0x2003, "LB", 0, REG_A | REG_Z);
+        let mut countdown = Read { addr: 0x2E8, value: 0x01, outside: 0, mask: 0xFF, stamps: Default::default() };
+        for b in [0, 1, 3] {
+            let origin = if b == 0 { Stamp::default() } else { load };
+            countdown.stamps[b] = Source { written: dec, origin, changed: dec, origin_change: origin };
+        }
+        ld.reads = vec![countdown];
+        let shown = [&ld];
+        let c = &candidates(&shown, &[true])[0];
+        assert_eq!((c.addr, c.bit, c.last_bit, c.follow.pc), (0x2E8, None, Some(1), 0x2818));
+        assert_eq!(c.bit_named(), None);
+        let text = c.describe();
+        assert!(text.starts_with("2E8h (= 01h), read at 2003h, set by 2818h at "), "{text}");
+        assert!(text.contains(", then counted on by itself (last at 5210h, "), "{text}");
+        assert!(!text.contains("bit"), "{text}");
+        assert_eq!(c.changed_text(), "last loaded 2E8h; it counted on by itself from there to the value read");
+
+        // The fault word 214h = 80h read whole, its bit 7 set by SBR 51C5h
+        // after the rest of the byte was cleared by a store: that bit is
+        // the byte's last change, and it is named with its value.
+        let clear = Stamp { op: "STB", ..stamp(0x0400, 0x05) };
+        let sbr = Stamp { op: "SBR", ..stamp(0x51C5, 0x50) };
+        let mut word = Read { addr: 0x214, value: 0x80, outside: 0, mask: 0xFF, stamps: Default::default() };
+        for b in 0..8 {
+            let s = if b == 7 { sbr } else { clear };
+            word.stamps[b] = Source { written: s, origin: s, changed: s, origin_change: s };
+        }
+        ld.reads = vec![word];
+        let shown = [&ld];
+        let c = &candidates(&shown, &[true])[0];
+        assert_eq!((c.bit, c.last_bit, c.bit_named()), (None, Some(7), Some(7)));
+        let text = c.describe();
+        assert!(
+            text.starts_with(
+                "214h (= 80h), read whole at 2003h; the last of its bits to change was bit 7, 1 at that read, set by 51C5h at "
+            ),
+            "{text}"
+        );
+        assert_eq!(c.changed_text(), "last set 214h bit 7 before it was read");
     }
 
     #[test]

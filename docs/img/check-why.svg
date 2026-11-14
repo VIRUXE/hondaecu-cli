@@ -36,11 +36,11 @@
 <text x="18" y="619" xml:space="preserve" style="white-space:pre" textLength="296.4" lengthAdjust="spacingAndGlyphs">  2. 4AFAh  SB off 018h.5   at 2.193 s</text>
 <text x="18" y="637" xml:space="preserve" style="white-space:pre" textLength="335.4" lengthAdjust="spacingAndGlyphs">     last set 218h bit 5 before it was read</text>
 <text x="18" y="655" xml:space="preserve" style="white-space:pre" textLength="23.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681">...</tspan></text>
-<text x="18" y="673" xml:space="preserve" style="white-space:pre" textLength="764.4" lengthAdjust="spacingAndGlyphs">     followed: 214h (= 80h; its bit 7 is the one followed), read at 4AF3h, set by 51C5h at 2.192 s</text>
+<text x="18" y="673" xml:space="preserve" style="white-space:pre" textLength="1021.8" lengthAdjust="spacingAndGlyphs">     followed: 214h (= 80h), read whole at 4AF3h; the last of its bits to change was bit 7, 1 at that read, set by 51C5h at 2.192 s</text>
 <text x="18" y="709" xml:space="preserve" style="white-space:pre" textLength="304.2" lengthAdjust="spacingAndGlyphs">  3. 51C5h  SBR 00212h[X1]   at 2.192 s</text>
 <text x="18" y="727" xml:space="preserve" style="white-space:pre" textLength="335.4" lengthAdjust="spacingAndGlyphs">     last set 214h bit 7 before it was read</text>
 <text x="18" y="745" xml:space="preserve" style="white-space:pre" textLength="23.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681">...</tspan></text>
-<text x="18" y="763" xml:space="preserve" style="white-space:pre" textLength="764.4" lengthAdjust="spacingAndGlyphs">     followed: 09Ah (= 08h; its bit 3 is the one followed), read at 4991h, set by 2824h at 0.160 s</text>
+<text x="18" y="763" xml:space="preserve" style="white-space:pre" textLength="1021.8" lengthAdjust="spacingAndGlyphs">     followed: 09Ah (= 08h), read whole at 4991h; the last of its bits to change was bit 3, 1 at that read, set by 2824h at 0.160 s</text>
 <text x="18" y="799" xml:space="preserve" style="white-space:pre" textLength="288.6" lengthAdjust="spacingAndGlyphs">  4. 2824h  MB 09Ah.3, C   at 0.160 s</text>
 <text x="18" y="817" xml:space="preserve" style="white-space:pre" textLength="335.4" lengthAdjust="spacingAndGlyphs">     last set 09Ah bit 3 before it was read</text>
 <text x="18" y="835" xml:space="preserve" style="white-space:pre" textLength="23.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681">...</tspan></text>

@@ -183,7 +183,7 @@ WHY THE LIGHT IS ON (automatic trace: at each level the program picks what to fo
       * 4AF5h  AND A, #014F5h
       * 4AF8h  JEQ 04AFDh                   not taken
       > 4AFAh  SB off 018h.5                          wrote 218h:40->60
-     followed: 214h (= 80h; its bit 7 is the one followed), read at 4AF3h, set by 51C5h at 2.192 s
+     followed: 214h (= 80h), read whole at 4AF3h; the last of its bits to change was bit 7, 1 at that read, set by 51C5h at 2.192 s
 
   3. 51C5h  SBR 00212h[X1]   at 2.192 s
      last set 214h bit 7 before it was read
@@ -209,12 +209,12 @@ WHY THE LIGHT IS ON (automatic trace: at each level the program picks what to fo
       * 51C0h  LB A, r1                               read 209h=07
         51C1h  SBR 00112h[X1]                         wrote 114h:00->80
       > 51C5h  SBR 00212h[X1]                         wrote 214h:00->80
-     followed: 09Ah (= 08h; its bit 3 is the one followed), read at 4991h, set by 2824h at 0.160 s
+     followed: 09Ah (= 08h), read whole at 4991h; the last of its bits to change was bit 3, 1 at that read, set by 2824h at 0.160 s
      also read:
        - ROM 6CADh (= 18h), read at 4A62h, a constant in the ROM
-       - 0EAh (= 14h; its bit 2 is the one followed), read at 4A3Ch, set by 4A41h at 1.680 s
-       - 2C1h (= 00h; its bit 0 is the one followed), read at 49CAh, set by 4A3Bh at 1.680 s, then counted on by itself (last at 5210h, 2.188 s)
-       - 2A7h (= 14h; its bit 2 is the one followed), read at 49C3h, set by 49D1h at 0.166 s
+       - 0EAh (= 14h), read at 4A3Ch, set by 4A41h at 1.680 s
+       - 2C1h (= 00h), read at 49CAh, set by 4A3Bh at 1.680 s, then counted on by itself (last at 5210h, 2.188 s)
+       - 2A7h (= 14h), read at 49C3h, set by 49D1h at 0.166 s
 
   4. 2824h  MB 09Ah.3, C   at 0.160 s
      last set 09Ah bit 3 before it was read
@@ -245,8 +245,8 @@ WHY THE LIGHT IS ON (automatic trace: at each level the program picks what to fo
       > 2824h  MB 09Ah.3, C                           wrote 09Ah:00->08
      also read:
        - 227h bit 6 (= 1), read at 27F7h, set by 556Eh at 0.038 s
-       - 2E8h (= 01h; its bit 1 is the one followed), read at 5210h, set by 2818h at 0.057 s, then counted on by itself (last at 5210h, 0.149 s)
-       - 0CEh (= 05h; its bit 0 is the one followed), read at 268Ch, set by 2692h at 0.149 s, then counted on by itself (last at 0142h, 0.159 s)
+       - 2E8h (= 01h), read at 5210h, set by 2818h at 0.057 s, then counted on by itself (last at 5210h, 0.149 s)
+       - 0CEh (= 05h), read at 268Ch, set by 2692h at 0.149 s, then counted on by itself (last at 0142h, 0.159 s)
      stopped: the path reads an input: 0F00h bit 2 (= 1), read at 2800h, from outside the CPU: 82C55 port A bit 2, knock-board heartbeat on connector FC1 (pull-up only with no knock board).
 ```
 
